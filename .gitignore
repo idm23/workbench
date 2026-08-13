@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Workbench application data. The SQLite database lives here so that a clone is
+# self-contained — no external path to create or remember — while staying out
+# of version control.
+data/
