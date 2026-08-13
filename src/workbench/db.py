@@ -2,14 +2,12 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import cache
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from .config import database_url, ensure_data_dir
-
-_engine: Engine | None = None
-_session_factory: sessionmaker[Session] | None = None
+from workbench.config import database_url, ensure_data_dir
 
 
 def _configure_sqlite(dbapi_connection, _connection_record) -> None:
@@ -36,19 +34,20 @@ def make_engine(url: str) -> Engine:
     return engine
 
 
+@cache
 def get_engine() -> Engine:
-    global _engine
-    if _engine is None:
-        ensure_data_dir()
-        _engine = make_engine(database_url())
-    return _engine
+    """The process-wide engine, built once on first use.
+
+    Memoised via functools.cache rather than a module-level variable so there
+    is no mutable state at import time and no reassignment to manage.
+    """
+    ensure_data_dir()
+    return make_engine(database_url())
 
 
+@cache
 def get_session_factory() -> sessionmaker[Session]:
-    global _session_factory
-    if _session_factory is None:
-        _session_factory = sessionmaker(bind=get_engine(), expire_on_commit=False)
-    return _session_factory
+    return sessionmaker(bind=get_engine(), expire_on_commit=False)
 
 
 @contextmanager

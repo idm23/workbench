@@ -45,7 +45,7 @@ class User(Base):
         DateTime(timezone=True), default=_utcnow
     )
 
-    projects: Mapped[list["Project"]] = relationship(
+    projects: Mapped[list[Project]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         order_by="Project.created_at",
@@ -81,7 +81,7 @@ class Project(Base):
         DateTime(timezone=True), default=_utcnow
     )
 
-    user: Mapped["User"] = relationship(back_populates="projects")
+    user: Mapped[User] = relationship(back_populates="projects")
 
     def __repr__(self) -> str:
         return f"<Project id={self.id} {self.owner}/{self.repo}>"
