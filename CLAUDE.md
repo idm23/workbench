@@ -6,9 +6,38 @@ Claude agent — with a written summary either way.
 
 Runs on an always-on Ubuntu box, reachable only over Tailscale.
 
-> **Status: nothing is built yet.** The repo currently contains this design doc, the
-> server conventions in `docs/server-conventions.md`, and a static placeholder page in
-> `www/`. See `README.md` for what is actually live.
+> **Status: early.** Users and their GitHub-backed projects exist, served by a FastAPI
+> app installed with `./install.sh`. Tasks, runs, worktrees, and agents do not exist
+> yet. See `README.md` for what is actually live.
+
+## Reproducibility is a project goal
+
+A fresh Ubuntu Server 26.04 machine, a `git clone`, and `./install.sh` must produce a
+running service. Nothing else. If a step is needed, it belongs in that script rather
+than in a document — the bar is that this repo could be handed to someone with a spare
+machine and work without a conversation.
+
+Two consequences that shaped real decisions:
+
+- **Alembic from the start**, not `create_all()`. The alternative meant "delete the
+  database when the schema changes", which is exactly the kind of undocumented manual
+  step this rule exists to prevent.
+- **Application data lives in `data/` inside the repo**, not `/var/lib/workbench`. An
+  external path has to be created, permissioned, and remembered, and none of that
+  survives a clone onto a new machine. It is gitignored, so pulling never touches it.
+
+The claim is kept honest by `scripts/test_fresh_install.py`, which provisions a clean
+Ubuntu container, runs the install, drives the app over HTTP, and re-runs the install to
+prove it repeats. A setup step that creeps outside `install.sh` makes that test fail.
+
+Two things are deliberately *not* automated, and are decisions rather than oversights:
+
+- **Joining a Tailscale network.** It needs a browser login against an account the
+  script cannot know about. `install.sh` finishes with a working service on localhost
+  and prints the two commands to expose it.
+- **A dedicated `workbench` service user.** The service currently runs as whoever ran
+  the installer. An unprivileged account only starts bounding anything once agents are
+  executing model-authored shell commands, so it belongs to that slice.
 
 ## Decisions already made
 

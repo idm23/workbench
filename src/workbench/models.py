@@ -41,9 +41,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     projects: Mapped[list[Project]] = relationship(
         back_populates="user",
@@ -62,9 +60,7 @@ class Project(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
 
     # owner/repo are stored parsed rather than re-derived from the URL at each
     # call site, since every GitHub API call needs them separately.
@@ -77,9 +73,7 @@ class Project(Base):
     description: Mapped[str | None] = mapped_column(Text, default=None)
     default_branch: Mapped[str | None] = mapped_column(String(100), default=None)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     user: Mapped[User] = relationship(back_populates="projects")
 
