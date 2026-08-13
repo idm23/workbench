@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Workbench">
+<title>{% block title %}Workbench{% endblock %}</title>
+<style>
+  :root {
+    --bg: #f7f6f3;
+    --panel: #ffffff;
+    --fg: #1a1a18;
+    --muted: #6b6a63;
+    --rule: #d9d7d0;
+    --accent: #b45309;
+    --danger: #a02c2c;
+    --danger-bg: #fbeaea;
+    --notice-bg: #fdf3e3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a;
+      --panel: #1f1f23;
+      --fg: #ececea;
+      --muted: #9a9a94;
+      --rule: #2e2e33;
+      --accent: #f0a868;
+      --danger: #f08a8a;
+      --danger-bg: #331e1e;
+      --notice-bg: #33291a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap {
+    max-width: 34rem;
+    margin: 0 auto;
+    padding: max(1.25rem, env(safe-area-inset-top)) 1.25rem
+             max(2rem, env(safe-area-inset-bottom));
+  }
+  a { color: inherit; }
+  .back {
+    display: inline-block;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: .9rem;
+    margin-bottom: 1rem;
+  }
+  .back:hover { color: var(--fg); }
+  h1 {
+    font-size: clamp(1.75rem, 8vw, 2.4rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 .35rem;
+    font-weight: 650;
+  }
+  .sub { color: var(--muted); margin: 0 0 1.75rem; font-size: .95rem; }
+
+  .msg {
+    padding: .8rem 1rem;
+    border-radius: .5rem;
+    margin-bottom: 1.25rem;
+    font-size: .95rem;
+  }
+  .msg.error { background: var(--danger-bg); color: var(--danger); }
+  .msg.notice { background: var(--notice-bg); }
+
+  ul.items { list-style: none; margin: 0 0 1.75rem; padding: 0; }
+  ul.items li { border-top: 1px solid var(--rule); }
+  ul.items li:last-child { border-bottom: 1px solid var(--rule); }
+  .row {
+    display: block;
+    padding: .9rem 0;
+    text-decoration: none;
+    color: inherit;
+  }
+  .row-title {
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: baseline;
+  }
+  .row-meta { color: var(--muted); font-size: .9rem; margin-top: .2rem; }
+  .chev { color: var(--muted); font-weight: 400; }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .85rem;
+  }
+  .badge {
+    display: inline-block;
+    font-size: .75rem;
+    color: var(--muted);
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: .05rem .5rem;
+    margin-top: .4rem;
+  }
+  .empty {
+    color: var(--muted);
+    border: 1px dashed var(--rule);
+    border-radius: .5rem;
+    padding: 1.25rem;
+    text-align: center;
+    margin-bottom: 1.75rem;
+    font-size: .95rem;
+  }
+
+  form { border-top: 1px solid var(--rule); padding-top: 1.25rem; }
+  label {
+    display: block;
+    font-size: .8rem;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--muted);
+    font-weight: 600;
+    margin-bottom: .45rem;
+  }
+  input[type=text] {
+    width: 100%;
+    padding: .75rem .85rem;
+    font-size: 1rem; /* 16px minimum, or iOS zooms on focus */
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--rule);
+    border-radius: .5rem;
+    margin-bottom: .75rem;
+  }
+  input[type=text]:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .hint { color: var(--muted); font-size: .85rem; margin: -.35rem 0 .75rem; }
+  button {
+    width: 100%;
+    min-height: 2.9rem; /* comfortable tap target */
+    padding: .75rem 1rem;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--bg);
+    background: var(--fg);
+    border: none;
+    border-radius: .5rem;
+    cursor: pointer;
+  }
+  button:active { opacity: .85; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  {% block back %}{% endblock %}
+  {% if error %}<p class="msg error">{{ error }}</p>{% endif %}
+  {% if notice %}<p class="msg notice">{{ notice }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</div>
+</body>
+</html>

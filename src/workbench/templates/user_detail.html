@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}{{ user.name }} — Workbench{% endblock %}
+
+{% block back %}<a class="back" href="/">&lsaquo; All users</a>{% endblock %}
+
+{% block content %}
+<h1>{{ user.name }}</h1>
+<p class="sub">
+  {{ user.projects | length }}
+  project{{ '' if user.projects | length == 1 else 's' }}.
+</p>
+
+{% if user.projects %}
+  <ul class="items">
+    {% for project in user.projects %}
+      <li>
+        <a class="row" href="{{ project.github_url }}" rel="noreferrer">
+          <span class="row-title">
+            <span class="mono">{{ project.owner }}/{{ project.repo }}</span>
+            <span class="chev">&nearr;</span>
+          </span>
+          {% if project.description %}
+            <span class="row-meta">{{ project.description }}</span>
+          {% endif %}
+          {% if project.default_branch %}
+            <span class="badge mono">{{ project.default_branch }}</span>
+          {% endif %}
+        </a>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">No projects yet. Add one below.</p>
+{% endif %}
+
+<form method="post" action="/users/{{ user.id }}/projects">
+  <label for="reference">Add a project</label>
+  <input type="text" id="reference" name="reference"
+         placeholder="idm23/workbench" inputmode="url"
+         autocomplete="off" autocapitalize="none" autocorrect="off" required>
+  <p class="hint">A GitHub URL, an SSH remote, or just <span class="mono">owner/repo</span>.</p>
+  <button type="submit">Add project</button>
+</form>
+{% endblock %}
