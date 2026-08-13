@@ -29,7 +29,11 @@ it is off, and the phone will get a certificate warning.
 ```sh
 ssh ian@192.168.1.199
 git clone https://github.com/idm23/workbench.git ~/workbench
-tailscale serve --bg /home/ian/workbench/www
+
+# Serving a filesystem path requires root, even for the Tailscale operator.
+# One-time: the config persists in tailscaled state.
+sudo tailscale serve --bg /home/ian/workbench/www
+
 tailscale serve status
 ```
 
@@ -55,6 +59,28 @@ tailscale serve status
 
 Then open the URL on the phone. The real acceptance test is **Add to Home Screen** launching
 without browser chrome, which is what the valid certificate was for.
+
+## Troubleshooting
+
+**`tailscale serve` hangs and never returns.** The CLI user is not the Tailscale operator.
+`tailscale debug prefs` shows `"OperatorUser": null`. State-changing commands then need root,
+and over a non-interactive SSH session there is no TTY to prompt on, so the command blocks
+indefinitely instead of erroring. The hung process ignores `SIGTERM`, so `timeout` will not
+clear it — use `pkill -9 -x tailscale`, which matches the CLI only and leaves the `tailscaled`
+daemon alone.
+
+Fix with `sudo tailscale set --operator=$USER`.
+
+**`401 Unauthorized: must be root, or be an operator and able to run 'sudo tailscale' to serve
+a path or Unix socket`.** Being the operator is sufficient to proxy a *port*
+(`tailscale serve 8787`), but serving a *filesystem path* requires root regardless — otherwise
+a non-root operator could expose arbitrary files. Run the serve command once under `sudo`; the
+config persists in tailscaled state, so it is not needed again.
+
+**No valid certificate / browser warning on the phone.** Check
+`tailscale status --json | grep CertDomains`. An empty value means HTTPS Certificates is
+disabled for the tailnet; enable it at <https://login.tailscale.com/admin/dns>. When it is
+working the value lists the node's FQDN.
 
 ## Development
 
