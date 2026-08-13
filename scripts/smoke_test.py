@@ -1,0 +1,143 @@
+#!/usr/bin/env python
+"""Verify a running Workbench actually works, end to end over HTTP.
+
+    uv run scripts/smoke_test.py [--base-url URL]
+
+Safe to run against an install with real data in it: everything it creates is
+namespaced with a timestamp.
+
+Uses httpx rather than curl partly for readability and partly because httpx
+switches a 303 redirect to GET automatically. Doing that wrong with curl (by
+passing -X POST, which forces the method through the redirect) silently turns
+every check into a 405 and reports false failures.
+"""
+
+import argparse
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+
+import httpx
+
+from workbench.logs import GREEN, RED, YELLOW, configure_console_logging, paint
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_BASE_URL = "http://127.0.0.1:8787"
+STARTUP_TIMEOUT_SECONDS = 20.0
+
+
+@dataclass
+class Results:
+    passed: int = 0
+    failures: list[str] = field(default_factory=list)
+
+    def record_pass(self, description: str) -> None:
+        logger.info("  %s   %s", paint(GREEN, "ok"), description)
+        self.passed += 1
+
+    def check(self, description: str, expected: str, actual: str) -> bool:
+        if expected in actual:
+            self.record_pass(description)
+            return True
+        condensed = " ".join(actual.split())[:200]
+        logger.error("  %s %s", paint(RED, "FAIL"), description)
+        logger.error("       wanted: %s", expected)
+        logger.error("       got:    %s", condensed)
+        self.failures.append(description)
+        return False
+
+    def note(self, message: str) -> None:
+        logger.warning("  %s %s", paint(YELLOW, "note"), message)
+
+
+def wait_until_healthy(client: httpx.Client) -> None:
+    """The service may still be starting, especially right after an install."""
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            if client.get("/healthz", timeout=2.0).status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.5)
+
+
+def run(base_url: str) -> Results:
+    results = Results()
+    user_name = f"smoketest-{int(time.time())}"
+
+    with httpx.Client(base_url=base_url, follow_redirects=True, timeout=15.0) as client:
+        wait_until_healthy(client)
+
+        results.check("health endpoint answers", '"status":"ok"', client.get("/healthz").text)
+        results.check("user list renders", "Workbench", client.get("/").text)
+
+        client.post("/users", data={"name": user_name})
+        results.check("created user appears", user_name, client.get("/").text)
+
+        results.check(
+            "duplicate user rejected",
+            "already a user called",
+            client.post("/users", data={"name": user_name}).text,
+        )
+
+        # Find the user we just made, so the run is independent of any existing
+        # data on the machine.
+        links = re.findall(r"/users/\d+", client.get("/").text)
+        if not links:
+            results.check("found the new user's page", "a /users/<id> link", "none in the page")
+            return results
+        results.record_pass("found the new user's page")
+        projects_url = f"{links[-1]}/projects"
+
+        added = client.post(projects_url, data={"reference": "idm23/workbench"}).text
+        results.check("project added", "idm23/workbench", added)
+        if "without details" in added:
+            # Unauthenticated GitHub allows 60 requests an hour, and the app
+            # deliberately still saves the project. Exercising that path is a
+            # pass, not a failure.
+            results.note("GitHub metadata unavailable (rate limit?) — degrade path worked")
+
+        results.check(
+            "duplicate project rejected",
+            "already has idm23/workbench",
+            client.post(
+                projects_url, data={"reference": "git@github.com:idm23/workbench.git"}
+            ).text,
+        )
+        results.check(
+            "bad reference rejected",
+            "is not a GitHub repository",
+            client.post(projects_url, data={"reference": "not a repo"}).text,
+        )
+        results.check(
+            "unknown user is a 404",
+            "404",
+            str(client.get("/users/99999999").status_code),
+        )
+
+    return results
+
+
+def main() -> int:
+    configure_console_logging()
+
+    # __doc__ is None under `python -OO`; argparse accepts None, so pass it
+    # through rather than indexing into it.
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    arguments = parser.parse_args()
+
+    logger.info("Smoke testing %s\n", arguments.base_url)
+    results = run(arguments.base_url)
+    logger.info("\npassed=%d failed=%d", results.passed, len(results.failures))
+    return 1 if results.failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

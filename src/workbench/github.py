@@ -124,9 +124,7 @@ def fetch_repo_metadata(ref: RepoRef) -> RepoLookup:
             follow_redirects=True,
         )
     except httpx.HTTPError:
-        return RepoLookupUnavailable(
-            f"Could not reach GitHub to look up {ref.slug}."
-        )
+        return RepoLookupUnavailable(f"Could not reach GitHub to look up {ref.slug}.")
 
     if response.status_code == 404:
         return RepoNotFound(

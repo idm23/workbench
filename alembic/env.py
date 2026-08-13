@@ -15,7 +15,10 @@ from workbench.models import Base
 
 config = context.config
 
-if config.config_file_name is not None:
+# Skipped when Alembic is driven programmatically (workbench.install): the
+# caller has already configured logging, and fileConfig would disable those
+# handlers. This attribute is Alembic's documented hook for that case.
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
     fileConfig(config.config_file_name)
 
 # On a fresh clone data/ does not exist yet, and SQLite will not create a

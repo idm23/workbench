@@ -67,17 +67,13 @@ def healthz() -> dict[str, str]:
 
 
 @app.get("/", response_class=HTMLResponse)
-def list_users(
-    request: Request, db: DbSession, error: str | None = None
-) -> HTMLResponse:
+def list_users(request: Request, db: DbSession, error: str | None = None) -> HTMLResponse:
     users = db.scalars(
         # selectinload so rendering each user's project count is one extra
         # query rather than one per user.
         select(User).options(selectinload(User.projects)).order_by(User.name)
     ).all()
-    return templates.TemplateResponse(
-        request, "users.html", {"users": users, "error": error}
-    )
+    return templates.TemplateResponse(request, "users.html", {"users": users, "error": error})
 
 
 @app.post("/users")
@@ -112,9 +108,7 @@ def show_user(
 
 
 @app.post("/users/{user_id}/projects")
-def add_project(
-    db: DbSession, user_id: int, reference: Annotated[str, Form()]
-) -> RedirectResponse:
+def add_project(db: DbSession, user_id: int, reference: Annotated[str, Form()]) -> RedirectResponse:
     user = _get_user_or_404(db, user_id)
     target = f"/users/{user.id}"
 

@@ -21,7 +21,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.390",
     "pytest>=8.3",
+    "ruff>=0.9",
 ]
 
 [build-system]
@@ -33,3 +35,44 @@ packages = ["src/workbench"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+# 88 is ruff's default and is tight for this code; 100 keeps the prose-style
+# comments and SQLAlchemy declarations readable without wrapping mid-thought.
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # import sorting
+    "N",       # pep8 naming
+    "UP",      # pyupgrade — flags anything that is legacy on this Python
+    "B",       # bugbear — likely bugs, not just style
+    "C4",      # comprehension clarity
+    "DTZ",     # naive datetimes; this app stores timestamps
+    "T20",     # print / pprint — use a logger instead
+    "SIM",     # simplifiable constructs
+    "PTH",     # prefer pathlib over os.path
+    "RUF",     # ruff's own checks
+]
+
+[tool.ruff.lint.isort]
+# Without this, the `alembic/` directory in the repo root makes ruff classify
+# the installed alembic package as first-party and split its imports across two
+# groups.
+known-third-party = ["alembic"]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations are generated from Alembic's template, which emits a trailing
+# space after "Revises:" when there is no parent revision, and long revision
+# identifiers we do not control.
+"alembic/versions/*" = ["E501", "W291"]
+
+[tool.pyright]
+include = ["src", "tests", "scripts"]
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"

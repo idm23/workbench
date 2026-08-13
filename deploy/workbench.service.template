@@ -1,0 +1,34 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+# Not installed directly; see install.sh.
+
+[Unit]
+Description=Workbench
+Documentation=https://github.com/idm23/workbench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=__USER__
+WorkingDirectory=__REPO__
+
+# The venv's uvicorn is invoked directly rather than through `uv run`, so the
+# service does not depend on uv being installed or on PATH at boot.
+ExecStart=__REPO__/.venv/bin/uvicorn workbench.app:app --host __HOST__ --port __PORT__
+Environment=WORKBENCH_DB=__REPO__/data/workbench.db
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+Restart=always
+RestartSec=2
+
+# The app only ever writes the database. ProtectSystem=strict makes the whole
+# filesystem read-only, and ReadWritePaths punches through for exactly that
+# directory. This will need revisiting when agents arrive, since they
+# legitimately need to write to repos and run build tools.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=__REPO__/data
+
+[Install]
+WantedBy=multi-user.target
