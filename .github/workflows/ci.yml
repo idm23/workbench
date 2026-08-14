@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, types, and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # uv reads .python-version and fetches that interpreter itself, so the
+      # runner's system Python is irrelevant — the same version runs here, on
+      # the laptop, and on the server.
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Formatting
+        run: uv run ruff format --check .
+
+      - name: Types
+        run: uv run pyright
+
+      - name: Unit tests
+        run: uv run pytest -q
+
+      # install.sh is the only shell left in the repo, and the one file we are
+      # least equipped to review by eye. shellcheck is preinstalled on GitHub's
+      # Ubuntu runners.
+      - name: Shell bootstrap
+        run: shellcheck install.sh
+
+      - name: Migrations
+        # `alembic check` fails when the models have drifted from the
+        # migrations — someone changed a column and did not generate a
+        # revision. That mistake is invisible locally, because the developer's
+        # database already has the change applied by hand.
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+
+  fresh-install:
+    name: Fresh install on clean Ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Provisions a clean Ubuntu container, runs install.sh inside it, drives
+      # the app over HTTP, then re-runs the install to prove it repeats. This
+      # is what keeps the "clone it and run one command" claim honest: a setup
+      # step that creeps outside install.sh fails here.
+      #
+      # The smoke test calls the public GitHub API unauthenticated. That is
+      # rate limited per IP and runner IPs are shared, so a "GitHub metadata
+      # unavailable" note in the log is expected — the app treats it as a
+      # degrade rather than a failure, and exercising that path is a pass.
+      - name: Clean-machine install
+        run: uv run scripts/test_fresh_install.py

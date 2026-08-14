@@ -1,5 +1,7 @@
 # workbench
 
+[![CI](https://github.com/idm23/workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/idm23/workbench/actions/workflows/ci.yml)
+
 A personal tool for managing software projects on a home server — projects, a todo tree per
 project, and tasks worked either by hand or by a Claude agent, with a written summary either way.
 
@@ -54,6 +56,10 @@ uv run pyright
 uv run scripts/smoke_test.py               # end-to-end against a running install
 uv run scripts/test_fresh_install.py       # clean Ubuntu container, install, verify
 ```
+
+CI runs all of these on every push and pull request, plus `shellcheck install.sh` and
+`alembic check` — the latter fails if a model has been changed without generating a migration,
+which is invisible locally because your own database already has the change applied.
 
 `test_fresh_install.py` uses the working tree by default so you can check uncommitted work. Pass
 `--from-github` to test what someone cloning the public repo actually gets.
