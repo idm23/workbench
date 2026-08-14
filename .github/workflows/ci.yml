@@ -21,7 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # Pinned to an exact patch version, unlike checkout above: setup-uv
+      # stopped publishing floating major tags after v7, so `@v10` does not
+      # resolve. Bump this deliberately.
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
@@ -64,7 +67,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # Pinned to an exact patch version, unlike checkout above: setup-uv
+      # stopped publishing floating major tags after v7, so `@v10` does not
+      # resolve. Bump this deliberately.
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
