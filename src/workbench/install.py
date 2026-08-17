@@ -20,15 +20,29 @@ import httpx
 from alembic import command
 from alembic.config import Config
 
-from workbench.config import ensure_data_dir, host, port, repo_root
+from workbench.config import deploy_branch, ensure_data_dir, host, port, repo_root
 from workbench.logs import BOLD, RED, YELLOW, configure_console_logging, paint
 
 logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "workbench"
-UNIT_PATH = Path("/etc/systemd/system") / f"{SERVICE_NAME}.service"
-TEMPLATE_PATH = Path("deploy") / "workbench.service.template"
+DEPLOY_NAME = "workbench-deploy"
+SYSTEMD_DIR = Path("/etc/systemd/system")
+TEMPLATE_DIR = Path("deploy")
 HEALTH_TIMEOUT_SECONDS = 20.0
+
+#: How often the deployer checks for new commits. Not configurable through the
+#: environment: it is baked into the timer at install time, and changing it
+#: means re-rendering the unit anyway.
+DEPLOY_INTERVAL = "5min"
+
+#: Every unit this installs, as (unit filename, template filename). The timer
+#: is what makes merging a pull request the whole deployment.
+UNITS = (
+    (f"{SERVICE_NAME}.service", "workbench.service.template"),
+    (f"{DEPLOY_NAME}.service", "workbench-deploy.service.template"),
+    (f"{DEPLOY_NAME}.timer", "workbench-deploy.timer.template"),
+)
 
 
 def step(message: str) -> None:
@@ -117,45 +131,83 @@ def apply_migrations() -> None:
 
 
 def service_user() -> str:
-    return pwd.getpwuid(os.geteuid()).pw_name
+    """Who the service runs as: whoever owns the checkout.
+
+    Derived from the repo's owner rather than from `os.geteuid()`, because this
+    is also called by the automatic deployer, which runs as root in order to
+    restart the unit. Reading the effective uid there would silently re-render
+    the unit with `User=root` and hand an agent a root shell on the next
+    deploy. The checkout's owner is the same answer in the interactive case and
+    the right one in both.
+    """
+    return pwd.getpwuid(repo_root().stat().st_uid).pw_name
 
 
 def systemd_is_running() -> bool:
     return shutil.which("systemctl") is not None and Path("/run/systemd/system").is_dir()
 
 
-def render_unit() -> str:
-    template = (repo_root() / TEMPLATE_PATH).read_text()
+def render_unit(template_name: str) -> str:
+    template = (repo_root() / TEMPLATE_DIR / template_name).read_text()
     replacements = {
         "__REPO__": str(repo_root()),
         "__USER__": service_user(),
         "__HOST__": host(),
         "__PORT__": str(port()),
+        "__BRANCH__": deploy_branch(),
+        "__INTERVAL__": DEPLOY_INTERVAL,
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
     return template
 
 
-def install_service() -> None:
-    rendered = render_unit()
+def install_units() -> bool:
+    """Write every unit whose rendered content has changed. Returns whether any did.
 
-    current = UNIT_PATH.read_text() if UNIT_PATH.is_file() else None
-    if current == rendered:
-        info("unit already up to date")
-    else:
-        staged = repo_root() / "data" / f"{SERVICE_NAME}.service.staged"
+    Separate from starting anything, because the deployer calls this too: a
+    change to a unit template has to reach systemd on the next deploy, or it
+    sits in the repository and only surfaces much later as a permission error
+    inside an agent run.
+    """
+    changed = False
+
+    for unit_name, template_name in UNITS:
+        rendered = render_unit(template_name)
+        target = SYSTEMD_DIR / unit_name
+
+        if target.is_file() and target.read_text() == rendered:
+            continue
+
+        # Staged inside data/ then copied with privilege, so the unprivileged
+        # side never needs write access to /etc/systemd/system.
+        staged = repo_root() / "data" / f"{unit_name}.staged"
         staged.write_text(rendered)
         try:
-            run(["cp", str(staged), str(UNIT_PATH)], privileged=True)
-            run(["systemctl", "daemon-reload"], privileged=True)
-            info(f"wrote {UNIT_PATH}")
+            run(["cp", str(staged), str(target)], privileged=True)
+            info(f"wrote {target}")
+            changed = True
         finally:
             staged.unlink(missing_ok=True)
+
+    if changed:
+        run(["systemctl", "daemon-reload"], privileged=True)
+    else:
+        info("units already up to date")
+    return changed
+
+
+def install_service() -> None:
+    install_units()
 
     run(["systemctl", "enable", "--quiet", SERVICE_NAME], privileged=True)
     run(["systemctl", "restart", SERVICE_NAME], privileged=True)
     info(f"service enabled and started as user '{service_user()}'")
+
+    # Enabling the timer is what makes a merge to the deploy branch reach this
+    # machine without anyone logging in.
+    run(["systemctl", "enable", "--now", "--quiet", f"{DEPLOY_NAME}.timer"], privileged=True)
+    info(f"deploying from '{deploy_branch()}' automatically, every {DEPLOY_INTERVAL}")
 
 
 def wait_for_health() -> None:
@@ -181,6 +233,14 @@ def report_success() -> None:
     logger.info(
         "%s",
         f"""
+Merges to '{deploy_branch()}' now deploy themselves, within {DEPLOY_INTERVAL}. Nothing
+needs running here again — the timer fetches, migrates, and restarts.
+
+    systemctl list-timers {DEPLOY_NAME}.timer     # when the next check lands
+    sudo systemctl start {DEPLOY_NAME}            # deploy right now
+    journalctl -u {DEPLOY_NAME} -n 50 --no-pager  # what the last one did
+    sudo systemctl disable --now {DEPLOY_NAME}.timer   # stop deploying
+
 To reach it from a phone over Tailscale (optional, and not automated because
 it needs a browser login to your own tailnet):
 

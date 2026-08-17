@@ -7,8 +7,10 @@ Claude agent — with a written summary either way.
 Runs on an always-on Ubuntu box, reachable only over Tailscale.
 
 > **Status: early.** Users and their GitHub-backed projects exist, served by a FastAPI
-> app installed with `./install.sh`. Tasks, runs, worktrees, and agents do not exist
-> yet. See `README.md` for what is actually live.
+> app installed with `./install.sh`, which then keeps itself up to date from `main`. The
+> tables for tasks, runs, and run events exist, but nothing reads or writes them yet —
+> the schema landed ahead of the code so that the deploy pipeline had something real to
+> migrate. Worktrees and agents do not exist. See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
@@ -17,7 +19,7 @@ running service. Nothing else. If a step is needed, it belongs in that script ra
 than in a document — the bar is that this repo could be handed to someone with a spare
 machine and work without a conversation.
 
-Two consequences that shaped real decisions:
+Three consequences that shaped real decisions:
 
 - **Alembic from the start**, not `create_all()`. The alternative meant "delete the
   database when the schema changes", which is exactly the kind of undocumented manual
@@ -25,6 +27,10 @@ Two consequences that shaped real decisions:
 - **Application data lives in `data/` inside the repo**, not `/var/lib/workbench`. An
   external path has to be created, permissioned, and remembered, and none of that
   survives a clone onto a new machine. It is gitignored, so pulling never touches it.
+- **Updating is automated too, not just installing.** The same rule applied to the second
+  install onward: "ssh in, pull, re-run the installer, remember to migrate" is a manual
+  step, and a schema step that gets skipped is the one that corrupts something. A timer
+  does it instead — see Deploying below.
 
 The claim is kept honest by `scripts/test_fresh_install.py`, which provisions a clean
 Ubuntu container, runs the install, drives the app over HTTP, and re-runs the install to
@@ -115,18 +121,48 @@ in `docs/server-conventions.md`.
   agent session transcripts live in the service user's home and are on neither GitHub
   nor the SQLite file.
 
-## Known trap: self-deployment
+## Deploying is automatic, and pull-based
 
-Workbench is intended to eventually be developed inside Workbench. A task ending in
-"restart the workbench service" kills the process serving the request, so the run
-never gets marked finished and its summary is lost. Deploys must go through a
-detached one-shot (`workbench-deploy.service`) that the app triggers with
-`systemctl start`, rather than restarting itself.
+**Merging to `main` is the deployment.** `workbench-deploy.timer` fires every five minutes;
+`workbench-deploy.service` fetches, fast-forwards, syncs, migrates, reinstalls any changed
+unit, and restarts the app. There is no server step after a merge, and in particular no
+schema step to forget.
 
-This is a special case of a broader problem: if agent runs live inside the uvicorn
-process, *any* restart — deploy, crash, OOM — orphans them. Consider running agents as
-detached child processes that write to a durable event log, with the web tier as a pure
-reader. That makes the web tier freely restartable and mostly dissolves the trap.
+**Pull, not push, and this is forced rather than chosen.** The server has no public
+ingress — tailnet only, and `tailscale funnel` is ruled out above — so GitHub webhooks
+cannot reach it and neither can a GitHub Actions runner. A self-hosted runner would work
+but means parking a long-lived registration credential on the box and letting workflow
+code execute there. Polling needs no inbound path, no secret, and no new daemon. The cost
+is latency: a merge lands within the timer interval instead of instantly.
+
+**It only ever fast-forwards.** A checkout that is dirty, on another branch, or carrying a
+local commit is reported into the journal and left untouched, so working on the server by
+hand is never interrupted and nothing is discarded. A migration failure stops the deploy
+*before* the restart, leaving the old code running against the schema it matches — a
+failed deploy should not become an outage.
+
+**The deployer runs as root, the app does not.** It needs to restart the unit, so it drops
+to the checkout's owner with `runuser` for every command touching git, the virtualenv, or
+the database. Doing that work as root would leave root-owned files that the unprivileged
+service could no longer write. For the same reason `install.service_user()` reads the
+*checkout's owner* rather than the current euid — reading the euid would silently
+re-render the unit with `User=root` on the first automatic deploy.
+
+### Known trap: self-deployment
+
+Workbench is intended to eventually be developed inside Workbench, and a task ending in
+"restart the workbench service" would kill the process serving the request.
+
+**Half of this is now handled.** Deploys run from their own systemd unit, so the restart
+they trigger lands on a different cgroup and cannot kill the deployer — and since the
+timer owns deployment, nothing has to reach back into the app to trigger one at all.
+
+The other half is still open, and is the broader problem: if agent runs live inside the
+uvicorn process, *any* restart — deploy, crash, OOM — orphans them, and a deploy now
+happens on a timer without anyone watching. Agents should therefore run as detached child
+processes writing to a durable event log, with the web tier as a pure reader. That is a
+prerequisite for the runs slice rather than a nicety, because automatic deploys make the
+orphaning routine instead of occasional.
 
 ## Open questions
 

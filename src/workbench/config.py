@@ -45,6 +45,15 @@ def ensure_data_dir() -> Path:
     return path
 
 
+def deploy_branch() -> str:
+    """The branch the automatic deployer follows.
+
+    A checkout sitting on anything else is left alone, so working on the server
+    by hand does not get interrupted by a deploy.
+    """
+    return os.environ.get("WORKBENCH_DEPLOY_BRANCH", "main")
+
+
 def host() -> str:
     return os.environ.get("WORKBENCH_HOST", "127.0.0.1")
 

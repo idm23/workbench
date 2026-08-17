@@ -1,0 +1,37 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+# Not installed directly; see install.sh.
+#
+# One deployment attempt: fetch, fast-forward, sync, migrate, restart. Started
+# by workbench-deploy.timer, and safe to run by hand at any time:
+#
+#     sudo systemctl start workbench-deploy
+#     journalctl -u workbench-deploy -n 50 --no-pager
+#
+# Deliberately a separate unit from workbench.service rather than something the
+# app does to itself. Restarting a service from inside that service kills the
+# process doing the restarting; from here, the restart lands on a different
+# cgroup and this one survives to log the outcome.
+
+[Unit]
+Description=Deploy Workbench from __BRANCH__
+Documentation=https://github.com/idm23/workbench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Runs as root, unlike workbench.service. It needs to restart that unit, and it
+# drops to __USER__ with runuser for every command that touches the checkout,
+# the virtualenv, or the database — so nothing here leaves root-owned files
+# that the unprivileged service could no longer write.
+User=root
+WorkingDirectory=__REPO__
+ExecStart=__REPO__/.venv/bin/python -m workbench.deploy
+Environment=WORKBENCH_DB=__REPO__/data/workbench.db
+Environment=WORKBENCH_DEPLOY_BRANCH=__BRANCH__
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# No ProtectSystem here: this unit's whole job is to write to the checkout and
+# to /etc/systemd/system. It runs for seconds, on a timer, executing code that
+# is already trusted enough to be the service itself.

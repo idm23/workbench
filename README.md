@@ -40,10 +40,11 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `install.sh` | The only entry point — a ~12-line bootstrap that installs `uv` and hands off. |
 | `src/workbench/install.py` | The installer proper. Python, so it shares config with the app. |
 | `src/workbench/` | The application: models, GitHub lookup, routes, templates. |
-| `alembic/` | Migrations. Applied by the installer; no manual step. |
+| `src/workbench/deploy.py` | Pulls, migrates, and restarts. Run on a timer; see below. |
+| `alembic/` | Migrations. Applied by the installer and by every deploy. |
 | `scripts/smoke_test.py` | Checks a running install actually works, over HTTP. |
 | `scripts/test_fresh_install.py` | The full clean-machine install test, in a container. |
-| `deploy/workbench.service.template` | The systemd unit, rendered with detected paths. |
+| `deploy/*.template` | The systemd units, rendered with detected paths. |
 | `CLAUDE.md` | Design doc, decisions, and open questions. |
 | `docs/server-conventions.md` | How the home server launches things, and why. |
 
@@ -86,13 +87,36 @@ Valid HTTPS requires **HTTPS Certificates** enabled in the Tailscale admin conso
 (DNS → HTTPS Certificates). Check with `tailscale status --json | grep CertDomains`; an empty
 value means it is off and the phone will get a certificate warning.
 
-## Deploying to the home server
+## Deploying
+
+**Merging to `main` is the deployment.** A systemd timer checks for new commits every five
+minutes; when it finds some it fast-forwards the checkout, syncs dependencies, applies migrations,
+reinstalls the units if their templates changed, and restarts the service. Nothing to run by hand,
+and no schema step to remember.
 
 ```sh
-ssh ian@192.168.1.199 'cd ~/workbench && git pull && ./install.sh'
+systemctl list-timers workbench-deploy.timer      # when the next check lands
+sudo systemctl start workbench-deploy             # deploy right now, do not wait
+journalctl -u workbench-deploy -n 50 --no-pager   # what the last one did
+sudo systemctl disable --now workbench-deploy.timer   # stop deploying automatically
 ```
 
-`install.sh` restarts the service, so this both updates the code and applies any new migrations.
+It **polls** rather than being pushed to, because the server has no public ingress — it is on a
+tailnet and `tailscale funnel` is ruled out, so neither GitHub nor a CI runner can reach in. A
+self-hosted runner would work but means parking a long-lived credential here and letting workflow
+code execute on the box. The cost of polling is that a merge lands within five minutes rather than
+instantly.
+
+It is also deliberately timid. It only ever fast-forwards, so a checkout that is dirty, on another
+branch, or carrying a local commit is reported and left completely alone — working on the server by
+hand is never interrupted, and nothing is discarded. If migrations fail it stops **before**
+restarting, leaving the old code running against the schema it was built for rather than turning a
+failed deploy into an outage.
+
+The deployer runs as a separate unit from the app rather than as something the app does to itself.
+Restarting a service from inside that service kills the process doing the restarting; from its own
+unit the restart lands on a different cgroup. `journalctl -u workbench-deploy` is where a deploy
+that went wrong explains itself.
 
 ## Troubleshooting
 

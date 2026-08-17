@@ -1,0 +1,32 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+# Not installed directly; see install.sh.
+#
+# Polls for new commits on __BRANCH__. Polling rather than a webhook because
+# the server has no public ingress — it is on a tailnet, and `tailscale funnel`
+# is ruled out — so GitHub cannot reach in and neither can a CI runner.
+#
+# To stop deploying automatically:
+#     sudo systemctl disable --now workbench-deploy.timer
+# Deploys can still be triggered by hand with `sudo systemctl start workbench-deploy`.
+
+[Unit]
+Description=Check __BRANCH__ for new commits to deploy
+Documentation=https://github.com/idm23/workbench
+
+[Timer]
+# First check shortly after boot, then every __INTERVAL__. A merge therefore
+# lands within that window rather than instantly, which is the price of not
+# exposing anything to the internet.
+OnBootSec=2min
+OnUnitActiveSec=__INTERVAL__
+
+# Catch up on a check missed while the machine was off, rather than waiting a
+# whole interval after every boot.
+Persistent=true
+
+# Without this, several timers firing on the same round number wake the disk
+# together. Costs nothing here and is good manners on a machine that idles.
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target
