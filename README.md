@@ -193,6 +193,10 @@ Requiring `staging-acceptance` on `main` is what enforces the flow, and it means
 skip staging without an admin override. That is deliberate, but worth knowing before you need it at
 2am.
 
+**[`docs/deployment-setup.md`](docs/deployment-setup.md) is the click-level runbook** — the order
+these have to happen in, the exact ruleset fields, and the two chicken-and-egg problems that decide
+that order.
+
 It **polls** rather than being pushed to, because the server has no public ingress — it is on a
 tailnet and `tailscale funnel` is ruled out, so neither GitHub nor a CI runner can reach in. A
 self-hosted runner would work but means parking a long-lived credential here and letting workflow

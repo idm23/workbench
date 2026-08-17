@@ -12,11 +12,12 @@ that tool is absent.
 
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from workbench.config import deploy_unit_name, service_name
-from workbench.install import render_unit, units
+from workbench.install import InstallError, check_not_under_private_tmp, render_unit, units
 
 UNIT_NAMES = ["workbench.service", "workbench-deploy.service", "workbench-deploy.timer"]
 
@@ -206,6 +207,40 @@ def test_instance_names_are_derived_consistently(monkeypatch):
 
     assert service_name() == "workbench-staging"
     assert deploy_unit_name() == "workbench-staging-deploy"
+
+
+# --- PrivateTmp ---------------------------------------------------------------
+#
+# The unit gets its own /tmp and /var/tmp. A checkout under either is invisible
+# from inside the service, and systemd's only complaint is that "the control
+# process exited with error code" against an empty journal. Caught once in CI;
+# refused up front from now on.
+
+
+def test_a_checkout_under_tmp_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr("workbench.install.repo_root", lambda: Path("/tmp/workbench"))
+
+    with pytest.raises(InstallError, match="PrivateTmp"):
+        check_not_under_private_tmp()
+
+
+def test_var_tmp_is_refused_too(monkeypatch):
+    """PrivateTmp covers /var/tmp as well, which is the less obvious half."""
+    monkeypatch.setattr("workbench.install.repo_root", lambda: Path("/var/tmp/workbench"))
+
+    with pytest.raises(InstallError):
+        check_not_under_private_tmp()
+
+
+def test_a_checkout_under_home_is_fine(monkeypatch):
+    monkeypatch.setattr("workbench.install.repo_root", lambda: Path.home() / "workbench")
+
+    check_not_under_private_tmp()
+
+
+def test_the_service_still_gets_a_private_tmp(rendered):
+    """The refusal above only makes sense while this is actually set."""
+    assert "PrivateTmp=yes" in rendered["workbench.service"]
 
 
 @pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd-analyze not present")

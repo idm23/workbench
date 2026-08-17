@@ -126,6 +126,34 @@ def check_prerequisites() -> None:
             raise InstallError(f"'{tool}' is required but not installed.")
     info("curl and git present")
 
+    check_not_under_private_tmp()
+
+
+#: Directories systemd replaces with a private namespace under PrivateTmp=yes.
+PRIVATE_TMP_ROOTS = (Path("/tmp"), Path("/var/tmp"))
+
+
+def check_not_under_private_tmp() -> None:
+    """Refuse to install from a checkout the service could never see.
+
+    The unit sets PrivateTmp=yes, which gives it its own /tmp and /var/tmp. A
+    checkout under either is simply absent from inside the service, so systemd
+    fails to start it — reporting only that "the control process exited with
+    error code", with an empty journal because the process never got far enough
+    to log anything. Diagnosing that from scratch is genuinely unpleasant, and
+    it is entirely avoidable here.
+    """
+    root = repo_root()
+    for private in PRIVATE_TMP_ROOTS:
+        if root == private or private in root.parents:
+            raise InstallError(
+                f"the checkout is under {private}, which the service cannot see.\n"
+                f"       The unit runs with PrivateTmp=yes, so {private} inside the\n"
+                "       service is a private, empty directory — systemd would fail to\n"
+                "       start it with no useful message. Clone somewhere under your\n"
+                "       home directory instead."
+            )
+
 
 def apply_migrations() -> None:
     """Bring the database to head.

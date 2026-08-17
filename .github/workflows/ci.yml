@@ -125,6 +125,10 @@ jobs:
       - name: Deploy cycle
         run: uv run scripts/test_deploy_cycle.py
 
-      - name: Deployer journal on failure
+      # The script dumps both units itself, but it tears them down afterwards.
+      # This catches anything that killed it before it got that far.
+      - name: Journals on failure
         if: failure()
-        run: sudo journalctl -u workbench-citest-deploy -n 200 --no-pager || true
+        run: |
+          sudo journalctl -u workbench-citest -n 200 --no-pager || true
+          sudo journalctl -u workbench-citest-deploy -n 200 --no-pager || true

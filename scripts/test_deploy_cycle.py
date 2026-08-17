@@ -43,7 +43,12 @@ SERVICE = f"workbench-{INSTANCE}"
 DEPLOYER = f"{SERVICE}-deploy"
 PORT = 8799
 
-WORKSPACE = Path("/tmp/workbench-deploy-cycle")
+# Under home, deliberately not /tmp. The service unit sets PrivateTmp=yes,
+# which gives it private /tmp and /var/tmp namespaces — a checkout under either
+# is invisible from inside the unit, and systemd fails to start it with nothing
+# more useful than "the control process exited with error code". This also
+# matches where a real install lives.
+WORKSPACE = Path.home() / "workbench-deploy-cycle"
 ORIGIN = WORKSPACE / "origin.git"
 CHECKOUT = WORKSPACE / "checkout"
 
@@ -256,6 +261,32 @@ def test_crash_on_boot_is_caught_before_the_restart() -> None:
     expect(healthy(), "the running service was never restarted into broken code")
 
 
+def diagnose() -> None:
+    """Dump everything needed to understand a failure, before tearing it down.
+
+    Both units, because which one broke is exactly what is unclear when this
+    fails: a service that will not start and a deployer that will not deploy
+    look the same from the outside, and the journal of the one that never ran
+    is empty and misleading.
+    """
+    for unit in (SERVICE, DEPLOYER):
+        logger.error("\n--- systemctl status %s ---", unit)
+        logger.error("%s", run(["systemctl", "status", "--no-pager", unit], check=False).stdout)
+        logger.error("--- journalctl -u %s ---", unit)
+        logger.error(
+            "%s",
+            run(["sudo", "journalctl", "-u", unit, "-n", "80", "--no-pager"], check=False).stdout,
+        )
+
+    logger.error("--- rendered %s.service ---", SERVICE)
+    unit_file = Path(f"/etc/systemd/system/{SERVICE}.service")
+    if unit_file.is_file():
+        logger.error("%s", unit_file.read_text())
+
+    logger.error("--- checkout ---")
+    logger.error("%s", run(["ls", "-la", str(CHECKOUT)], check=False).stdout)
+
+
 def teardown() -> None:
     step("Removing the test instance")
     systemctl("disable", "--now", f"{DEPLOYER}.timer", check=False)
@@ -300,12 +331,7 @@ def main() -> int:
         test_crash_on_boot_is_caught_before_the_restart()
     except TestFailureError as error:
         logger.error("\n%s %s\n", paint(RED, "FAIL"), error)
-        logger.error(
-            "%s",
-            run(
-                ["sudo", "journalctl", "-u", DEPLOYER, "-n", "80", "--no-pager"], check=False
-            ).stdout,
-        )
+        diagnose()
         teardown()
         return 1
 
