@@ -27,22 +27,35 @@ import logging
 import os
 import pwd
 import shutil
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from workbench.config import deploy_branch, host, port, repo_root
+from workbench.config import (
+    database_path,
+    deploy_branch,
+    ensure_data_dir,
+    host,
+    instance,
+    port,
+    repo_root,
+    restore_from,
+    service_name,
+)
 from workbench.logs import configure_console_logging
 
 logger = logging.getLogger(__name__)
-
-SERVICE_NAME = "workbench"
 
 #: Long enough for a cold `uv sync` that has to fetch the SDK's ~310MB bundled
 #: binary over a home connection.
 SYNC_TIMEOUT_SECONDS = 900
 GIT_TIMEOUT_SECONDS = 300
 RESTART_TIMEOUT_SECONDS = 120
+
+#: Acceptance drives the app over HTTP and reports to GitHub; generous so a
+#: slow check never looks like a failed deploy.
+ACCEPTANCE_TIMEOUT_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -109,13 +122,78 @@ def _uv() -> str | None:
     return shutil.which("uv")
 
 
+def _python() -> Path:
+    return repo_root() / ".venv" / "bin" / "python"
+
+
+def _alembic() -> Path:
+    return repo_root() / ".venv" / "bin" / "alembic"
+
+
+def restore_snapshot() -> DeployFailed | None:
+    """Copy another instance's database over this one, before migrating.
+
+    Only staging does this, and only because it is the point: migrating a copy
+    of production is the one test that catches a revision which passes against
+    an empty database and fails against real rows.
+
+    Uses sqlite3's own backup API rather than copying the file. The source is a
+    live database in WAL mode, where the committed state is split between the
+    file and its write-ahead log — a plain copy can capture a torn version of
+    it. This also needs no `sqlite3` binary, which neither machine has.
+    """
+    source = restore_from()
+    if source is None:
+        return None
+
+    if not source.is_file():
+        return DeployFailed(
+            "restoring the database snapshot",
+            f"{source} does not exist, so there is nothing to restore from",
+        )
+
+    target = database_path()
+    if source == target:
+        # Refusing rather than clobbering: this would be production restoring
+        # over itself, which is only ever a misconfiguration.
+        return DeployFailed(
+            "restoring the database snapshot",
+            f"WORKBENCH_RESTORE_FROM points at this instance's own database ({target})",
+        )
+
+    ensure_data_dir()
+    logger.info("Restoring a snapshot of %s over %s", source, target)
+    try:
+        with sqlite3.connect(source) as origin, sqlite3.connect(target) as replica:
+            origin.backup(replica)
+    except sqlite3.Error as error:
+        return DeployFailed("restoring the database snapshot", str(error))
+
+    return None
+
+
 def current_revision() -> str:
     result = _run(["git", "rev-parse", "--short", "HEAD"], as_owner=True, timeout=30)
     return result.stdout.strip() or "unknown"
 
 
-def deploy() -> DeployResult:
-    """One deployment attempt. Safe to call when there is nothing to do."""
+@dataclass(frozen=True)
+class Advanced:
+    """The checkout moved. Nothing has been rebuilt or restarted yet."""
+
+    revision: str
+
+
+type AdvanceResult = Advanced | AlreadyCurrent | DeployFailed
+
+
+def advance_checkout() -> AdvanceResult:
+    """Decide whether to deploy, and move the checkout if so.
+
+    Separated from rebuilding because this half is where every refusal lives —
+    wrong branch, dirty tree, diverged history — and because it is the only
+    half that can be exercised without root, a virtualenv, and systemd.
+    """
     branch = deploy_branch()
 
     on_branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], as_owner=True, timeout=30)
@@ -156,6 +234,15 @@ def deploy() -> DeployResult:
     if merged.returncode != 0:
         return _fail("fast-forwarding the checkout", merged)
 
+    return Advanced(current_revision())
+
+
+def rebuild_and_restart() -> DeployFailed | None:
+    """Bring the installed service in line with the checkout as it now stands.
+
+    Only reached once the checkout has actually moved, so it is never paying
+    for a sync and a restart on the overwhelmingly common no-op tick.
+    """
     uv = _uv()
     if uv is None:
         return DeployFailed("syncing dependencies", "uv is not installed for the service user")
@@ -167,31 +254,113 @@ def deploy() -> DeployResult:
     if synced.returncode != 0:
         return _fail("syncing dependencies", synced)
 
+    # Preflight before anything irreversible. Importing the app in a throwaway
+    # process catches syntax errors, bad imports, and a missing dependency
+    # while the running service is still untouched — most crash-on-boot
+    # failures never get as far as the restart.
+    preflight = _run(
+        [str(_python()), "-c", "import workbench.app"],
+        as_owner=True,
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
+    if preflight.returncode != 0:
+        return _fail("importing the new code", preflight)
+
+    restore_error = restore_snapshot()
+    if restore_error is not None:
+        return restore_error
+
     # Migrations before the restart, and a failure here stops the deploy. The
     # service is still running the previous code from memory, which matches the
     # database it has; restarting into new code against an unmigrated schema
     # would turn a failed deploy into an outage.
     migrated = _run(
-        [str(repo_root() / ".venv" / "bin" / "alembic"), "upgrade", "head"],
+        [str(_alembic()), "upgrade", "head"],
         as_owner=True,
         timeout=GIT_TIMEOUT_SECONDS,
     )
     if migrated.returncode != 0:
         return _fail("applying migrations", migrated)
 
+    # Models and migrations agreeing is checked here rather than trusted from
+    # CI: a merge that skipped a revision would otherwise only surface as
+    # confusing runtime errors after the restart.
+    drift = _run([str(_alembic()), "check"], as_owner=True, timeout=GIT_TIMEOUT_SECONDS)
+    if drift.returncode != 0:
+        return _fail("checking for schema drift", drift)
+
     unit_error = refresh_units()
     if unit_error is not None:
         return unit_error
 
     restarted = _run(
-        ["systemctl", "restart", SERVICE_NAME],
+        ["systemctl", "restart", service_name()],
         as_owner=False,
         timeout=RESTART_TIMEOUT_SECONDS,
     )
     if restarted.returncode != 0:
         return _fail("restarting the service", restarted)
 
-    return Deployed(current_revision())
+    # The step this used to be missing. Without it a deploy that installs
+    # code which dies on startup reports success into the journal while
+    # Restart=always thrashes, and the first sign of trouble is the app being
+    # unreachable from a phone.
+    from workbench.install import health_check
+
+    unhealthy = health_check()
+    if unhealthy is not None:
+        return DeployFailed("waiting for the service to come back", unhealthy)
+
+    return None
+
+
+def deploy() -> DeployResult:
+    """One deployment attempt. Safe to call when there is nothing to do."""
+    advanced = advance_checkout()
+    if not isinstance(advanced, Advanced):
+        return advanced
+
+    failure = rebuild_and_restart()
+    if failure is not None:
+        return failure
+
+    run_acceptance()
+    return Deployed(advanced.revision)
+
+
+def run_acceptance() -> None:
+    """On staging only: exercise what just deployed and report it to GitHub.
+
+    Deliberately does not change the deploy's own result. Staging failing its
+    acceptance checks is not a failed *deploy* — the code is installed and
+    running, and that is exactly the state someone needs in order to go and
+    look at what broke. What it does instead is post a red commit status, which
+    is what stops the revision being promoted to `main`.
+
+    Runs as the checkout's owner rather than as root: it opens the database,
+    and SQLite would leave root-owned WAL files beside it that the
+    unprivileged service could then not write.
+    """
+    if not instance():
+        return
+
+    script = repo_root() / "scripts" / "staging_acceptance.py"
+    if not script.is_file():
+        logger.warning("No acceptance script at %s; skipping.", script)
+        return
+
+    logger.info("Running staging acceptance")
+    result = _run(
+        [str(_python()), str(script)],
+        as_owner=True,
+        timeout=ACCEPTANCE_TIMEOUT_SECONDS,
+    )
+    logger.info("%s", (result.stdout or result.stderr).strip())
+    if result.returncode != 0:
+        logger.warning(
+            "Staging acceptance failed. The deploy itself succeeded; the commit "
+            "status posted to GitHub is what blocks promotion."
+        )
 
 
 def refresh_units() -> DeployFailed | None:

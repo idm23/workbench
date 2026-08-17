@@ -20,13 +20,20 @@ import httpx
 from alembic import command
 from alembic.config import Config
 
-from workbench.config import deploy_branch, ensure_data_dir, host, port, repo_root
+from workbench.config import (
+    deploy_branch,
+    deploy_unit_name,
+    ensure_data_dir,
+    host,
+    instance,
+    port,
+    repo_root,
+    service_name,
+)
 from workbench.logs import BOLD, RED, YELLOW, configure_console_logging, paint
 
 logger = logging.getLogger(__name__)
 
-SERVICE_NAME = "workbench"
-DEPLOY_NAME = "workbench-deploy"
 SYSTEMD_DIR = Path("/etc/systemd/system")
 TEMPLATE_DIR = Path("deploy")
 HEALTH_TIMEOUT_SECONDS = 20.0
@@ -36,13 +43,19 @@ HEALTH_TIMEOUT_SECONDS = 20.0
 #: means re-rendering the unit anyway.
 DEPLOY_INTERVAL = "5min"
 
-#: Every unit this installs, as (unit filename, template filename). The timer
-#: is what makes merging a pull request the whole deployment.
-UNITS = (
-    (f"{SERVICE_NAME}.service", "workbench.service.template"),
-    (f"{DEPLOY_NAME}.service", "workbench-deploy.service.template"),
-    (f"{DEPLOY_NAME}.timer", "workbench-deploy.timer.template"),
-)
+
+def units() -> tuple[tuple[str, str], ...]:
+    """Every unit this instance installs, as (unit filename, template name).
+
+    Computed rather than constant because the names carry the instance: a
+    staging install writes `workbench-staging.service` alongside production's
+    `workbench.service`, and the two must never resolve to the same file.
+    """
+    return (
+        (f"{service_name()}.service", "workbench.service.template"),
+        (f"{deploy_unit_name()}.service", "workbench-deploy.service.template"),
+        (f"{deploy_unit_name()}.timer", "workbench-deploy.timer.template"),
+    )
 
 
 def step(message: str) -> None:
@@ -156,23 +169,28 @@ def render_unit(template_name: str) -> str:
         "__PORT__": str(port()),
         "__BRANCH__": deploy_branch(),
         "__INTERVAL__": DEPLOY_INTERVAL,
+        "__INSTANCE__": instance(),
+        "__SERVICE__": service_name(),
+        # A staging install restores production's database before migrating;
+        # production leaves this empty and never restores anything.
+        "__RESTORE_FROM__": os.environ.get("WORKBENCH_RESTORE_FROM", "").strip(),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
     return template
 
 
-def install_units() -> bool:
-    """Write every unit whose rendered content has changed. Returns whether any did.
+def install_units() -> set[str]:
+    """Write every unit whose rendered content has changed. Returns which did.
 
     Separate from starting anything, because the deployer calls this too: a
     change to a unit template has to reach systemd on the next deploy, or it
     sits in the repository and only surfaces much later as a permission error
     inside an agent run.
     """
-    changed = False
+    changed: set[str] = set()
 
-    for unit_name, template_name in UNITS:
+    for unit_name, template_name in units():
         rendered = render_unit(template_name)
         target = SYSTEMD_DIR / unit_name
 
@@ -186,46 +204,69 @@ def install_units() -> bool:
         try:
             run(["cp", str(staged), str(target)], privileged=True)
             info(f"wrote {target}")
-            changed = True
+            changed.add(unit_name)
         finally:
             staged.unlink(missing_ok=True)
 
-    if changed:
-        run(["systemctl", "daemon-reload"], privileged=True)
-    else:
+    if not changed:
         info("units already up to date")
+        return changed
+
+    run(["systemctl", "daemon-reload"], privileged=True)
+
+    # A timer re-reads its schedule when restarted, not on daemon-reload alone,
+    # so a changed interval would otherwise not take effect until the next
+    # reboot. The service units are left alone here — restarting those is the
+    # caller's decision, and for workbench.service it is the deploy's last step.
+    timer = f"{deploy_unit_name()}.timer"
+    if timer in changed:
+        run(["systemctl", "restart", timer], privileged=True)
+        info(f"restarted {timer} to pick up its new schedule")
+
     return changed
 
 
 def install_service() -> None:
     install_units()
 
-    run(["systemctl", "enable", "--quiet", SERVICE_NAME], privileged=True)
-    run(["systemctl", "restart", SERVICE_NAME], privileged=True)
+    run(["systemctl", "enable", "--quiet", service_name()], privileged=True)
+    run(["systemctl", "restart", service_name()], privileged=True)
     info(f"service enabled and started as user '{service_user()}'")
 
     # Enabling the timer is what makes a merge to the deploy branch reach this
     # machine without anyone logging in.
-    run(["systemctl", "enable", "--now", "--quiet", f"{DEPLOY_NAME}.timer"], privileged=True)
+    run(["systemctl", "enable", "--now", "--quiet", f"{deploy_unit_name()}.timer"], privileged=True)
     info(f"deploying from '{deploy_branch()}' automatically, every {DEPLOY_INTERVAL}")
 
 
-def wait_for_health() -> None:
+def health_check(timeout: float = HEALTH_TIMEOUT_SECONDS) -> str | None:
+    """Wait for the service to answer. Returns an error message, or None.
+
+    A result rather than an exception because the deployer calls this too, and
+    that module reports failures into the journal instead of raising. The
+    installer turns None-or-message back into its own error below.
+    """
     url = f"http://{host()}:{port()}/healthz"
-    deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             if httpx.get(url, timeout=2.0).status_code == 200:
-                info("healthy")
-                return
+                return None
         except httpx.HTTPError:
             pass
         time.sleep(0.5)
 
-    raise InstallError(
-        f"the service did not answer {url} within {HEALTH_TIMEOUT_SECONDS:.0f}s.\n"
-        f"       Check:  journalctl -u {SERVICE_NAME} -n 50 --no-pager"
+    return (
+        f"the service did not answer {url} within {timeout:.0f}s.\n"
+        f"       Check:  journalctl -u {service_name()} -n 50 --no-pager"
     )
+
+
+def wait_for_health() -> None:
+    error = health_check()
+    if error is not None:
+        raise InstallError(error)
+    info("healthy")
 
 
 def report_success() -> None:
@@ -236,10 +277,10 @@ def report_success() -> None:
 Merges to '{deploy_branch()}' now deploy themselves, within {DEPLOY_INTERVAL}. Nothing
 needs running here again — the timer fetches, migrates, and restarts.
 
-    systemctl list-timers {DEPLOY_NAME}.timer     # when the next check lands
-    sudo systemctl start {DEPLOY_NAME}            # deploy right now
-    journalctl -u {DEPLOY_NAME} -n 50 --no-pager  # what the last one did
-    sudo systemctl disable --now {DEPLOY_NAME}.timer   # stop deploying
+    systemctl list-timers {deploy_unit_name()}.timer     # when the next check lands
+    sudo systemctl start {deploy_unit_name()}            # deploy right now
+    journalctl -u {deploy_unit_name()} -n 50 --no-pager  # what the last one did
+    sudo systemctl disable --now {deploy_unit_name()}.timer   # stop deploying
 
 To reach it from a phone over Tailscale (optional, and not automated because
 it needs a browser login to your own tailnet):
@@ -249,8 +290,8 @@ it needs a browser login to your own tailnet):
 
 Useful commands:
 
-    systemctl status {SERVICE_NAME}
-    journalctl -u {SERVICE_NAME} -f
+    systemctl status {service_name()}
+    journalctl -u {service_name()} -f
 """,
     )
 

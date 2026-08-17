@@ -10,7 +10,7 @@
 # Deploys can still be triggered by hand with `sudo systemctl start workbench-deploy`.
 
 [Unit]
-Description=Check __BRANCH__ for new commits to deploy
+Description=Check __BRANCH__ for new commits to deploy to __SERVICE__
 Documentation=https://github.com/idm23/workbench
 
 [Timer]

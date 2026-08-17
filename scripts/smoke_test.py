@@ -52,16 +52,22 @@ class Results:
         logger.warning("  %s %s", paint(YELLOW, "note"), message)
 
 
-def wait_until_healthy(client: httpx.Client) -> None:
-    """The service may still be starting, especially right after an install."""
+def wait_until_healthy(client: httpx.Client) -> bool:
+    """The service may still be starting, especially right after an install.
+
+    Returns whether it ever answered, so the caller can record an unreachable
+    service as a failed check instead of walking into a connection error on the
+    next request.
+    """
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         try:
             if client.get("/healthz", timeout=2.0).status_code == 200:
-                return
+                return True
         except httpx.HTTPError:
             pass
         time.sleep(0.5)
+    return False
 
 
 def run(base_url: str) -> Results:
@@ -69,7 +75,17 @@ def run(base_url: str) -> Results:
     user_name = f"smoketest-{int(time.time())}"
 
     with httpx.Client(base_url=base_url, follow_redirects=True, timeout=15.0) as client:
-        wait_until_healthy(client)
+        if not wait_until_healthy(client):
+            # Report it rather than raising. This script is run by the
+            # fresh-install test and by staging acceptance, both of which turn
+            # its exit code into a verdict — a traceback there reads as "the
+            # test is broken", not "the service is down".
+            results.check(
+                "service is reachable",
+                "an HTTP response",
+                f"nothing listening on {base_url} after {STARTUP_TIMEOUT_SECONDS:.0f}s",
+            )
+            return results
 
         results.check("health endpoint answers", '"status":"ok"', client.get("/healthz").text)
         results.check("user list renders", "Workbench", client.get("/").text)

@@ -51,16 +51,27 @@ Re-running it is safe — every step checks before acting, and your data is unto
 ## Tests
 
 ```sh
-uv run pytest                              # unit tests: schema and reference parsing
+uv run pytest                              # schema, migrations against real rows, units, deployer
 uv run ruff check . && uv run ruff format --check .
 uv run pyright
 uv run scripts/smoke_test.py               # end-to-end against a running install
 uv run scripts/test_fresh_install.py       # clean Ubuntu container, install, verify
+uv run scripts/test_deploy_cycle.py --force  # the deploy loop, on real systemd
 ```
 
 CI runs all of these on every push and pull request, plus `shellcheck install.sh` and
 `alembic check` — the latter fails if a model has been changed without generating a migration,
 which is invisible locally because your own database already has the change applied.
+
+`tests/test_migrations.py` applies migrations to a database that already has rows in it. Every
+other migration check runs against empty tables, where the failures that actually happen — a
+`NOT NULL` column with no default, a unique constraint real data violates — cannot occur.
+
+`test_deploy_cycle.py` is the only test that exercises systemd. It installs real units, needs
+passwordless sudo, and tears them down afterwards, so it refuses to run unless `CI=true` or
+`--force` — a laptop is not a disposable VM. Everything it covers (units loading, the timer
+scheduling, migrating, restarting, the health check, and the deployer's refusals) is otherwise
+unexecuted by any test until it runs on the server for real.
 
 `test_fresh_install.py` uses the working tree by default so you can check uncommitted work. Pass
 `--from-github` to test what someone cloning the public repo actually gets.
@@ -100,6 +111,87 @@ sudo systemctl start workbench-deploy             # deploy right now, do not wai
 journalctl -u workbench-deploy -n 50 --no-pager   # what the last one did
 sudo systemctl disable --now workbench-deploy.timer   # stop deploying automatically
 ```
+
+### Turning it on, once
+
+The deployer cannot install itself: a machine with no timer never checks for the commit that would
+give it one. So on a server that predates this, `install.sh` has to be run by hand exactly one
+final time.
+
+```sh
+ssh <server> 'cd ~/workbench && git pull && ./install.sh'
+```
+
+From then on that command is never needed again — and re-running it is harmless if you do.
+
+### This makes CI a gate, not a report
+
+Once the timer is live, a merge to `main` reaches the server within five minutes with nobody
+watching. Branch protection requiring the CI checks is what stands between a red build and a
+restarted service, so it stops being a nicety at this point.
+
+## Staging
+
+Nothing reaches `main` without having actually run somewhere first.
+
+```
+  branch ──PR──▶ staging ──deploys in 5min──▶ :8788 ──acceptance──▶ commit status
+                                                                          │
+                                              main ◀── you merge ◀────────┘
+                                               │
+                                               └── deploys in 5min ──▶ :8787
+```
+
+**Staging is a second install on the same box**, from the `staging` branch, on port 8788, with its
+own systemd units and its own `data/`. It comes almost free: a second checkout already has a
+separate database and virtualenv because both are repo-relative, so only the unit names needed
+disambiguating.
+
+**Before migrating, it restores a snapshot of production's database.** This is the point of it. A
+migration that passes against empty tables routinely fails against real rows — a `NOT NULL` column
+with no default, a unique constraint real data violates — and staging is the only place that gets
+caught before production. The snapshot uses SQLite's backup API rather than a file copy, because
+production is live and in WAL mode.
+
+**Acceptance runs on its own** after each staging deploy, and posts a `staging-acceptance` commit
+status to GitHub. That call is *outbound*, which is what makes this work without exposing the
+server: GitHub cannot ask how staging went, so the server tells it. Branch protection on `main`
+requires that status, so a commit that has never run on staging cannot be promoted.
+
+Promotion itself is a click. The status goes green on its own; merging is yours.
+
+```sh
+sudo systemctl start workbench-staging-deploy          # deploy staging now
+journalctl -u workbench-staging-deploy -n 50 --no-pager
+uv run scripts/staging_acceptance.py --no-report       # run the checks without reporting
+```
+
+### Setting staging up, once
+
+```sh
+git clone https://github.com/idm23/workbench.git ~/workbench-staging
+cd ~/workbench-staging && git checkout staging
+WORKBENCH_INSTANCE=staging WORKBENCH_PORT=8788 WORKBENCH_DEPLOY_BRANCH=staging \
+  WORKBENCH_RESTORE_FROM=$HOME/workbench/data/workbench.db ./install.sh
+```
+
+Those variables are baked into the rendered units, so they persist across deploys and never need
+setting again.
+
+### What GitHub needs
+
+- A `staging` branch.
+- **Protect `main`:** require a pull request; require these checks, with branches up to date —
+  `Lint, types, and tests`, `Fresh install on clean Ubuntu`, `Deploy cycle on systemd`, and
+  `staging-acceptance`. Block force pushes.
+- **Protect `staging`:** require the three CI checks, but *not* `staging-acceptance` — that status
+  is produced by deploying staging, so requiring it there is circular.
+- A fine-grained PAT in `/etc/workbench/env` as `WORKBENCH_GITHUB_TOKEN` (mode 0600), scoped to
+  this repository with **Contents: Read** and **Commit statuses: Read and write**.
+
+Requiring `staging-acceptance` on `main` is what enforces the flow, and it means a hotfix cannot
+skip staging without an admin override. That is deliberate, but worth knowing before you need it at
+2am.
 
 It **polls** rather than being pushed to, because the server has no public ingress — it is on a
 tailnet and `tailscale funnel` is ruled out, so neither GitHub nor a CI runner can reach in. A

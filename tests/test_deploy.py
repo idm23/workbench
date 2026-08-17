@@ -1,16 +1,30 @@
-"""The automatic deployer's refusals.
+"""The automatic deployer.
 
-The happy path needs a real remote and root, so what is tested here is
-everything the deployer must decline to do. Those are the cases that matter:
-a deploy that wrongly proceeds discards someone's work or restarts the service
-into a schema it does not match, and both are silent until much later.
+Split in two because the halves are testable to different depths.
+`advance_checkout` decides whether to deploy and moves the checkout, and every
+refusal lives there — wrong branch, dirty tree, diverged history. Those are the
+cases that matter most: a deploy that wrongly proceeds discards someone's work
+or restarts the service into a schema it does not match, and both are silent
+until much later. All of it runs against a real git remote here.
+
+`rebuild_and_restart` needs root, a virtualenv, and systemd, so it is exercised
+on the server rather than in this file.
 """
 
+import sqlite3
 import subprocess
 
 import pytest
 
-from workbench.deploy import AlreadyCurrent, Deployed, DeployFailed, deploy
+from workbench.deploy import (
+    Advanced,
+    AlreadyCurrent,
+    Deployed,
+    DeployFailed,
+    advance_checkout,
+    deploy,
+    restore_snapshot,
+)
 
 
 def git(path, *args) -> str:
@@ -134,3 +148,200 @@ def test_results_are_distinguishable_without_catching_anything():
     assert not isinstance(AlreadyCurrent("abc123"), DeployFailed)
     assert not isinstance(Deployed("abc123"), DeployFailed)
     assert DeployFailed("step", "why").step == "step"
+
+
+# --- Actually advancing ------------------------------------------------------
+#
+# The refusals above are only half the contract. These check the deployer does
+# the thing it exists for, which nothing else in this file proves.
+
+
+def test_new_commits_are_fast_forwarded_in(checkout, monkeypatch):
+    work, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    advance_origin(origin)
+
+    result = advance_checkout()
+
+    assert isinstance(result, Advanced)
+    assert (work / "README.md").read_text() == "two\n"
+    assert git(work, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
+
+
+def test_advancing_reports_the_revision_it_landed_on(checkout, monkeypatch):
+    work, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    advance_origin(origin)
+
+    result = advance_checkout()
+
+    assert isinstance(result, Advanced)
+    assert result.revision == git(work, "rev-parse", "--short", "HEAD")
+
+
+def test_several_commits_land_in_one_go(checkout, monkeypatch):
+    """A weekend of merges is one deploy, not one per commit."""
+    work, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    for index in range(3):
+        (origin / f"file{index}.txt").write_text("x\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-qm", f"change {index}")
+
+    assert isinstance(advance_checkout(), Advanced)
+    assert git(work, "rev-parse", "HEAD") == git(origin, "rev-parse", "HEAD")
+    assert (work / "file2.txt").exists()
+
+
+def test_advancing_twice_is_a_no_op_the_second_time(checkout, monkeypatch):
+    """The timer fires every few minutes; all but one tick must do nothing."""
+    _, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    advance_origin(origin)
+
+    assert isinstance(advance_checkout(), Advanced)
+    assert isinstance(advance_checkout(), AlreadyCurrent)
+
+
+def test_a_failed_rebuild_is_reported_not_raised(checkout, monkeypatch):
+    """deploy() composes the halves: a rebuild failure surfaces as a result."""
+    _, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    advance_origin(origin)
+    monkeypatch.setattr(
+        "workbench.deploy.rebuild_and_restart",
+        lambda: DeployFailed("applying migrations", "boom"),
+    )
+
+    result = deploy()
+
+    assert isinstance(result, DeployFailed)
+    assert result.step == "applying migrations"
+
+
+def test_a_successful_rebuild_reports_the_new_revision(checkout, monkeypatch):
+    work, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    advance_origin(origin)
+    monkeypatch.setattr("workbench.deploy.rebuild_and_restart", lambda: None)
+
+    result = deploy()
+
+    assert isinstance(result, Deployed)
+    assert result.revision == git(work, "rev-parse", "--short", "HEAD")
+
+
+def test_nothing_is_rebuilt_when_there_is_nothing_to_deploy(checkout, monkeypatch):
+    """The common tick must not pay for a sync and a restart."""
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "workbench.deploy.rebuild_and_restart",
+        lambda: calls.append(1),  # pyright: ignore[reportArgumentType]
+    )
+
+    assert isinstance(deploy(), AlreadyCurrent)
+    assert calls == []
+
+
+# --- Restoring a snapshot before migrating -----------------------------------
+#
+# Staging copies production's database over its own before running migrations,
+# so a revision meets real rows before it meets the machine you depend on.
+# Production must never do this: it would be overwriting live data every deploy.
+
+
+def make_database(path, rows: int = 3) -> None:
+    """A WAL-mode database with content, like the one on the server."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+        connection.executemany(
+            "INSERT INTO users (name) VALUES (?)", [(f"user-{n}",) for n in range(rows)]
+        )
+
+
+def count_users(path) -> int:
+    with sqlite3.connect(path) as connection:
+        return connection.execute("SELECT count(*) FROM users").fetchone()[0]
+
+
+def test_no_restore_configured_is_a_no_op(checkout, monkeypatch):
+    monkeypatch.delenv("WORKBENCH_RESTORE_FROM", raising=False)
+
+    assert restore_snapshot() is None
+
+
+def test_a_snapshot_replaces_this_instances_database(checkout, tmp_path, monkeypatch):
+    work, _ = checkout
+    source = tmp_path / "prod" / "workbench.db"
+    make_database(source, rows=5)
+    monkeypatch.setenv("WORKBENCH_RESTORE_FROM", str(source))
+    monkeypatch.setenv("WORKBENCH_DB", str(work / "data" / "workbench.db"))
+
+    assert restore_snapshot() is None
+    assert count_users(work / "data" / "workbench.db") == 5
+
+
+def test_a_snapshot_overwrites_what_staging_already_had(checkout, tmp_path, monkeypatch):
+    """Staging is disposable; each deploy starts from production's rows again."""
+    work, _ = checkout
+    source = tmp_path / "prod" / "workbench.db"
+    target = work / "data" / "workbench.db"
+    make_database(source, rows=5)
+    make_database(target, rows=99)
+    monkeypatch.setenv("WORKBENCH_RESTORE_FROM", str(source))
+    monkeypatch.setenv("WORKBENCH_DB", str(target))
+
+    assert restore_snapshot() is None
+    assert count_users(target) == 5
+
+
+def test_restoring_from_a_live_wal_database_captures_committed_rows(
+    checkout, tmp_path, monkeypatch
+):
+    """The reason this uses sqlite3's backup API rather than copying the file.
+
+    With WAL, committed data lives partly in the write-ahead log, so a plain
+    copy of the .db can miss rows that are definitely committed.
+    """
+    work, _ = checkout
+    source = tmp_path / "prod" / "workbench.db"
+    make_database(source, rows=2)
+
+    held_open = sqlite3.connect(source)
+    held_open.execute("INSERT INTO users (name) VALUES ('written-into-the-wal')")
+    held_open.commit()
+
+    monkeypatch.setenv("WORKBENCH_RESTORE_FROM", str(source))
+    monkeypatch.setenv("WORKBENCH_DB", str(work / "data" / "workbench.db"))
+    try:
+        assert restore_snapshot() is None
+        assert count_users(work / "data" / "workbench.db") == 3
+    finally:
+        held_open.close()
+
+
+def test_a_missing_snapshot_is_reported_not_ignored(checkout, tmp_path, monkeypatch):
+    """Silently skipping would make staging quietly stop testing what it exists for."""
+    monkeypatch.setenv("WORKBENCH_RESTORE_FROM", str(tmp_path / "nope.db"))
+
+    result = restore_snapshot()
+
+    assert isinstance(result, DeployFailed)
+    assert result.step == "restoring the database snapshot"
+
+
+def test_an_instance_refuses_to_restore_over_itself(checkout, tmp_path, monkeypatch):
+    """Misconfiguring production this way would wipe it on every deploy."""
+    source = tmp_path / "prod" / "workbench.db"
+    make_database(source)
+    monkeypatch.setenv("WORKBENCH_RESTORE_FROM", str(source))
+    monkeypatch.setenv("WORKBENCH_DB", str(source))
+
+    result = restore_snapshot()
+
+    assert isinstance(result, DeployFailed)
+    assert "own database" in result.message
+    assert count_users(source) == 3

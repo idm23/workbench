@@ -164,6 +164,46 @@ hand is never interrupted and nothing is discarded. A migration failure stops th
 *before* the restart, leaving the old code running against the schema it matches — a
 failed deploy should not become an outage.
 
+**Required CI checks are now load-bearing.** A merge reaches the server within five
+minutes with nobody watching, so branch protection is the only thing standing between a
+red build and a restarted service. Turning the timer on and leaving `main` unprotected
+would be the actual risk here, not the automation itself.
+
+### Staging, and why promotion stays manual
+
+`staging` is a second install on the same box — its own units, port 8788, its own `data/`
+— deployed by the same timer from the `staging` branch. Two things make it worth having
+rather than just running CI twice:
+
+- **It migrates a snapshot of production before every deploy.** A migration that passes
+  against empty tables routinely fails against real rows, and this is the only place that
+  is caught before production. The snapshot uses SQLite's backup API, never a file copy,
+  because production is live and in WAL mode.
+- **It is reachable from a phone**, so "does this actually feel right" is answerable
+  before promoting rather than after.
+
+Acceptance runs automatically after each staging deploy and POSTs a `staging-acceptance`
+commit status. That call is **outbound**, which is what lets the whole flow work without
+exposing the server — GitHub cannot ask how staging went, so the server tells it. The same
+no-ingress constraint that forced polling shapes this too. Branch protection on `main`
+requires that status, so a commit that never ran on staging cannot be promoted.
+
+**Merging is deliberately a human action.** The status goes green on its own; nothing
+merges itself. This tool's purpose is running agents that write code, and agent-authored
+changes will be the main thing flowing through this pipeline — a person looking before it
+reaches the machine they depend on is worth the click. Auto-merge is one GitHub setting
+away once the acceptance suite has earned that trust.
+
+**A failed acceptance is not a failed deploy.** Staging keeps the code it just installed,
+because that is the state someone needs in order to go and look at what broke. What it
+does instead is post red, which is what stops promotion.
+
+**It cannot install itself.** A machine with no timer never checks for the commit that
+would give it one, so `install.sh` gets run by hand exactly one last time on any server
+that predates this. Worth noting because it is the one place the reproducibility rule
+bends: a *fresh* clone gets the timer from the first install, and only an existing
+deployment needs the manual step.
+
 **The deployer runs as root, the app does not.** It needs to restart the unit, so it drops
 to the checkout's owner with `runuser` for every command touching git, the virtualenv, or
 the database. Doing that work as root would leave root-owned files that the unprivileged

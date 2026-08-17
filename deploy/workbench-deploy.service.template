@@ -13,7 +13,7 @@
 # cgroup and this one survives to log the outcome.
 
 [Unit]
-Description=Deploy Workbench from __BRANCH__
+Description=Deploy Workbench (__SERVICE__) from __BRANCH__
 Documentation=https://github.com/idm23/workbench
 After=network-online.target
 Wants=network-online.target
@@ -31,6 +31,20 @@ ExecStart=__REPO__/.venv/bin/python -m workbench.deploy
 Environment=WORKBENCH_DB=__REPO__/data/workbench.db
 Environment=WORKBENCH_DEPLOY_BRANCH=__BRANCH__
 Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Which install this deployer owns. Without it a second instance's deployer
+# would resolve the default unit names and restart production instead.
+Environment=WORKBENCH_INSTANCE=__INSTANCE__
+Environment=WORKBENCH_PORT=__PORT__
+
+# Empty on production. On staging this names production's database, which is
+# snapshotted over staging's before migrations run — the point of staging being
+# that a revision meets real rows before it meets the machine you depend on.
+Environment=WORKBENCH_RESTORE_FROM=__RESTORE_FROM__
+
+# Credentials, when there are any: the token used to report the staging result
+# back to GitHub. Optional, and absent on a fresh install.
+EnvironmentFile=-/etc/workbench/env
 
 # No ProtectSystem here: this unit's whole job is to write to the checkout and
 # to /etc/systemd/system. It runs for seconds, on a timer, executing code that

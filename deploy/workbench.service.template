@@ -2,7 +2,7 @@
 # Not installed directly; see install.sh.
 
 [Unit]
-Description=Workbench
+Description=Workbench (__SERVICE__) on __BRANCH__
 Documentation=https://github.com/idm23/workbench
 After=network-online.target
 Wants=network-online.target
@@ -17,6 +17,12 @@ WorkingDirectory=__REPO__
 ExecStart=__REPO__/.venv/bin/uvicorn workbench.app:app --host __HOST__ --port __PORT__
 Environment=WORKBENCH_DB=__REPO__/data/workbench.db
 Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Carried so the app agrees with its own units about which install it is. Two
+# instances share a machine and differ only by these; a mismatch would have the
+# staging deployer restarting production.
+Environment=WORKBENCH_INSTANCE=__INSTANCE__
+Environment=WORKBENCH_PORT=__PORT__
 
 Restart=always
 RestartSec=2

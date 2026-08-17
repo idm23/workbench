@@ -70,6 +70,53 @@ def deploy_branch() -> str:
     return os.environ.get("WORKBENCH_DEPLOY_BRANCH", "main")
 
 
+def instance() -> str:
+    """Which install this is: empty for production, `staging` for staging.
+
+    Two installs coexist on one machine, and almost everything that separates
+    them is already free — a second checkout gets its own `data/` and venv
+    because those are repo-relative, and the port is configurable. Unit names
+    are the exception: without a suffix the second install would overwrite the
+    first's systemd units and then restart it on every deploy.
+    """
+    return os.environ.get("WORKBENCH_INSTANCE", "").strip().strip("-")
+
+
+def service_name() -> str:
+    """The systemd unit name for this instance, without the `.service`."""
+    suffix = instance()
+    return f"workbench-{suffix}" if suffix else "workbench"
+
+
+def deploy_unit_name() -> str:
+    """The deployer's unit name, without the `.service` or `.timer`."""
+    return f"{service_name()}-deploy"
+
+
+def github_token() -> str | None:
+    """A fine-grained PAT, if one has been configured.
+
+    Optional by design: without it the app still manages tasks and the deployer
+    still fetches a public repository. Only reporting the staging result back
+    to GitHub needs it — which is what branch protection on `main` waits for,
+    so a missing token stalls promotion rather than breaking anything.
+    """
+    token = os.environ.get("WORKBENCH_GITHUB_TOKEN", "").strip()
+    return token or None
+
+
+def restore_from() -> Path | None:
+    """Another instance's database to copy over this one before migrating.
+
+    Set on staging and never on production. This is what makes staging a real
+    test of a migration rather than a rehearsal against empty tables.
+    """
+    configured = os.environ.get("WORKBENCH_RESTORE_FROM", "").strip()
+    if not configured:
+        return None
+    return Path(configured).expanduser().resolve()
+
+
 def host() -> str:
     return os.environ.get("WORKBENCH_HOST", "127.0.0.1")
 
