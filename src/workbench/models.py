@@ -22,6 +22,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from workbench.config import DEFAULT_BACKEND
+
 # Explicit constraint naming matters more than usual here: SQLite cannot ALTER
 # most constraints, so Alembic rewrites the table instead (batch mode), and it
 # can only do that for constraints it can name.
@@ -60,8 +62,42 @@ class TaskStatus(StrEnum):
 
 
 class RunPhase(StrEnum):
+    """Workbench's own two-step workflow, not a property of any backend.
+
+    A backend with no read-only mode of its own can honour the plan phase by
+    instruction rather than enforcement; the phases are what Workbench asks
+    for, and adapting to them is the adapter's job.
+    """
+
     PLAN = "plan"
     EXECUTE = "execute"
+
+
+class RunEventKind(StrEnum):
+    """The vocabulary a run's output is recorded in.
+
+    Deliberately Workbench's own rather than whatever an SDK happens to emit.
+    A backend adapter translates into these, so the event log, the SSE stream,
+    and the templates keep working when the backend behind them changes, and a
+    run recorded a year ago stays readable after a switch.
+
+    Anything a backend emits with no equivalent here belongs in NOTICE rather
+    than in a new member — the set only grows when the *reader* needs the
+    distinction.
+    """
+
+    #: Prose from the agent, meant to be read.
+    TEXT = "text"
+    #: Reasoning, where the backend exposes it separately from prose.
+    THINKING = "thinking"
+    #: The agent invoked a tool.
+    TOOL_USE = "tool_use"
+    #: What that tool returned.
+    TOOL_RESULT = "tool_result"
+    #: A lifecycle change Workbench itself recorded, not the backend.
+    STATUS = "status"
+    #: Anything else worth showing: backend chatter, warnings, progress.
+    NOTICE = "notice"
 
 
 class RunStatus(StrEnum):
@@ -149,6 +185,12 @@ class Project(Base):
     # files only — no .env, no node_modules, no venv — so most first builds in a
     # fresh worktree fail for reasons unrelated to the task.
     setup_command: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # Which agent to use for this project's tasks. Null means the configured
+    # default, so choosing a backend is per project rather than per machine,
+    # and changing it here only affects runs started afterwards — existing runs
+    # keep the backend recorded on them.
+    agent_backend: Mapped[str | None] = mapped_column(String(50), default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -262,9 +304,27 @@ class Run(Base):
         index=True,
     )
 
-    # The SDK's session, kept so the execute phase can resume the conversation
-    # that produced the plan rather than starting cold.
-    session_id: Mapped[str | None] = mapped_column(String(100), default=None)
+    # Which agent actually ran this. A plain string rather than an enum: the
+    # set of backends is open, and someone adding their own should not have to
+    # write a migration to do it.
+    #
+    # Recorded per run, not just configured globally, because the moment a
+    # second backend exists every historical row becomes ambiguous without it —
+    # and unlike most columns this one cannot be backfilled from anything.
+    backend: Mapped[str] = mapped_column(String(50), default=DEFAULT_BACKEND)
+
+    # What that backend was actually pointed at. Null when the backend does not
+    # name its model, or does not have one.
+    model: Mapped[str | None] = mapped_column(String(100), default=None)
+
+    # An opaque handle for continuing this conversation, so the execute phase
+    # resumes the plan rather than starting cold.
+    #
+    # Deliberately not named for any one backend's concept of a session, and
+    # deliberately never parsed: it means nothing except to the backend that
+    # issued it, and nothing at all to a different one. Always read it together
+    # with `backend` above.
+    resume_token: Mapped[str | None] = mapped_column(String(200), default=None)
 
     # The detached runner process. Used to cancel a run, and to notice one that
     # died without recording an outcome.
@@ -276,7 +336,9 @@ class Run(Base):
     pr_url: Mapped[str | None] = mapped_column(String(500), default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
 
-    # Reported by the SDK on completion. Recorded now because backfilling cost
+    # Reported by the backend on completion, where it reports them at all — a
+    # locally hosted model will leave cost null rather than zero. Recorded now
+    # because backfilling cost
     # after the fact is impossible.
     total_cost_usd: Mapped[float | None] = mapped_column(Float, default=None)
     num_turns: Mapped[int | None] = mapped_column(Integer, default=None)
@@ -321,7 +383,19 @@ class RunEvent(Base):
 
     #: Monotonic per run, starting at 1. Doubles as the SSE event id.
     seq: Mapped[int] = mapped_column(Integer)
-    kind: Mapped[str] = mapped_column(String(40))
+
+    #: Constrained to Workbench's own vocabulary rather than left free-form, so
+    #: two backends cannot end up writing two spellings of the same thing and
+    #: the templates keep rendering old runs after a switch.
+    kind: Mapped[RunEventKind] = mapped_column(
+        Enum(
+            RunEventKind,
+            native_enum=False,
+            create_constraint=False,
+            length=40,
+            values_callable=_stored_values,
+        )
+    )
 
     #: The event's contents, shape depending on `kind`.
     #:

@@ -10,12 +10,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from workbench.config import DEFAULT_BACKEND
 from workbench.db import make_engine
 from workbench.models import (
     Base,
     Project,
     Run,
     RunEvent,
+    RunEventKind,
     RunPhase,
     RunStatus,
     Task,
@@ -310,3 +312,145 @@ def test_terminal_states(status, terminal):
 def test_active_states_hold_a_concurrency_slot(status, active):
     """A run waiting on a person must not occupy a slot while it waits."""
     assert status.is_active is active
+
+
+# --- Backend independence ----------------------------------------------------
+#
+# Workbench is not tied to one agent. These pin the properties that make
+# switching possible without rewriting history: every run says which backend
+# produced it, resume handles are opaque, and the event vocabulary is
+# Workbench's rather than any SDK's.
+
+
+def test_a_run_records_which_backend_produced_it(session, project):
+    task = _task(project)
+    session.add(task)
+    session.commit()
+
+    run = Run(task_id=task.id, phase=RunPhase.PLAN)
+    session.add(run)
+    session.commit()
+
+    assert run.backend == DEFAULT_BACKEND
+
+
+def test_runs_from_different_backends_coexist(session, project):
+    """Switching backends must not relabel or invalidate earlier runs."""
+    task = _task(project)
+    session.add(task)
+    session.commit()
+
+    session.add_all(
+        [
+            Run(task_id=task.id, phase=RunPhase.PLAN, backend="claude", model="claude-opus-5"),
+            Run(task_id=task.id, phase=RunPhase.PLAN, backend="something-else", model="m-1"),
+        ]
+    )
+    session.commit()
+    session.expire_all()
+
+    backends = {run.backend for run in session.query(Run).all()}
+    assert backends == {"claude", "something-else"}
+
+
+def test_backend_is_not_constrained_to_a_known_set(session, project):
+    """Adding a backend must not require a migration."""
+    task = _task(project)
+    session.add(task)
+    session.commit()
+
+    session.add(Run(task_id=task.id, phase=RunPhase.PLAN, backend="a-backend-nobody-wrote-yet"))
+    session.commit()
+
+    assert session.query(Run).one().backend == "a-backend-nobody-wrote-yet"
+
+
+def test_resume_token_is_stored_opaquely(session, project):
+    """It means nothing except to the backend that issued it, so it is never parsed."""
+    task = _task(project)
+    session.add(task)
+    session.commit()
+
+    token = "whatever::the-backend/wants|1234-5678"
+    session.add(Run(task_id=task.id, phase=RunPhase.PLAN, resume_token=token))
+    session.commit()
+    session.expire_all()
+
+    assert session.query(Run).one().resume_token == token
+
+
+def test_a_run_without_a_model_or_cost_is_valid(session, project):
+    """A locally hosted backend may report neither."""
+    task = _task(project)
+    session.add(task)
+    session.commit()
+
+    session.add(Run(task_id=task.id, phase=RunPhase.PLAN, backend="local"))
+    session.commit()
+    session.expire_all()
+
+    run = session.query(Run).one()
+    assert run.model is None
+    assert run.total_cost_usd is None
+
+
+def test_project_backend_defaults_to_unset(session, project):
+    """Null means "use the configured default", not "claude"."""
+    assert project.agent_backend is None
+
+
+def test_project_can_override_the_backend(session, project):
+    project.agent_backend = "something-else"
+    session.commit()
+    session.expire_all()
+
+    assert session.query(Project).one().agent_backend == "something-else"
+
+
+def test_event_kinds_are_workbenchs_vocabulary_not_an_sdks(session, project):
+    """Backends translate into these, so old runs stay readable after a switch."""
+    task = _task(project)
+    session.add(task)
+    session.commit()
+    run = Run(task_id=task.id, phase=RunPhase.PLAN)
+    session.add(run)
+    session.commit()
+
+    session.add_all(
+        [
+            RunEvent(run_id=run.id, seq=index, kind=kind, payload={})
+            for index, kind in enumerate(RunEventKind, start=1)
+        ]
+    )
+    session.commit()
+    session.expire_all()
+
+    stored = {event.kind for event in session.query(RunEvent).all()}
+    assert stored == set(RunEventKind)
+
+
+def test_event_kind_is_stored_as_its_value(session, project):
+    task = _task(project)
+    session.add(task)
+    session.commit()
+    run = Run(task_id=task.id, phase=RunPhase.PLAN)
+    session.add(run)
+    session.commit()
+    session.add(RunEvent(run_id=run.id, seq=1, kind=RunEventKind.TOOL_USE, payload={}))
+    session.commit()
+
+    stored = session.execute(text("SELECT kind FROM run_events")).scalar_one()
+    assert stored == "tool_use"
+
+
+def test_no_column_or_table_is_named_for_a_vendor():
+    """A schema that names one backend is a schema that assumes it."""
+    named = [
+        f"{table.name}.{column.name}"
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        if "claude" in column.name.lower() or "anthropic" in column.name.lower()
+    ]
+
+    assert named == []
+    assert not any("claude" in name.lower() for name in Base.metadata.tables)

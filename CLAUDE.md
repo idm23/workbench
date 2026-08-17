@@ -10,7 +10,9 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > app installed with `./install.sh`, which then keeps itself up to date from `main`. The
 > tables for tasks, runs, and run events exist, but nothing reads or writes them yet —
 > the schema landed ahead of the code so that the deploy pipeline had something real to
-> migrate. Worktrees and agents do not exist. See `README.md` for what is actually live.
+> migrate. Worktrees and agents do not exist, and **no agent backend is chosen or
+> depended on**: there is nothing vendor-specific in the repo. See `README.md` for what
+> is actually live.
 
 ## Reproducibility is a project goal
 
@@ -47,14 +49,35 @@ Two things are deliberately *not* automated, and are decisions rather than overs
 
 ## Decisions already made
 
-**Language: Python.** FastAPI + uvicorn, SQLite via the stdlib `sqlite3`, SSE for
-streaming agent output to the browser. The `claude-agent-sdk` package is a pure Python
-package, so the server needs no Node install — the server has no Node and we intend to
-keep it that way. Two caveats to verify before relying on this (see Open questions):
-the SDK may require the Claude Code CLI on `PATH` separately, and the server's Python is
-3.14, new enough that wheels for the SDK and its dependencies are not guaranteed.
-Ubuntu 26.04 enforces PEP 668, so everything installs into a venv rather than system
-Python.
+**Language: Python.** FastAPI + uvicorn, SQLite via SQLAlchemy, SSE for streaming agent
+output to the browser. Ubuntu 26.04 enforces PEP 668, so everything installs into a venv
+rather than system Python.
+
+**The server has no Node, and keeping it that way is a constraint on backend choice**
+rather than a consequence of one. A backend that needs a Node runtime on the box has to
+justify it. The server's Python is 3.14, new enough that wheels are not guaranteed for
+everything — worth checking in a throwaway venv before committing to any SDK.
+
+**The agent backend is swappable, and the schema assumes so.** Claude is the first
+implementation, not the interface. Nothing in the data model is named for a vendor, and
+three things exist specifically to keep a later switch cheap:
+
+- **`runs.backend` and `runs.model`** record what actually ran each attempt. This is the
+  one column that genuinely cannot be backfilled — the moment a second backend exists,
+  every earlier row is ambiguous without it. `projects.agent_backend` overrides the
+  machine-wide `WORKBENCH_AGENT_BACKEND` default per project.
+- **`runs.resume_token` is opaque.** It is never parsed, and it means nothing to a
+  backend other than the one that issued it, which is why it is always read together
+  with `runs.backend`. Named for what it does rather than after any SDK's "session".
+- **`RunEventKind` is Workbench's vocabulary**, not a passthrough of whatever an SDK
+  emits: `text`, `thinking`, `tool_use`, `tool_result`, `status`, `notice`. Backends
+  translate into it. This is what keeps a run recorded a year ago readable after a
+  switch, and stops two backends spelling the same thing two ways. It only grows when a
+  *reader* needs a new distinction; anything else is a `notice`.
+
+The remaining coupling is in the code that has not been written yet. When the agent
+slice lands, the SDK import belongs behind one adapter that yields `RunEventKind` events
+and an opaque resume token — not scattered through the runner.
 
 **Tasks live in local SQLite, not GitHub Issues.** GitHub is used for code hosting,
 remotes, and PRs only. Issues were considered and rejected: every UI interaction

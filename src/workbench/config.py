@@ -45,6 +45,22 @@ def ensure_data_dir() -> Path:
     return path
 
 
+#: The agent backend used when nothing selects another one. A name, not an
+#: import: nothing here knows what implements it, or that Claude exists.
+DEFAULT_BACKEND = "claude"
+
+
+def default_agent_backend() -> str:
+    """Which agent backend to use when a project does not name one.
+
+    Workbench is not tied to one agent. This is the machine-wide default; a
+    project may override it, and every run records which backend actually ran
+    it, so switching later leaves old runs correctly attributed rather than
+    silently relabelled.
+    """
+    return os.environ.get("WORKBENCH_AGENT_BACKEND", DEFAULT_BACKEND).strip() or DEFAULT_BACKEND
+
+
 def deploy_branch() -> str:
     """The branch the automatic deployer follows.
 
