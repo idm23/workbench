@@ -37,7 +37,6 @@ from workbench.config import (
     deploy_branch,
     ensure_data_dir,
     host,
-    instance,
     port,
     repo_root,
     restore_from,
@@ -56,6 +55,10 @@ RESTART_TIMEOUT_SECONDS = 120
 #: Acceptance drives the app over HTTP and reports to GitHub; generous so a
 #: slow check never looks like a failed deploy.
 ACCEPTANCE_TIMEOUT_SECONDS = 600
+
+#: staging_acceptance.py's exit code for "the checks ran, the verdict did not
+#: reach GitHub". Kept in step with EXIT_NOT_REPORTED there.
+ACCEPTANCE_EXIT_NOT_REPORTED = 3
 
 
 @dataclass(frozen=True)
@@ -329,19 +332,29 @@ def deploy() -> DeployResult:
 
 
 def run_acceptance() -> None:
-    """On staging only: exercise what just deployed and report it to GitHub.
+    """Where the data is disposable: exercise what just deployed, and report it.
 
-    Deliberately does not change the deploy's own result. Staging failing its
-    acceptance checks is not a failed *deploy* — the code is installed and
-    running, and that is exactly the state someone needs in order to go and
-    look at what broke. What it does instead is post a red commit status, which
-    is what stops the revision being promoted to `main`.
+    **Gated on `restore_from()`, not on being a non-production instance.**
+    Acceptance drives the app over HTTP and creates records as it goes, so it
+    can only run where losing data is fine. An instance that replaces its whole
+    database from a snapshot on every deploy is exactly that, and nothing else
+    is — so the same setting that makes staging disposable is the one that
+    makes running this against it safe.
+
+    Testing `instance()` instead would mean any second install gets its data
+    quietly mutated by a deploy. That is not hypothetical: it is how this was
+    found, when the CI instance's seeded rows were rewritten mid-test.
+
+    Deliberately does not change the deploy's own result. Failing acceptance is
+    not a failed *deploy* — the code is installed and running, which is exactly
+    the state someone needs in order to go and look at what broke. What it does
+    instead is post a red commit status, which is what stops promotion.
 
     Runs as the checkout's owner rather than as root: it opens the database,
     and SQLite would leave root-owned WAL files beside it that the
     unprivileged service could then not write.
     """
-    if not instance():
+    if restore_from() is None:
         return
 
     script = repo_root() / "scripts" / "staging_acceptance.py"
@@ -356,10 +369,17 @@ def run_acceptance() -> None:
         timeout=ACCEPTANCE_TIMEOUT_SECONDS,
     )
     logger.info("%s", (result.stdout or result.stderr).strip())
-    if result.returncode != 0:
+
+    if result.returncode == ACCEPTANCE_EXIT_NOT_REPORTED:
         logger.warning(
-            "Staging acceptance failed. The deploy itself succeeded; the commit "
-            "status posted to GitHub is what blocks promotion."
+            "Acceptance ran but its verdict never reached GitHub — check "
+            "WORKBENCH_GITHUB_TOKEN in /etc/workbench/env. Promotion waits on that "
+            "status, so it will stall with nothing obviously wrong."
+        )
+    elif result.returncode != 0:
+        logger.warning(
+            "Staging acceptance failed. The deploy itself succeeded; the red commit "
+            "status is what blocks promotion."
         )
 
 

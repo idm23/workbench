@@ -167,18 +167,29 @@ def trigger_deploy() -> str:
     return run(["sudo", "journalctl", "-u", DEPLOYER, "-n", "60", "--no-pager"], check=False).stdout
 
 
+#: Distinctive enough that finding it later means *this* row survived, rather
+#: than that something happened to leave the right number of rows behind.
+SEEDED_USER = "deploy-cycle-witness"
+
+
 def seed_data() -> None:
     base = f"http://127.0.0.1:{PORT}"
     with httpx.Client(base_url=base, follow_redirects=True, timeout=15.0) as client:
-        client.post("/users", data={"name": "deploy-cycle"})
+        client.post("/users", data={"name": SEEDED_USER})
         page = client.get("/").text
         user = [link for link in page.split('"') if link.startswith("/users/")][-1]
         client.post(f"{user}/projects", data={"reference": "idm23/workbench"})
 
 
-def user_count() -> int:
+def seeded_data_present() -> bool:
+    """Whether the specific row seeded earlier is still there.
+
+    Named rather than counted. A count would pass if a row were destroyed and
+    an unrelated one created — which is not a hypothetical, since anything
+    driving the app over HTTP adds users.
+    """
     with httpx.Client(base_url=f"http://127.0.0.1:{PORT}", timeout=15.0) as client:
-        return client.get("/").text.count("/users/")
+        return SEEDED_USER in client.get("/").text
 
 
 # --- The test ----------------------------------------------------------------
@@ -204,7 +215,7 @@ def test_deploys_a_new_commit() -> None:
     step("Deploying a new commit")
     before = git("rev-parse", "HEAD", cwd=CHECKOUT)
     seed_data()
-    seeded = user_count()
+    expect(seeded_data_present(), "test data was seeded")
 
     revision = commit_to_origin("a deployable change", {"DEPLOYED.md": "landed\n"})
     trigger_deploy()
@@ -215,7 +226,23 @@ def test_deploys_a_new_commit() -> None:
     expect(git("rev-parse", "HEAD", cwd=CHECKOUT) != before, "revision actually changed")
     expect((CHECKOUT / "DEPLOYED.md").is_file(), "the new file is present in the checkout")
     expect(healthy(), "service is healthy after the restart")
-    expect(user_count() == seeded, "seeded data survived the deploy")
+    expect(seeded_data_present(), "seeded data survived the deploy")
+
+
+def test_acceptance_does_not_run_where_data_matters() -> None:
+    """This instance restores no snapshot, so nothing should have mutated it.
+
+    The regression test for the bug this found: acceptance was gated on "not
+    production" rather than "data is disposable", so it ran here and rewrote
+    the rows the check above depends on.
+    """
+    step("Leaving a non-disposable instance's data alone")
+    journal = run(
+        ["sudo", "journalctl", "-u", DEPLOYER, "-n", "200", "--no-pager"], check=False
+    ).stdout
+
+    expect("Running staging acceptance" not in journal, "acceptance was not run")
+    expect(seeded_data_present(), "seeded data is still untouched")
 
 
 def test_unit_changes_reach_systemd() -> None:
@@ -326,6 +353,7 @@ def main() -> int:
         build_origin()
         install()
         test_deploys_a_new_commit()
+        test_acceptance_does_not_run_where_data_matters()
         test_unit_changes_reach_systemd()
         test_refuses_a_dirty_checkout()
         test_crash_on_boot_is_caught_before_the_restart()

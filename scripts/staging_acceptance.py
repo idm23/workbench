@@ -38,6 +38,12 @@ API_ROOT = "https://api.github.com"
 STATUS_CONTEXT = "staging-acceptance"
 REPO_SLUG = "idm23/workbench"
 
+#: The checks ran but their verdict never reached GitHub — a missing or expired
+#: token, or no network. Distinct from 1 (a check failed) because the remedy is
+#: completely different, and because a stalled promotion with everything green
+#: is otherwise a confusing thing to walk into.
+EXIT_NOT_REPORTED = 3
+
 
 @dataclass
 class Results:
@@ -290,11 +296,19 @@ def main() -> int:
     if arguments.no_report:
         return 0 if success else 1
 
+    # Distinguished from a failing check on purpose. "Acceptance failed" when
+    # every check passed and only the report did not send sends someone looking
+    # at the wrong thing — the fix for this is a token, not a code change.
     if not sha:
-        logger.error("Could not determine the revision; not reporting.")
-        return 1
+        logger.error("Could not determine the revision, so nothing was reported.")
+        return EXIT_NOT_REPORTED
     if not report(sha, success, summary):
-        return 1
+        logger.error(
+            "The checks %s, but the result could not be reported. Promotion waits on\n"
+            "that status, so it will stall until this is fixed.",
+            "passed" if success else "failed",
+        )
+        return EXIT_NOT_REPORTED
 
     logger.info("Reported %s to GitHub as %s.", STATUS_CONTEXT, "success" if success else "failure")
     return 0 if success else 1

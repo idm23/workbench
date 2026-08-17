@@ -11,12 +11,15 @@ until much later. All of it runs against a real git remote here.
 on the server rather than in this file.
 """
 
+import importlib.util
 import sqlite3
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from workbench.deploy import (
+    ACCEPTANCE_EXIT_NOT_REPORTED,
     Advanced,
     AlreadyCurrent,
     Deployed,
@@ -24,6 +27,7 @@ from workbench.deploy import (
     advance_checkout,
     deploy,
     restore_snapshot,
+    run_acceptance,
 )
 
 
@@ -331,6 +335,80 @@ def test_a_missing_snapshot_is_reported_not_ignored(checkout, tmp_path, monkeypa
 
     assert isinstance(result, DeployFailed)
     assert result.step == "restoring the database snapshot"
+
+
+def test_acceptance_only_runs_where_data_is_disposable(checkout, monkeypatch):
+    """Acceptance creates records, so it must not touch data anyone relies on.
+
+    Gated on restoring a snapshot rather than on "is not production": any
+    second install — a CI instance, a scratch one — would otherwise have its
+    rows quietly rewritten by a deploy.
+    """
+    monkeypatch.delenv("WORKBENCH_RESTORE_FROM", raising=False)
+    monkeypatch.setenv("WORKBENCH_INSTANCE", "citest")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "workbench.deploy._run",
+        lambda argv, **_: calls.append(argv),  # pyright: ignore[reportArgumentType]
+    )
+
+    run_acceptance()
+
+    assert calls == []
+
+
+def test_acceptance_runs_when_a_snapshot_is_restored(checkout, tmp_path, monkeypatch):
+    work, _ = checkout
+    source = tmp_path / "prod" / "workbench.db"
+    make_database(source)
+    monkeypatch.setenv("WORKBENCH_RESTORE_FROM", str(source))
+    monkeypatch.setenv("WORKBENCH_INSTANCE", "staging")
+    (work / "scripts").mkdir(parents=True, exist_ok=True)
+    (work / "scripts" / "staging_acceptance.py").write_text("")
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("workbench.deploy._run", fake_run)
+
+    run_acceptance()
+
+    assert any("staging_acceptance.py" in " ".join(argv) for argv in calls)
+
+
+def test_the_not_reported_exit_code_agrees_across_the_two_files():
+    """deploy.py reads an exit code that staging_acceptance.py defines.
+
+    Nothing imports one from the other — the script is not a package — so this
+    is the only thing stopping the two drifting apart and turning "the token
+    expired" back into a generic failure message.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "staging_acceptance",
+        Path(__file__).resolve().parent.parent / "scripts" / "staging_acceptance.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.EXIT_NOT_REPORTED == ACCEPTANCE_EXIT_NOT_REPORTED
+
+
+def test_production_never_runs_acceptance(checkout, monkeypatch):
+    monkeypatch.delenv("WORKBENCH_RESTORE_FROM", raising=False)
+    monkeypatch.delenv("WORKBENCH_INSTANCE", raising=False)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "workbench.deploy._run",
+        lambda argv, **_: calls.append(argv),  # pyright: ignore[reportArgumentType]
+    )
+
+    run_acceptance()
+
+    assert calls == []
 
 
 def test_an_instance_refuses_to_restore_over_itself(checkout, tmp_path, monkeypatch):
