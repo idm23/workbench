@@ -177,10 +177,38 @@ def wait_for_health() -> None:
 
 
 def report_success() -> None:
+    """Print what works now, and the steps a script cannot take for you.
+
+    Everything below needs either a browser login or a secret this machine
+    cannot derive. Printing them here is the compromise that keeps `install.sh`
+    the only command while being honest that agent runs need two more.
+    """
     logger.info("\n%s", paint(BOLD, f"Workbench is running at http://{host()}:{port()}"))
     logger.info(
         "%s",
         f"""
+Tasks work now. Running them with an agent needs two credentials, neither of
+which can go in this script.
+
+1. Sign in to Claude, as the user the service runs as:
+
+       claude
+
+   Agent runs bill against that account. Without it, starting a run fails with
+   an authentication error.
+
+2. Give it push access, so finished runs can open pull requests:
+
+       sudo install -d -m 755 /etc/workbench
+       sudo touch /etc/workbench/env && sudo chmod 600 /etc/workbench/env
+       # then add:  WORKBENCH_GITHUB_TOKEN=github_pat_...
+
+   A fine-grained token, limited to the repositories you want touched, with
+   contents:write and pull_requests:write. Without it tasks and planning still
+   work; only pushing and opening pull requests do not.
+
+   Then:  sudo systemctl restart {SERVICE_NAME}
+
 To reach it from a phone over Tailscale (optional, and not automated because
 it needs a browser login to your own tailnet):
 

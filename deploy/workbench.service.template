@@ -18,17 +18,35 @@ ExecStart=__REPO__/.venv/bin/uvicorn workbench.app:app --host __HOST__ --port __
 Environment=WORKBENCH_DB=__REPO__/data/workbench.db
 Environment=PYTHONDONTWRITEBYTECODE=1
 
+# Optional, and absent on a fresh install. The leading `-` means a missing file
+# is not an error, so the service starts without any secret configured and only
+# pushing and opening pull requests are unavailable.
+EnvironmentFile=-/etc/workbench/env
+
 Restart=always
 RestartSec=2
 
-# The app only ever writes the database. ProtectSystem=strict makes the whole
-# filesystem read-only, and ReadWritePaths punches through for exactly that
-# directory. This will need revisiting when agents arrive, since they
-# legitimately need to write to repos and run build tools.
+# ProtectSystem=strict makes the whole filesystem read-only; ReadWritePaths
+# punches through for the few places that legitimately need writing. Agent runs
+# are the reason this list is no longer just the database:
+#
+#   data/          the database, repository clones, and per-task worktrees
+#   ~/.claude      the CLI's credentials and session transcripts, which it
+#                  rewrites on every run and when refreshing a token
+#   ~/.cache       build tools the agent invokes (uv, pip, npm) cache here, and
+#                  a read-only cache directory fails builds in confusing ways
+#
+# The `-` prefix marks a path as optional: none of the home directories exist
+# until the service user has logged in or run a build, and a missing one must
+# not stop the unit from starting.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=__REPO__/data
+ReadWritePaths=-%h/.claude
+ReadWritePaths=-%h/.claude.json
+ReadWritePaths=-%h/.cache
+ReadWritePaths=-%h/.config
 
 [Install]
 WantedBy=multi-user.target

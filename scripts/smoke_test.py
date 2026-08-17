@@ -48,6 +48,20 @@ class Results:
         self.failures.append(description)
         return False
 
+    def check_absent(self, description: str, unwanted: str, actual: str) -> bool:
+        """The mirror of check(), for things that must have disappeared.
+
+        Deletion is only verifiable this way: the page rendering successfully
+        proves nothing if the row is still on it.
+        """
+        if unwanted not in actual:
+            self.record_pass(description)
+            return True
+        logger.error("  %s %s", paint(RED, "FAIL"), description)
+        logger.error("       still present: %s", unwanted)
+        self.failures.append(description)
+        return False
+
     def note(self, message: str) -> None:
         logger.warning("  %s %s", paint(YELLOW, "note"), message)
 
@@ -118,7 +132,76 @@ def run(base_url: str) -> Results:
             str(client.get("/users/99999999").status_code),
         )
 
+        _check_tasks(client, results)
+
     return results
+
+
+def _check_tasks(client: httpx.Client, results: Results) -> None:
+    """Task CRUD, on the project just added.
+
+    Deliberately stops short of starting a run. A run needs credentials a fresh
+    install does not have, and this script has to pass on a clean machine — so
+    what it verifies instead is that refusing to run is a readable message
+    rather than a traceback.
+    """
+    user_links = re.findall(r"/users/\d+", client.get("/").text)
+    project_links = re.findall(r"/projects/\d+", client.get(user_links[-1]).text)
+    if not project_links:
+        results.check("found a project to add tasks to", "a /projects/<id> link", "none")
+        return
+    results.record_pass("found a project to add tasks to")
+
+    project_url = project_links[-1]
+    tasks_url = f"{project_url}/tasks"
+
+    page = client.post(tasks_url, data={"title": "Smoke test task", "body": "detail"}).text
+    results.check("task added", "Smoke test task", page)
+
+    parent_ids = re.findall(r"/tasks/(\d+)/status", page)
+    if not parent_ids:
+        results.check("found the new task", "a /tasks/<id> control", "none in the page")
+        return
+    parent_id = parent_ids[-1]
+
+    page = client.post(tasks_url, data={"title": "Smoke test subtask", "parent_id": parent_id}).text
+    results.check("subtask nests under its parent", "Smoke test subtask", page)
+    results.check("parent shows no children done yet", "0/1", page)
+
+    results.check(
+        "a parent task cannot be run",
+        "has sub-tasks",
+        client.post(f"/tasks/{parent_id}/runs").text,
+    )
+
+    child_ids = [i for i in re.findall(r"/tasks/(\d+)/status", page) if i != parent_id]
+    if not child_ids:
+        results.check("found the subtask", "a second /tasks/<id> control", "none")
+        return
+
+    # Before completing it, while it is still a runnable leaf: without a clone
+    # there is nowhere to make a worktree, which is the state a fresh install
+    # is always in.
+    results.check(
+        "running an uncloned project is refused clearly",
+        "not been cloned",
+        client.post(f"/tasks/{child_ids[-1]}/runs").text,
+    )
+
+    results.check(
+        "completing a subtask updates the parent's progress",
+        "1/1",
+        client.post(f"/tasks/{child_ids[-1]}/status", data={"new_status": "done"}).text,
+    )
+
+    results.check(
+        "a completed task is not runnable",
+        "Reopen it",
+        client.post(f"/tasks/{child_ids[-1]}/runs").text,
+    )
+
+    deleted = client.post(f"/tasks/{parent_id}/delete").text
+    results.check_absent("deleting a parent removes its children", "Smoke test subtask", deleted)
 
 
 def main() -> int:

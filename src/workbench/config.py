@@ -45,6 +45,46 @@ def ensure_data_dir() -> Path:
     return path
 
 
+def data_dir() -> Path:
+    """The directory holding everything this machine generates.
+
+    Derived from the database path so that pointing WORKBENCH_DB elsewhere
+    moves the clones and worktrees with it, rather than leaving them behind in
+    the repo pointing at a database that is no longer there.
+    """
+    return database_path().parent
+
+
+def repos_dir() -> Path:
+    """Where project repositories are cloned."""
+    return data_dir() / "repos"
+
+
+def worktrees_dir() -> Path:
+    """Where per-task worktrees are created."""
+    return data_dir() / "worktrees"
+
+
+def github_token() -> str | None:
+    """A fine-grained PAT, if one has been configured.
+
+    Optional by design: without it the app still reads public repositories and
+    manages tasks, and only pushing and opening pull requests are unavailable.
+    That keeps a fresh install working with no secret to supply.
+    """
+    token = os.environ.get("WORKBENCH_GITHUB_TOKEN", "").strip()
+    return token or None
+
+
+def max_concurrent_runs() -> int:
+    """How many agent runs may be in flight at once.
+
+    Low by default. Each run is an agent executing builds on a home server, and
+    the interface is a phone where three taps is an easy accident.
+    """
+    return int(os.environ.get("WORKBENCH_MAX_CONCURRENT_RUNS", "2"))
+
+
 def host() -> str:
     return os.environ.get("WORKBENCH_HOST", "127.0.0.1")
 

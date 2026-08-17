@@ -5,8 +5,10 @@
 A personal tool for managing software projects on a home server — projects, a todo tree per
 project, and tasks worked either by hand or by a Claude agent, with a written summary either way.
 
-**Status:** early. There are users, and each user has projects that point at GitHub repositories.
-Tasks, runs, worktrees, and agents are not built yet — see `CLAUDE.md` for where it is going.
+**Status:** early. Users own projects that point at GitHub repositories, each project holds a tree
+of tasks, and a leaf task can be handed to a Claude agent: it plans, you review the plan on your
+phone, and on approval it does the work and opens a pull request. See `CLAUDE.md` for where it is
+going next.
 
 ## Quick start
 
@@ -21,6 +23,31 @@ cd workbench
 That is the whole install. It fetches `uv` if you do not have it, creates a virtualenv with the
 exact locked dependency versions, applies migrations, installs a systemd service, and waits until
 the app answers on <http://127.0.0.1:8787>. It asks for `sudo` once, for the service.
+
+Expect it to take a few minutes the first time: `claude-agent-sdk` bundles a ~310 MB native
+`claude` binary. That is also what means the server needs no Node and no separately installed CLI.
+
+## Running tasks with an agent
+
+Browsing and managing tasks works immediately. Handing one to Claude needs two credentials that
+cannot go in a script — `install.sh` prints both when it finishes:
+
+```sh
+claude                                   # sign in, as the user the service runs as
+
+sudo install -d -m 755 /etc/workbench    # then a fine-grained GitHub PAT:
+sudo touch /etc/workbench/env && sudo chmod 600 /etc/workbench/env
+#   WORKBENCH_GITHUB_TOKEN=github_pat_...   contents:write, pull_requests:write
+sudo systemctl restart workbench
+```
+
+Then, on a project page: **Clone repository**, add a task, and press **Plan with Claude** on a leaf
+task. The agent gets its own branch and git worktree, investigates in plan mode without touching
+anything, and stops with a plan. Approve it and the same session resumes to do the work, commit,
+push, and open a pull request.
+
+Without the GitHub token, planning and execution still work; only pushing and the pull request do
+not. Without the Claude login, starting a run fails with an authentication error.
 
 `install.sh` itself is a short shell bootstrap whose only job is getting `uv` onto the machine —
 the actual work lives in `src/workbench/install.py`, which imports `workbench.config` so the port
@@ -40,6 +67,9 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `install.sh` | The only entry point — a ~12-line bootstrap that installs `uv` and hands off. |
 | `src/workbench/install.py` | The installer proper. Python, so it shares config with the app. |
 | `src/workbench/` | The application: models, GitHub lookup, routes, templates. |
+| `src/workbench/runner.py` | Executes one run. Detached, so a restart cannot orphan it. |
+| `src/workbench/agent.py` | The Claude SDK wrapper: plan phase, execute phase. |
+| `src/workbench/worktrees.py` | Cloning, and a git worktree per task. |
 | `alembic/` | Migrations. Applied by the installer; no manual step. |
 | `scripts/smoke_test.py` | Checks a running install actually works, over HTTP. |
 | `scripts/test_fresh_install.py` | The full clean-machine install test, in a container. |
@@ -50,12 +80,16 @@ Re-running it is safe — every step checks before acting, and your data is unto
 ## Tests
 
 ```sh
-uv run pytest                              # unit tests: schema and reference parsing
+uv run pytest                              # schema, reference parsing, task tree, worktrees
 uv run ruff check . && uv run ruff format --check .
 uv run pyright
 uv run scripts/smoke_test.py               # end-to-end against a running install
 uv run scripts/test_fresh_install.py       # clean Ubuntu container, install, verify
 ```
+
+The smoke test stops short of starting an agent run, deliberately: a clean machine has no
+credentials, and what it checks instead is that the refusal is a readable message rather than a
+traceback.
 
 CI runs all of these on every push and pull request, plus `shellcheck install.sh` and
 `alembic check` — the latter fails if a model has been changed without generating a migration,

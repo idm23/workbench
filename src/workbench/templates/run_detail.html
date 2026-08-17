@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+
+{% block title %}Run #{{ run.id }} — Workbench{% endblock %}
+
+{% block back %}<a class="back" href="/projects/{{ task.project_id }}">&lsaquo; {{ task.project.owner }}/{{ task.project.repo }}</a>{% endblock %}
+
+{% block content %}
+<h1 style="font-size: clamp(1.3rem, 6vw, 1.8rem);">{{ task.title }}</h1>
+<p class="sub">
+  Run #{{ run.id }} · {{ run.phase }} ·
+  <span class="status {{ run.status }}" id="run-status">{{ run.status }}</span>
+  {% if run.total_cost_usd %} · ${{ '%.3f' % run.total_cost_usd }}{% endif %}
+  {% if run.num_turns %} · {{ run.num_turns }} turns{% endif %}
+</p>
+
+{% if run.error %}<p class="msg error">{{ run.error }}</p>{% endif %}
+
+{% if run.pr_url %}
+  <p class="msg notice">
+    Pull request opened: <a href="{{ run.pr_url }}" rel="noreferrer">{{ run.pr_url }}</a>
+  </p>
+{% endif %}
+
+{% if run.status == 'awaiting_review' and run.plan %}
+  <h2 style="font-size: 1.1rem; margin-bottom: .5rem;">Plan</h2>
+  <div class="plan">{{ run.plan }}</div>
+  <div class="actions">
+    <form method="post" action="/runs/{{ run.id }}/approve">
+      <button type="submit">Approve &amp; run</button>
+    </form>
+    <form method="post" action="/runs/{{ run.id }}/cancel">
+      <button class="secondary" type="submit">Discard</button>
+    </form>
+  </div>
+{% elif run.plan and run.phase == 'plan' %}
+  <h2 style="font-size: 1.1rem; margin-bottom: .5rem;">Plan</h2>
+  <div class="plan">{{ run.plan }}</div>
+{% endif %}
+
+{% if run.summary %}
+  <h2 style="font-size: 1.1rem; margin-bottom: .5rem;">Summary</h2>
+  <div class="plan">{{ run.summary }}</div>
+{% endif %}
+
+{% if run.diffstat %}
+  <h2 style="font-size: 1.1rem; margin-bottom: .5rem;">Changes</h2>
+  <pre class="block">{{ run.diffstat }}</pre>
+{% endif %}
+
+<h2 style="font-size: 1.1rem; margin: 1.5rem 0 .5rem;">Output</h2>
+<div class="stream" id="stream">
+  {% for event in events %}
+    <div class="ev {{ event.kind }}{{ ' err' if event.payload.get('is_error') }}">
+      <span class="who">{{ event.kind.replace('_', ' ') }}</span>
+      {%- if event.kind in ('text', 'thinking') -%}
+        {{ event.payload.get('text', '') }}
+      {%- elif event.kind == 'tool_use' -%}
+        {{ event.payload.get('name', '') }} {{ event.payload.get('input', {}) }}
+      {%- elif event.kind == 'tool_result' -%}
+        {{ event.payload.get('preview', '') }}
+      {%- else -%}
+        {{ event.payload }}
+      {%- endif -%}
+    </div>
+  {% endfor %}
+</div>
+
+{% if is_live %}
+  <div class="actions">
+    <form method="post" action="/runs/{{ run.id }}/cancel">
+      <button class="secondary" type="submit">Cancel run</button>
+    </form>
+  </div>
+
+  <script>
+    // The only JavaScript in the app, and it exists for one reason: a run
+    // takes minutes and polling the whole page would lose your scroll
+    // position each time.
+    //
+    // EventSource sends Last-Event-ID automatically on reconnect, and the
+    // server replays from there — so a phone that sleeps mid-run gets the
+    // events it missed rather than a silent gap.
+    (function () {
+      const stream = document.getElementById("stream");
+      const statusEl = document.getElementById("run-status");
+      const source = new EventSource("/runs/{{ run.id }}/events");
+
+      function append(kind, payload) {
+        const el = document.createElement("div");
+        el.className = "ev " + kind + (payload.is_error ? " err" : "");
+
+        const who = document.createElement("span");
+        who.className = "who";
+        who.textContent = kind.replace(/_/g, " ");
+        el.appendChild(who);
+
+        let text;
+        if (kind === "text" || kind === "thinking") {
+          text = payload.text || "";
+        } else if (kind === "tool_use") {
+          text = (payload.name || "") + " " + JSON.stringify(payload.input || {});
+        } else if (kind === "tool_result") {
+          text = payload.preview || "";
+        } else {
+          text = JSON.stringify(payload);
+        }
+        // textContent, never innerHTML: this is model-authored output being
+        // written into a page with no auth in front of it.
+        el.appendChild(document.createTextNode(text));
+        stream.appendChild(el);
+      }
+
+      for (const kind of ["text", "thinking", "tool_use", "tool_result", "system"]) {
+        source.addEventListener(kind, function (e) {
+          append(kind, JSON.parse(e.data));
+        });
+      }
+
+      source.addEventListener("status", function (e) {
+        const payload = JSON.parse(e.data);
+        if (payload.status && statusEl) {
+          statusEl.textContent = payload.status;
+          statusEl.className = "status " + payload.status;
+        }
+      });
+
+      // The run reached a state that needs the full page: a plan to approve,
+      // a summary, a pull request link.
+      source.addEventListener("done", function () {
+        source.close();
+        window.location.reload();
+      });
+    })();
+  </script>
+{% endif %}
+{% endblock %}
