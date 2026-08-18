@@ -92,7 +92,7 @@ def test_a_checkout_on_another_branch_is_left_alone(checkout, monkeypatch):
     assert git(work, "rev-parse", "--abbrev-ref", "HEAD") == "experiment"
 
 
-def test_uncommitted_work_blocks_the_fast_forward(checkout, monkeypatch):
+def test_uncommitted_work_blocks_the_deploy(checkout, monkeypatch):
     """A dirty checkout is someone's work in progress, not something to discard."""
     work, origin = checkout
     monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
@@ -102,8 +102,64 @@ def test_uncommitted_work_blocks_the_fast_forward(checkout, monkeypatch):
     result = deploy()
 
     assert isinstance(result, DeployFailed)
-    assert result.step == "fast-forwarding the checkout"
+    assert result.step == "checking for local changes"
     assert (work / "README.md").read_text() == "edited by hand\n"
+
+
+def test_uncommitted_work_blocks_a_commit_that_touches_nothing_it_owns(checkout, monkeypatch):
+    """The case `git merge --ff-only` waves through, and the reason for the
+    explicit check.
+
+    Git only refuses a fast-forward that would overwrite a modified file. An
+    incoming commit adding an unrelated path merges cleanly straight over
+    someone's working state — so whether their work is respected would depend
+    on what the commit happens to contain, which is not something anyone can
+    reason about from the server.
+    """
+    work, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    (work / "README.md").write_text("edited by hand\n")
+
+    # Touches only a path nobody has edited locally.
+    (origin / "UNRELATED.md").write_text("new file\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-qm", "add an unrelated file")
+
+    result = deploy()
+
+    assert isinstance(result, DeployFailed)
+    assert result.step == "checking for local changes"
+    assert not (work / "UNRELATED.md").exists()
+    assert (work / "README.md").read_text() == "edited by hand\n"
+
+
+def test_a_staged_change_blocks_the_deploy(checkout, monkeypatch):
+    """Staged but uncommitted is still work in progress."""
+    work, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    (work / "README.md").write_text("staged edit\n")
+    git(work, "add", "README.md")
+    advance_origin(origin)
+
+    result = deploy()
+
+    assert isinstance(result, DeployFailed)
+    assert result.step == "checking for local changes"
+
+
+def test_untracked_files_do_not_block_a_deploy(checkout, monkeypatch):
+    """A scratch file or a stray log is not work in progress.
+
+    Git still refuses on its own if an incoming commit would overwrite an
+    untracked path, so nothing is lost by allowing this.
+    """
+    work, origin = checkout
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "main")
+    (work / "scratch.log").write_text("noise\n")
+    advance_origin(origin)
+
+    assert isinstance(advance_checkout(), Advanced)
+    assert (work / "scratch.log").read_text() == "noise\n"
 
 
 def test_a_diverged_checkout_is_never_rewritten(checkout, monkeypatch):

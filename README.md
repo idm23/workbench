@@ -203,11 +203,19 @@ self-hosted runner would work but means parking a long-lived credential here and
 code execute on the box. The cost of polling is that a merge lands within five minutes rather than
 instantly.
 
-It is also deliberately timid. It only ever fast-forwards, so a checkout that is dirty, on another
-branch, or carrying a local commit is reported and left completely alone — working on the server by
-hand is never interrupted, and nothing is discarded. If migrations fail it stops **before**
-restarting, leaving the old code running against the schema it was built for rather than turning a
-failed deploy into an outage.
+It is also deliberately timid. A checkout that is dirty, on another branch, or carrying a local
+commit is reported into the journal and left completely alone, so working on the server by hand is
+never interrupted and nothing is discarded.
+
+Uncommitted changes are checked for **explicitly**, rather than left to `git merge --ff-only`. That
+distinction is load-bearing: git only refuses a fast-forward that would overwrite a file you edited,
+so a commit touching anything else merges straight over your working state. Whether your work was
+respected would depend on what the incoming commit happened to contain. Untracked files are allowed
+through — a stray log is not work in progress, and git still refuses on its own if a commit would
+overwrite one.
+
+If migrations fail it stops **before** restarting, leaving the old code running against the schema
+it was built for rather than turning a failed deploy into an outage.
 
 The deployer runs as a separate unit from the app rather than as something the app does to itself.
 Restarting a service from inside that service kills the process doing the restarting; from its own

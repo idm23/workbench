@@ -258,6 +258,13 @@ def test_unit_changes_reach_systemd() -> None:
 
 
 def test_refuses_a_dirty_checkout() -> None:
+    """Uncommitted work blocks the deploy, whatever the incoming commit touches.
+
+    The commit pushed here deliberately modifies nothing that was edited
+    locally. `git merge --ff-only` waves that straight through — it only
+    refuses when it would overwrite a modified file — so this passing depends
+    on the explicit check rather than on git's incidental protection.
+    """
     step("Refusing to deploy over uncommitted work")
     (CHECKOUT / "README.md").write_text("edited on the server\n")
     commit_to_origin("a change that must not land", {"NOPE.md": "should not appear\n"})
@@ -265,7 +272,8 @@ def test_refuses_a_dirty_checkout() -> None:
     journal = trigger_deploy()
 
     expect("Deploy failed" in journal, "the deploy reported failure")
-    expect(not (CHECKOUT / "NOPE.md").exists(), "the change was not applied")
+    expect("checking for local changes" in journal, "it named the uncommitted work")
+    expect(not (CHECKOUT / "NOPE.md").exists(), "the unrelated change was not applied")
     expect(
         (CHECKOUT / "README.md").read_text() == "edited on the server\n",
         "local edits were left alone",

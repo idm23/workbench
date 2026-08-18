@@ -158,11 +158,20 @@ but means parking a long-lived registration credential on the box and letting wo
 code execute there. Polling needs no inbound path, no secret, and no new daemon. The cost
 is latency: a merge lands within the timer interval instead of instantly.
 
-**It only ever fast-forwards.** A checkout that is dirty, on another branch, or carrying a
-local commit is reported into the journal and left untouched, so working on the server by
-hand is never interrupted and nothing is discarded. A migration failure stops the deploy
-*before* the restart, leaving the old code running against the schema it matches — a
-failed deploy should not become an outage.
+**It refuses rather than reconciles.** A checkout that is dirty, on another branch, or
+carrying a local commit is reported into the journal and left untouched, so working on the
+server by hand is never interrupted and nothing is discarded.
+
+Uncommitted work is caught by an explicit `git status` check, not by `git merge --ff-only`.
+Relying on the merge was the original design and it was wrong: git only refuses a
+fast-forward that would *overwrite* a modified file, so a commit touching any other path
+sails over someone's working state. That made "is my work safe" a function of what the
+incoming commit happened to contain — not something anyone can reason about from the
+server. Found by the deploy-cycle test, whose incoming commit deliberately touches nothing
+the checkout had edited.
+
+A migration failure stops the deploy *before* the restart, leaving the old code running
+against the schema it matches — a failed deploy should not become an outage.
 
 **Required CI checks are now load-bearing.** A merge reaches the server within five
 minutes with nobody watching, so branch protection is the only thing standing between a

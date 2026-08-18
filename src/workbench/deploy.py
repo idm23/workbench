@@ -210,6 +210,29 @@ def advance_checkout() -> AdvanceResult:
             f"checkout is on {on_branch.stdout.strip()!r}, not {branch!r}; leaving it alone",
         )
 
+    dirty = _run(
+        # --untracked-files=no on purpose: a stray log or scratch file is not
+        # work in progress, and git refuses on its own if an incoming commit
+        # would actually overwrite an untracked path.
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        as_owner=True,
+        timeout=30,
+    )
+    if dirty.returncode != 0:
+        return _fail("checking for local changes", dirty)
+    if dirty.stdout.strip():
+        # Checked explicitly rather than left to `git merge --ff-only`, which
+        # only refuses when the incoming commit happens to touch the same file
+        # someone edited. That makes "is my work safe" depend on what the
+        # commit contains, which is not something anyone can reason about from
+        # the server. Refusing on any modification is the promise that is
+        # actually keepable.
+        changed = ", ".join(line[3:] for line in dirty.stdout.strip().splitlines()[:5])
+        return DeployFailed(
+            "checking for local changes",
+            f"the checkout has uncommitted changes ({changed}); leaving it alone",
+        )
+
     fetched = _run(
         ["git", "fetch", "--quiet", "origin", branch],
         as_owner=True,
@@ -227,8 +250,9 @@ def advance_checkout() -> AdvanceResult:
 
     logger.info("Deploying %s -> %s", local.stdout.strip()[:7], remote.stdout.strip()[:7])
 
-    # --ff-only, never a merge or a reset: if the checkout has diverged or has
-    # uncommitted edits, that is a person's work and this must not discard it.
+    # --ff-only, never a merge or a reset. Uncommitted work is already
+    # refused above; this is the remaining case, a checkout carrying local
+    # commits, which must not be rewritten either.
     merged = _run(
         ["git", "merge", "--ff-only", f"origin/{branch}"],
         as_owner=True,
