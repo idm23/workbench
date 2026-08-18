@@ -28,9 +28,9 @@ from pathlib import Path
 import httpx
 
 from workbench.config import github_token, host, instance, port, repo_root, service_name
-from workbench.db import get_session_factory
+from workbench.database.db import get_session_factory
+from workbench.database.models import Project, Run, Task, User
 from workbench.logs import BOLD, GREEN, RED, YELLOW, configure_console_logging, paint
-from workbench.models import Project, Run, Task, User
 
 logger = logging.getLogger(__name__)
 

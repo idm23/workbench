@@ -11,8 +11,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from workbench.config import DEFAULT_BACKEND
-from workbench.db import make_engine
-from workbench.models import (
+from workbench.database.db import make_engine
+from workbench.database.models import (
     Base,
     Project,
     Run,

@@ -21,8 +21,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from workbench.config import repo_root
-from workbench.db import make_engine
-from workbench.models import Project, Run, RunEvent, RunPhase, Task, User
+from workbench.database.db import make_engine
+from workbench.database.models import Project, Run, RunEvent, RunPhase, Task, User
 
 
 @pytest.fixture

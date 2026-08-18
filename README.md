@@ -39,14 +39,22 @@ Re-running it is safe — every step checks before acting, and your data is unto
 |---|---|
 | `install.sh` | The only entry point — a ~12-line bootstrap that installs `uv` and hands off. |
 | `src/workbench/install.py` | The installer proper. Python, so it shares config with the app. |
-| `src/workbench/` | The application: models, GitHub lookup, routes, templates. |
+| `src/workbench/app.py` | The web application: routes and templates. |
+| `src/workbench/database/` | `models.py` (the schema) and `db.py` (engine and sessions). |
+| `src/workbench/git/` | `github.py` — parsing repository references and reporting results. |
 | `src/workbench/deploy.py` | Pulls, migrates, and restarts. Run on a timer; see below. |
+| `src/workbench/config.py` | Everything read from the environment, with repo-relative defaults. |
 | `alembic/` | Migrations. Applied by the installer and by every deploy. |
-| `scripts/smoke_test.py` | Checks a running install actually works, over HTTP. |
-| `scripts/test_fresh_install.py` | The full clean-machine install test, in a container. |
+| `scripts/` | The end-to-end tests and the staging acceptance run. |
 | `deploy/*.template` | The systemd units, rendered with detected paths. |
 | `CLAUDE.md` | Design doc, decisions, and open questions. |
+| `docs/deployment-setup.md` | Turning the pipeline on, once. |
 | `docs/server-conventions.md` | How the home server launches things, and why. |
+
+**Tests live beside the code they cover** — `src/workbench/database/tests/`,
+`src/workbench/git/tests/`. Only the ones spanning several modules at once stay in the top-level
+`tests/`, which is currently the deployer and the systemd units. They are excluded from the built
+wheel, so nothing test-related is installed onto the server.
 
 ## Tests
 
@@ -63,7 +71,8 @@ CI runs all of these on every push and pull request, plus `shellcheck install.sh
 `alembic check` — the latter fails if a model has been changed without generating a migration,
 which is invisible locally because your own database already has the change applied.
 
-`tests/test_migrations.py` applies migrations to a database that already has rows in it. Every
+`src/workbench/database/tests/test_migrations.py` applies migrations to a database that
+already has rows in it. Every
 other migration check runs against empty tables, where the failures that actually happen — a
 `NOT NULL` column with no default, a unique constraint real data violates — cannot occur.
 

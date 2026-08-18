@@ -21,15 +21,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from workbench.db import get_session_factory
-from workbench.github import (
+from workbench.database.db import get_session_factory
+from workbench.database.models import Project, User
+from workbench.git.github import (
     InvalidReference,
     RepoMetadata,
     RepoNotFound,
     fetch_repo_metadata,
     parse_repo_reference,
 )
-from workbench.models import Project, User
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 

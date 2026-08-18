@@ -32,9 +32,17 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/workbench"]
+# Tests live beside the code they cover, which puts them inside the package.
+# Without this they would be built into the wheel and installed onto the
+# server — and pytest could then collect them from the virtualenv as well as
+# from the source tree.
+exclude = ["**/tests"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# Two roots: the ones beside their code, and the ones with no single module to
+# sit next to. test_deploy and test_units cover behaviour that spans install,
+# config, and the unit templates together.
+testpaths = ["src/workbench", "tests"]
 
 [tool.ruff]
 target-version = "py314"
