@@ -10,6 +10,7 @@ state, which keeps the app free of session middleware and a signing secret.
 """
 
 from collections.abc import Iterator
+from functools import cache
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlencode
@@ -21,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from workbench.config import instance
 from workbench.database.db import get_session_factory
 from workbench.database.models import Project, User
 from workbench.git.github import (
@@ -30,6 +32,7 @@ from workbench.git.github import (
     fetch_repo_metadata,
     parse_repo_reference,
 )
+from workbench.git.revision import head_revision
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -61,9 +64,36 @@ def _get_user_or_404(db: Session, user_id: int) -> User:
     return user
 
 
+@cache
+def deployed_revision() -> str:
+    """The commit this process is serving.
+
+    Cached, unlike the underlying helper: a running process cannot change
+    revision, and a deploy always restarts the service. So this is fixed for
+    the life of the process by construction, and shelling out per request would
+    be paying for an answer that cannot differ.
+    """
+    return head_revision()
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+    """Liveness, plus what is actually running.
+
+    The revision is here because until now nothing could tell you which commit
+    an instance was serving. A deploy moves the checkout and restarts the
+    service, and confirming the second half had happened meant reasoning about
+    the first — comparing this against `git rev-parse` in the checkout answers
+    it directly, and answers it from a phone.
+
+    The instance name is here for the same reason: production and staging
+    differ only by port, which is easy to lose track of.
+    """
+    return {
+        "status": "ok",
+        "revision": deployed_revision(),
+        "instance": instance() or "production",
+    }
 
 
 @app.get("/", response_class=HTMLResponse)

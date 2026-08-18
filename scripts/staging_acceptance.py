@@ -30,6 +30,7 @@ import httpx
 from workbench.config import github_token, host, instance, port, repo_root, service_name
 from workbench.database.db import get_session_factory
 from workbench.database.models import Project, Run, Task, User
+from workbench.git.revision import head_revision
 from workbench.logs import BOLD, GREEN, RED, YELLOW, configure_console_logging, paint
 
 logger = logging.getLogger(__name__)
@@ -64,14 +65,8 @@ class Results:
 
 
 def revision() -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_root(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.stdout.strip()
+    """The commit the checkout is on — what the status gets attached to."""
+    return head_revision(short=False)
 
 
 def check_service(results: Results) -> None:
@@ -83,6 +78,18 @@ def check_service(results: Results) -> None:
     except httpx.HTTPError as error:
         results.check("service answers /healthz", False, str(error))
         return
+
+    # The deploy moved the checkout and restarted the service. Those are two
+    # separate things, and until /healthz reported a revision there was no way
+    # to confirm the second followed the first — a service serving older code
+    # answers /healthz exactly as happily as one serving the new code.
+    served = healthz.json().get("revision", "")
+    expected = head_revision()
+    results.check(
+        "the running service is on the deployed revision",
+        served == expected,
+        f"serving {served or 'unknown'}, checkout is {expected}",
+    )
 
     # NRestarts climbing means the unit is crash-looping, which Restart=always
     # will happily hide behind a healthy-looking answer between attempts.
