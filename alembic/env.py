@@ -11,7 +11,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from workbench.config import database_url, ensure_data_dir
-from workbench.models import Base
+from workbench.database.models import Base
 
 config = context.config
 

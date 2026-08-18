@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # staging as well as main: a commit has to be green on staging before it is
+    # a candidate for main, and the branch protection on main requires these
+    # same checks to have run.
+    branches: [main, staging]
   pull_request:
 
 # Least privilege: nothing here writes to the repository.
@@ -88,3 +91,44 @@ jobs:
       # degrade rather than a failure, and exercising that path is a pass.
       - name: Clean-machine install
         run: uv run scripts/test_fresh_install.py
+
+  deploy-cycle:
+    name: Deploy cycle on systemd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to an exact patch version, unlike checkout above: setup-uv
+      # stopped publishing floating major tags after v7, so `@v10` does not
+      # resolve. Bump this deliberately.
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # The deployer runs as root under systemd, where PATH is minimal, so it
+      # looks for uv at ~<owner>/.local/bin/uv before falling back to PATH.
+      # setup-uv puts it in the tool cache instead, which root would never find.
+      - name: Put uv where the deployer looks for it
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$(command -v uv)" "$HOME/.local/bin/uv"
+
+      # The only test that exercises systemd at all. The container-based
+      # fresh-install test skips units entirely because containers have no
+      # systemd, which leaves the units, the timer, and the whole of
+      # rebuild_and_restart() otherwise unexecuted until they run on the
+      # server. Runners are disposable VMs with systemd and passwordless sudo,
+      # so this installs real units and removes them again.
+      - name: Deploy cycle
+        run: uv run scripts/test_deploy_cycle.py
+
+      # The script dumps both units itself, but it tears them down afterwards.
+      # This catches anything that killed it before it got that far.
+      - name: Journals on failure
+        if: failure()
+        run: |
+          sudo journalctl -u workbench-citest -n 200 --no-pager || true
+          sudo journalctl -u workbench-citest-deploy -n 200 --no-pager || true

@@ -7,8 +7,12 @@ Claude agent — with a written summary either way.
 Runs on an always-on Ubuntu box, reachable only over Tailscale.
 
 > **Status: early.** Users and their GitHub-backed projects exist, served by a FastAPI
-> app installed with `./install.sh`. Tasks, runs, worktrees, and agents do not exist
-> yet. See `README.md` for what is actually live.
+> app installed with `./install.sh`, which then keeps itself up to date from `main`. The
+> tables for tasks, runs, and run events exist, but nothing reads or writes them yet —
+> the schema landed ahead of the code so that the deploy pipeline had something real to
+> migrate. Worktrees and agents do not exist, and **no agent backend is chosen or
+> depended on**: there is nothing vendor-specific in the repo. See `README.md` for what
+> is actually live.
 
 ## Reproducibility is a project goal
 
@@ -17,7 +21,7 @@ running service. Nothing else. If a step is needed, it belongs in that script ra
 than in a document — the bar is that this repo could be handed to someone with a spare
 machine and work without a conversation.
 
-Two consequences that shaped real decisions:
+Three consequences that shaped real decisions:
 
 - **Alembic from the start**, not `create_all()`. The alternative meant "delete the
   database when the schema changes", which is exactly the kind of undocumented manual
@@ -25,6 +29,10 @@ Two consequences that shaped real decisions:
 - **Application data lives in `data/` inside the repo**, not `/var/lib/workbench`. An
   external path has to be created, permissioned, and remembered, and none of that
   survives a clone onto a new machine. It is gitignored, so pulling never touches it.
+- **Updating is automated too, not just installing.** The same rule applied to the second
+  install onward: "ssh in, pull, re-run the installer, remember to migrate" is a manual
+  step, and a schema step that gets skipped is the one that corrupts something. A timer
+  does it instead — see Deploying below.
 
 The claim is kept honest by `scripts/test_fresh_install.py`, which provisions a clean
 Ubuntu container, runs the install, drives the app over HTTP, and re-runs the install to
@@ -41,14 +49,35 @@ Two things are deliberately *not* automated, and are decisions rather than overs
 
 ## Decisions already made
 
-**Language: Python.** FastAPI + uvicorn, SQLite via the stdlib `sqlite3`, SSE for
-streaming agent output to the browser. The `claude-agent-sdk` package is a pure Python
-package, so the server needs no Node install — the server has no Node and we intend to
-keep it that way. Two caveats to verify before relying on this (see Open questions):
-the SDK may require the Claude Code CLI on `PATH` separately, and the server's Python is
-3.14, new enough that wheels for the SDK and its dependencies are not guaranteed.
-Ubuntu 26.04 enforces PEP 668, so everything installs into a venv rather than system
-Python.
+**Language: Python.** FastAPI + uvicorn, SQLite via SQLAlchemy, SSE for streaming agent
+output to the browser. Ubuntu 26.04 enforces PEP 668, so everything installs into a venv
+rather than system Python.
+
+**The server has no Node, and keeping it that way is a constraint on backend choice**
+rather than a consequence of one. A backend that needs a Node runtime on the box has to
+justify it. The server's Python is 3.14, new enough that wheels are not guaranteed for
+everything — worth checking in a throwaway venv before committing to any SDK.
+
+**The agent backend is swappable, and the schema assumes so.** Claude is the first
+implementation, not the interface. Nothing in the data model is named for a vendor, and
+three things exist specifically to keep a later switch cheap:
+
+- **`runs.backend` and `runs.model`** record what actually ran each attempt. This is the
+  one column that genuinely cannot be backfilled — the moment a second backend exists,
+  every earlier row is ambiguous without it. `projects.agent_backend` overrides the
+  machine-wide `WORKBENCH_AGENT_BACKEND` default per project.
+- **`runs.resume_token` is opaque.** It is never parsed, and it means nothing to a
+  backend other than the one that issued it, which is why it is always read together
+  with `runs.backend`. Named for what it does rather than after any SDK's "session".
+- **`RunEventKind` is Workbench's vocabulary**, not a passthrough of whatever an SDK
+  emits: `text`, `thinking`, `tool_use`, `tool_result`, `status`, `notice`. Backends
+  translate into it. This is what keeps a run recorded a year ago readable after a
+  switch, and stops two backends spelling the same thing two ways. It only grows when a
+  *reader* needs a new distinction; anything else is a `notice`.
+
+The remaining coupling is in the code that has not been written yet. When the agent
+slice lands, the SDK import belongs behind one adapter that yields `RunEventKind` events
+and an opaque resume token — not scattered through the runner.
 
 **Tasks live in local SQLite, not GitHub Issues.** GitHub is used for code hosting,
 remotes, and PRs only. Issues were considered and rejected: every UI interaction
@@ -115,18 +144,97 @@ in `docs/server-conventions.md`.
   agent session transcripts live in the service user's home and are on neither GitHub
   nor the SQLite file.
 
-## Known trap: self-deployment
+## Deploying is automatic, and pull-based
 
-Workbench is intended to eventually be developed inside Workbench. A task ending in
-"restart the workbench service" kills the process serving the request, so the run
-never gets marked finished and its summary is lost. Deploys must go through a
-detached one-shot (`workbench-deploy.service`) that the app triggers with
-`systemctl start`, rather than restarting itself.
+**Merging to `main` is the deployment.** `workbench-deploy.timer` fires every five minutes;
+`workbench-deploy.service` fetches, fast-forwards, syncs, migrates, reinstalls any changed
+unit, and restarts the app. There is no server step after a merge, and in particular no
+schema step to forget.
 
-This is a special case of a broader problem: if agent runs live inside the uvicorn
-process, *any* restart — deploy, crash, OOM — orphans them. Consider running agents as
-detached child processes that write to a durable event log, with the web tier as a pure
-reader. That makes the web tier freely restartable and mostly dissolves the trap.
+**Pull, not push, and this is forced rather than chosen.** The server has no public
+ingress — tailnet only, and `tailscale funnel` is ruled out above — so GitHub webhooks
+cannot reach it and neither can a GitHub Actions runner. A self-hosted runner would work
+but means parking a long-lived registration credential on the box and letting workflow
+code execute there. Polling needs no inbound path, no secret, and no new daemon. The cost
+is latency: a merge lands within the timer interval instead of instantly.
+
+**It refuses rather than reconciles.** A checkout that is dirty, on another branch, or
+carrying a local commit is reported into the journal and left untouched, so working on the
+server by hand is never interrupted and nothing is discarded.
+
+Uncommitted work is caught by an explicit `git status` check, not by `git merge --ff-only`.
+Relying on the merge was the original design and it was wrong: git only refuses a
+fast-forward that would *overwrite* a modified file, so a commit touching any other path
+sails over someone's working state. That made "is my work safe" a function of what the
+incoming commit happened to contain — not something anyone can reason about from the
+server. Found by the deploy-cycle test, whose incoming commit deliberately touches nothing
+the checkout had edited.
+
+A migration failure stops the deploy *before* the restart, leaving the old code running
+against the schema it matches — a failed deploy should not become an outage.
+
+**Required CI checks are now load-bearing.** A merge reaches the server within five
+minutes with nobody watching, so branch protection is the only thing standing between a
+red build and a restarted service. Turning the timer on and leaving `main` unprotected
+would be the actual risk here, not the automation itself.
+
+### Staging, and why promotion stays manual
+
+`staging` is a second install on the same box — its own units, port 8788, its own `data/`
+— deployed by the same timer from the `staging` branch. Two things make it worth having
+rather than just running CI twice:
+
+- **It migrates a snapshot of production before every deploy.** A migration that passes
+  against empty tables routinely fails against real rows, and this is the only place that
+  is caught before production. The snapshot uses SQLite's backup API, never a file copy,
+  because production is live and in WAL mode.
+- **It is reachable from a phone**, so "does this actually feel right" is answerable
+  before promoting rather than after.
+
+Acceptance runs automatically after each staging deploy and POSTs a `staging-acceptance`
+commit status. That call is **outbound**, which is what lets the whole flow work without
+exposing the server — GitHub cannot ask how staging went, so the server tells it. The same
+no-ingress constraint that forced polling shapes this too. Branch protection on `main`
+requires that status, so a commit that never ran on staging cannot be promoted.
+
+**Merging is deliberately a human action.** The status goes green on its own; nothing
+merges itself. This tool's purpose is running agents that write code, and agent-authored
+changes will be the main thing flowing through this pipeline — a person looking before it
+reaches the machine they depend on is worth the click. Auto-merge is one GitHub setting
+away once the acceptance suite has earned that trust.
+
+**A failed acceptance is not a failed deploy.** Staging keeps the code it just installed,
+because that is the state someone needs in order to go and look at what broke. What it
+does instead is post red, which is what stops promotion.
+
+**It cannot install itself.** A machine with no timer never checks for the commit that
+would give it one, so `install.sh` gets run by hand exactly one last time on any server
+that predates this. Worth noting because it is the one place the reproducibility rule
+bends: a *fresh* clone gets the timer from the first install, and only an existing
+deployment needs the manual step.
+
+**The deployer runs as root, the app does not.** It needs to restart the unit, so it drops
+to the checkout's owner with `runuser` for every command touching git, the virtualenv, or
+the database. Doing that work as root would leave root-owned files that the unprivileged
+service could no longer write. For the same reason `install.service_user()` reads the
+*checkout's owner* rather than the current euid — reading the euid would silently
+re-render the unit with `User=root` on the first automatic deploy.
+
+### Known trap: self-deployment
+
+Workbench is intended to eventually be developed inside Workbench, and a task ending in
+"restart the workbench service" would kill the process serving the request.
+
+**Half of this is now handled.** Deploys run from their own systemd unit, so the restart
+they trigger lands on a different cgroup and cannot kill the deployer — and since the
+timer owns deployment, nothing has to reach back into the app to trigger one at all.
+
+The other half is still open, and is the broader problem: if agent runs live inside the
+uvicorn process, *any* restart — deploy, crash, OOM — orphans them, and a deploy now
+happens on a timer without anyone watching. Agents should therefore run as detached child
+processes writing to a durable event log, with the web tier as a pure reader. That is a
+prerequisite for the runs slice rather than a nicety, because automatic deploys make the
+orphaning routine instead of occasional.
 
 ## Open questions
 

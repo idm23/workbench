@@ -7,7 +7,7 @@ fakes outweighs what they would catch.
 
 import pytest
 
-from workbench.github import InvalidReference, RepoRef, parse_repo_reference
+from workbench.git.github import InvalidReference, RepoRef, parse_repo_reference
 
 
 @pytest.mark.parametrize(
