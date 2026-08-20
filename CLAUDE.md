@@ -8,11 +8,11 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 
 > **Status: early.** Users and their GitHub-backed projects exist, served by a FastAPI
 > app installed with `./install.sh`, which then keeps itself up to date from `main`. The
-> tables for tasks, runs, and run events exist, but nothing reads or writes them yet —
-> the schema landed ahead of the code so that the deploy pipeline had something real to
-> migrate. Worktrees and agents do not exist, and **no agent backend is chosen or
-> depended on**: there is nothing vendor-specific in the repo. See `README.md` for what
-> is actually live.
+> task tree is live: tasks nest, complete, and delete from a phone. A project can be
+> cloned to the server, and `git/worktrees.py` can give a task its own worktree — though
+> nothing calls it yet, because that is what runs are for. `runs` and `run_events` exist
+> as tables with no reader. **No agent backend is chosen or depended on**: there is
+> nothing vendor-specific in the repo. See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
@@ -314,6 +314,33 @@ than no list at all.
   and only the diffstat is stored — bounded by file count rather than change size.
 
 ## Deferred
+
+### Pipeline polish
+
+Wanted, not urgent. Grouped because they are one change to how promotion works.
+
+- **The `staging` → `main` pull request should open itself** once `staging-acceptance`
+  goes green, with merging still a human action. The trigger is GitHub Actions' `on:
+  status` event, which in this repository only ever fires for that status — Actions
+  publishes check runs, not statuses. A pull request opened by `GITHUB_TOKEN` gets no
+  fresh workflow runs, but its head is `staging`'s tip, which already carries passing
+  checks from the push, and required checks are evaluated against the head commit.
+  Belongs in Actions rather than in `staging_acceptance.py`: opening a pull request needs
+  `pull_requests: write`, and the server's token is readable by any agent running there.
+  Note `on: status` workflows only run from the *default branch's* copy of the file.
+- **`main` should refuse anything not from `staging`.** Rulesets cannot express "only
+  from branch X", but a required check that fails when the head is not `staging` gets
+  there, and fails with a legible reason rather than sitting on a `staging-acceptance`
+  that will never arrive.
+- **Squash-merge into `staging`**, so each pull request is one commit there.
+- **Keep `staging` rebased on `main`.** Worth deciding together with the point above:
+  if promotion merges with a *merge commit*, `main` gains a commit `staging` does not
+  have and the two diverge a little every cycle, so `staging` needs catching up each
+  time. Promoting by rebase or fast-forward instead leaves them identical, which is
+  what makes "always rebased" cheap rather than a chore. All three merge methods are
+  currently enabled on the repository.
+
+### Later
 
 - Recurring tasks and scheduled agents. The original motivation, but it needs the
   task/run loop working first. Lean toward an in-process scheduler over systemd timers —
