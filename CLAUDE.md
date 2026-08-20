@@ -100,11 +100,28 @@ manually *or* with an agent — creates a branch and a worktree; the agent runs 
 - An interrupted session still summarizes usefully, because the summarizer is fed
   both committed and uncommitted diffs.
 
-**Data model.** `projects` (name, repo_path, github_repo, base_branch) → `tasks`
-(self-referencing `parent_id` for the tree, status open/active/done) → `runs`
-(one row per attempt: mode agent|manual, branch, worktree_path, session_id, summary,
-diffstat). Storing the SDK `session_id` on the run is what allows resuming an agent
-conversation on a task later.
+**Data model**, as built rather than as sketched:
+
+```
+users     → projects → tasks → runs → run_events
+```
+
+- **`projects`** — owner, repo, github_url, default_branch, plus `local_path` (the
+  server's clone, without which there is nothing to make a worktree in), `setup_command`,
+  and `agent_backend`.
+- **`tasks`** — self-referencing `parent_id` for the tree, `position` for sibling order,
+  and `branch`/`worktree_path`, which live here rather than on runs because a plan run and
+  the execute run after it share one checkout.
+- **`runs`** — one row per attempt: `phase` (plan|execute), `status`, `backend`, `model`,
+  `resume_token`, `pid`, `plan`, `summary`, `diffstat`, `pr_url`, `total_cost_usd`,
+  `num_turns`.
+- **`run_events`** — every message a run emits, unique on `(run_id, seq)`, in Workbench's
+  own `RunEventKind` vocabulary. This is what makes a run survive a restart and an SSE
+  stream replayable.
+
+The tables exist and are migrated; nothing reads or writes `tasks`, `runs`, or
+`run_events` yet. The schema landed ahead of the code so the deployment pipeline had
+something real to migrate.
 
 **Workbench runs as a systemd unit, not a container.** The server's general convention
 is Docker Compose for self-contained services, but Workbench's job is to manipulate the
@@ -240,31 +257,61 @@ orphaning routine instead of occasional.
 
 Unresolved. Recorded here so they are not rediscovered later.
 
-- **Does `claude-agent-sdk` work on Python 3.14?** And does it require the Claude Code
-  CLI installed separately on `PATH`? The whole language choice rests on this. Test in a
-  throwaway venv on the server before committing.
-- **One worktree per task, or per run?** The prose above says per task; the data model
-  puts `branch` and `worktree_path` on `runs`. These are different systems — per-run
-  gives each attempt a clean branch, per-task lets a second run resume in place. Pick one
-  and make both halves agree.
-- **Agent sessions are directory-scoped.** The SDK exposes `list_sessions(directory=...)`
-  and keys sessions to the cwd they ran in. That conflicts with "worktrees are
-  disposable" — deleting a worktree may orphan the `session_id` a run points at.
-- **SSE has no replay.** A phone that sleeps mid-run silently loses everything emitted
-  during the gap. Likely fix: persist every agent event as it arrives and have the SSE
-  endpoint replay from `Last-Event-ID` before tailing live. Decide before building the
-  streaming layer; retrofitting means rewriting it.
-- **A fresh worktree is not a working checkout.** `git worktree add` gives tracked files
-  only — no `.env`, no `node_modules`, no venv. Most agent runs will fail their first
-  build for reasons unrelated to the task. Needs a per-project setup command and/or a
-  list of gitignored paths to link in, which the `projects` schema has nowhere to put.
-- **Blocking `sqlite3` in async handlers** will stall the event loop under a long run.
-  Either make handlers `def` or use `run_in_threadpool`.
+- **Agent sessions are directory-scoped.** A backend's resume token is keyed to the
+  directory it ran in, which conflicts with "worktrees are disposable" — deleting a
+  task's worktree orphans the `resume_token` its runs point at. Per-task worktrees narrow
+  this but do not close it. Some SDKs expose a pluggable session store, which would let
+  those live in our own SQLite instead of on disk.
+- **SSE has no replay yet.** The `run_events` table exists precisely so the stream can be
+  replayed from `Last-Event-ID` before tailing live, but nothing writes to or reads from
+  it — that arrives with the runner. A phone that sleeps mid-run would currently lose
+  everything emitted during the gap.
 - **Nothing caps concurrency.** Three taps starts three agents, each running builds.
-- **Store token/cost per run.** Cheap now, painful to backfill.
-- **`open/active/done` has nowhere to put a failed or cancelled run.** Also undecided:
-  whether a parent task's status is derived from its children or independent.
-- **Large diffs will blow the summarizer's context.** Needs diffstat-first truncation.
+  `config.py` has no `max_concurrent_runs` yet.
+- **`setup_command` is per project, but the need is per worktree.** A project whose setup
+  is "symlink `.env` and the venv from the main checkout" cannot express that as one
+  command without knowing the source path.
+- **Nothing bounds an agent's blast radius.** It will run as the service user with
+  whatever permissions the backend is given, and can read both credentials. This is what
+  the dedicated `workbench` user is for.
+- **Is "no commits" a failure?** A run where the agent correctly concludes nothing needs
+  changing produced no pull request, but calling that `failed` reads as a malfunction when
+  it was judgement. Probably wants a third outcome.
+- **Event log growth is unbounded.** Every tool call of every run is a row, kept forever.
+  Fine now; wants pruning before it is not.
+- **Whether a parent task's status should derive from its children.** Currently
+  independent, with a `2/5` progress count shown instead.
+- **Nothing has ever failed on the real server.** Every refusal path — dirty checkout,
+  crash-on-boot preflight, migration failure — is proven on CI runners and in unit tests,
+  never on this machine. The first genuine bad deploy is still an unknown.
+
+### Answered by the schema and deployment slices
+
+Kept because the reasoning is load-bearing, and because a stale "open" question is worse
+than no list at all.
+
+- **Does the agent SDK work on Python 3.14, and does it need a CLI on `PATH`?** Tested
+  against `claude-agent-sdk` 0.2.139: installs cleanly, and the wheel bundles a native
+  binary that `_find_cli()` prefers over anything on `PATH`. Verified under
+  `env -i PATH=/usr/bin:/bin`. So no Node and no separate install — but note this is one
+  backend's answer, and the question returns for any other.
+- **One worktree per task, or per run?** Per task. `branch` and `worktree_path` are on
+  `tasks`, because a plan run and the execute run after it share a resume token that is
+  scoped to the directory it ran in.
+- **Blocking `sqlite3` in async handlers.** Route handlers are sync `def`, which FastAPI
+  runs in a threadpool. The one `async def` endpoint will be the event stream, reaching
+  the database through `asyncio.to_thread`.
+- **Store token and cost per run.** `runs.total_cost_usd` and `runs.num_turns` exist. A
+  backend that reports neither leaves them null rather than zero.
+- **`open/active/done` has nowhere for a failed or cancelled run.** Task statuses are
+  open/active/blocked/done/cancelled; runs are
+  queued/running/awaiting_review/succeeded/failed/cancelled, with `awaiting_review` the
+  one non-terminal pause.
+- **A fresh worktree is not a working checkout.** `projects.setup_command` is where the
+  answer goes, though see the open question above about its shape.
+- **Large diffs will blow the summarizer's context.** Mostly evaporated: there is no
+  separate summarizer, the agent writes its own summary while it still has the context,
+  and only the diffstat is stored — bounded by file count rather than change size.
 
 ## Deferred
 
