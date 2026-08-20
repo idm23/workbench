@@ -50,6 +50,35 @@ def ensure_data_dir() -> Path:
 DEFAULT_BACKEND = "claude"
 
 
+def data_dir() -> Path:
+    """Everything this machine generates, as opposed to everything it clones.
+
+    Derived from the database path rather than from the repository root, so
+    pointing WORKBENCH_DB elsewhere takes the clones and worktrees with it
+    instead of leaving them beside a database that has moved.
+    """
+    return database_path().parent
+
+
+def repos_dir() -> Path:
+    """Where a project's repository is cloned.
+
+    Inside `data/` for the same reason the database is: it is generated, it is
+    gitignored, and a fresh clone of Workbench onto another machine should not
+    inherit a path that has to be created and remembered.
+    """
+    return data_dir() / "repos"
+
+
+def worktrees_dir() -> Path:
+    """Where each task's worktree is created.
+
+    Disposable by design — a worktree can be deleted and remade from the branch
+    it points at, which is why nothing irreplaceable is ever kept here.
+    """
+    return data_dir() / "worktrees"
+
+
 def default_agent_backend() -> str:
     """Which agent backend to use when a project does not name one.
 

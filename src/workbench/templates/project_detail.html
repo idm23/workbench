@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.owner }}/{{ project.repo }} — Workbench{% endblock %}
+
+{% block back %}<a class="back" href="/users/{{ project.user_id }}">&lsaquo; {{ project.user.name }}</a>{% endblock %}
+
+{% block content %}
+<h1 class="mono" style="font-size: clamp(1.3rem, 6vw, 1.8rem);">{{ project.owner }}/{{ project.repo }}</h1>
+<p class="sub">
+  {% if project.description %}{{ project.description }}{% else %}No description.{% endif %}
+</p>
+
+{% if not project.local_path %}
+  <p class="msg notice">
+    Not cloned to this server yet. Tasks can be added, but nothing can run until
+    there is a checkout to work in.
+  </p>
+  <form method="post" action="/projects/{{ project.id }}/clone" style="border: none; padding: 0; margin-bottom: 1.75rem;">
+    <button type="submit">Clone repository</button>
+  </form>
+{% endif %}
+
+{% if nodes %}
+  <ul class="tree">
+    {% for node in nodes %}
+      <li style="padding-left: {{ node.depth * 1.25 }}rem;">
+        <div class="task {{ 'done' if node.task.status == 'done' }}">
+          <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
+            <input type="hidden" name="new_status"
+                   value="{{ 'open' if node.task.status == 'done' else 'done' }}">
+            <button class="tick" type="submit"
+                    aria-label="{{ 'Reopen' if node.task.status == 'done' else 'Mark done' }}"
+            >{{ '✓' if node.task.status == 'done' else '' }}</button>
+          </form>
+
+          <div class="task-body">
+            <div class="task-title">{{ node.task.title }}</div>
+
+            {% if node.task.body %}<div class="task-note">{{ node.task.body }}</div>{% endif %}
+
+            <div class="task-note">
+              {% if node.progress %}{{ node.progress }} done&nbsp;·&nbsp;{% endif %}
+              <span class="status {{ node.task.status }}">{{ node.task.status }}</span>
+              {% if node.task.branch %}
+                <span class="mono">&nbsp;{{ node.task.branch }}</span>
+              {% endif %}
+            </div>
+
+            <div class="task-actions">
+              <form method="post" action="/tasks/{{ node.task.id }}/delete">
+                <button class="slim secondary" type="submit">Delete</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">No tasks yet. Add the first one below.</p>
+{% endif %}
+
+<form method="post" action="/projects/{{ project.id }}/tasks">
+  <label for="title">Add a task</label>
+  <input type="text" id="title" name="title" placeholder="What needs doing?"
+         autocomplete="off" required>
+  <label for="body">Detail <span style="text-transform: none; font-weight: 400;">(optional)</span></label>
+  <textarea id="body" name="body" rows="3"
+            placeholder="Anything the agent should know before planning."></textarea>
+  {% if nodes %}
+    <label for="parent_id">Under <span style="text-transform: none; font-weight: 400;">(optional)</span></label>
+    <select id="parent_id" name="parent_id">
+      <option value="">Top level</option>
+      {% for node in nodes %}
+        <option value="{{ node.task.id }}">{{ '— ' * node.depth }}{{ node.task.title }}</option>
+      {% endfor %}
+    </select>
+  {% endif %}
+  <button type="submit">Add task</button>
+</form>
+{% endblock %}

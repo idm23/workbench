@@ -15,10 +15,10 @@
   <ul class="items">
     {% for project in user.projects %}
       <li>
-        <a class="row" href="{{ project.github_url }}" rel="noreferrer">
+        <a class="row" href="/projects/{{ project.id }}">
           <span class="row-title">
             <span class="mono">{{ project.owner }}/{{ project.repo }}</span>
-            <span class="chev">&nearr;</span>
+            <span class="chev">&rsaquo;</span>
           </span>
           {% if project.description %}
             <span class="row-meta">{{ project.description }}</span>

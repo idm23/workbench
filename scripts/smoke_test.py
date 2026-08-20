@@ -48,6 +48,20 @@ class Results:
         self.failures.append(description)
         return False
 
+    def check_absent(self, description: str, unwanted: str, actual: str) -> bool:
+        """The mirror of check(), for things that must have disappeared.
+
+        Deletion can only be verified this way: a page rendering successfully
+        proves nothing if the row is still on it.
+        """
+        if unwanted not in actual:
+            self.record_pass(description)
+            return True
+        logger.error("  %s %s", paint(RED, "FAIL"), description)
+        logger.error("       still present: %s", unwanted)
+        self.failures.append(description)
+        return False
+
     def note(self, message: str) -> None:
         logger.warning("  %s %s", paint(YELLOW, "note"), message)
 
@@ -134,7 +148,66 @@ def run(base_url: str) -> Results:
             str(client.get("/users/99999999").status_code),
         )
 
+        _check_tasks(client, results)
+
     return results
+
+
+def _check_tasks(client: httpx.Client, results: Results) -> None:
+    """The task tree, on the project just added.
+
+    Stops short of cloning: that pulls a repository over the network into
+    `data/`, which is a lot of work to prove a button posts a form, and it
+    would leave a clone behind on every staging acceptance run.
+    """
+    users = re.findall(r"/users/\d+", client.get("/").text)
+    projects = re.findall(r"/projects/\d+", client.get(users[-1]).text)
+    if not projects:
+        results.check("found a project to add tasks to", "a /projects/<id> link", "none")
+        return
+    results.record_pass("found a project to add tasks to")
+
+    project = projects[-1]
+    tasks_url = f"{project}/tasks"
+
+    results.check("project page renders", "Add a task", client.get(project).text)
+
+    page = client.post(tasks_url, data={"title": "Smoke test task", "body": "detail"}).text
+    results.check("task added", "Smoke test task", page)
+
+    parents = re.findall(r"/tasks/(\d+)/status", page)
+    if not parents:
+        results.check("found the new task", "a /tasks/<id> control", "none in the page")
+        return
+    parent = parents[-1]
+
+    page = client.post(tasks_url, data={"title": "Smoke test subtask", "parent_id": parent}).text
+    results.check("subtask nests under its parent", "Smoke test subtask", page)
+    results.check("parent shows no children done yet", "0/1", page)
+
+    children = [i for i in re.findall(r"/tasks/(\d+)/status", page) if i != parent]
+    if not children:
+        results.check("found the subtask", "a second /tasks/<id> control", "none")
+        return
+
+    results.check(
+        "completing a subtask updates the parent",
+        "1/1",
+        client.post(f"/tasks/{children[-1]}/status", data={"new_status": "done"}).text,
+    )
+    results.check(
+        "an invalid status is refused",
+        "is not a task status",
+        client.post(f"/tasks/{children[-1]}/status", data={"new_status": "nonsense"}).text,
+    )
+
+    # The delete confirmation repeats the title, so the tree's own controls are
+    # what says whether the rows are really gone.
+    page = client.post(f"/tasks/{parent}/delete").text
+    results.check_absent("deleting a parent removes it", f"/tasks/{parent}/status", page)
+    results.check_absent(
+        "deleting a parent removes its children", f"/tasks/{children[-1]}/status", page
+    )
 
 
 def main() -> int:
