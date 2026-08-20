@@ -24,8 +24,11 @@ from workbench.deploy import (
     AlreadyCurrent,
     Deployed,
     DeployFailed,
+    _owner_environment,
+    _run,
     advance_checkout,
     deploy,
+    repo_owner,
     restore_snapshot,
     run_acceptance,
 )
@@ -433,6 +436,55 @@ def test_acceptance_runs_when_a_snapshot_is_restored(checkout, tmp_path, monkeyp
     run_acceptance()
 
     assert any("staging_acceptance.py" in " ".join(argv) for argv in calls)
+
+
+# --- Dropping privileges -----------------------------------------------------
+#
+# The deployer runs as root so it can restart the unit, and drops to the
+# checkout's owner for anything touching git, the virtualenv, or the database.
+# The setuid branch itself needs root, so it is exercised by the deploy-cycle
+# test on CI rather than here; what is checkable unprivileged is that the
+# environment handed to the child is right, and that nothing is attempted when
+# there are no privileges to drop.
+
+
+def test_the_owner_environment_points_home_at_the_owner(checkout):
+    """setuid does not relocate HOME the way a login would.
+
+    uv resolves its cache from HOME and git looks there for configuration, so
+    leaving root's would send both to the wrong place — the one thing runuser
+    was doing for us that subprocess's user= does not.
+    """
+    environment = _owner_environment()
+    owner = repo_owner()
+
+    assert environment["HOME"] == owner.pw_dir
+    assert environment["USER"] == owner.pw_name
+    assert environment["LOGNAME"] == owner.pw_name
+
+
+def test_the_owner_environment_keeps_the_rest_of_the_environment(checkout, monkeypatch):
+    """Only the identity changes; WORKBENCH_* and PATH still have to arrive."""
+    monkeypatch.setenv("WORKBENCH_DEPLOY_BRANCH", "somewhere")
+
+    environment = _owner_environment()
+
+    assert environment["WORKBENCH_DEPLOY_BRANCH"] == "somewhere"
+    assert "PATH" in environment
+
+
+def test_repo_owner_is_the_account_owning_the_checkout(checkout):
+    work, _ = checkout
+
+    assert repo_owner().pw_uid == work.stat().st_uid
+
+
+def test_commands_still_run_when_there_is_nothing_to_drop(checkout):
+    """Unprivileged is the normal case for a developer running this by hand."""
+    result = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], as_owner=True, timeout=30)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "main"
 
 
 def test_the_not_reported_exit_code_agrees_across_the_two_files():

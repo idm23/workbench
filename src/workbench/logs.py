@@ -20,7 +20,12 @@ _COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 # Libraries that log at INFO on every operation. Useful when debugging them,
 # pure noise in an installer's output.
-_NOISY_LOGGERS = ("httpx", "httpcore")
+# `alembic.runtime.plugins` announces every autogenerate plugin it registers,
+# at import time rather than on use — so merely importing anything that touches
+# alembic emits seven lines. alembic.ini quiets this for the alembic CLI, but
+# that config belongs to the CLI's own process; anything importing the library
+# has to quiet it here.
+_NOISY_LOGGERS = ("httpx", "httpcore", "alembic.runtime.plugins")
 
 
 def paint(code: str, text: str) -> str:

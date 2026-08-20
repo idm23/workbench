@@ -50,6 +50,7 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `CLAUDE.md` | Design doc, decisions, and open questions. |
 | `docs/deployment-setup.md` | Turning the pipeline on, once. |
 | `docs/server-conventions.md` | How the home server launches things, and why. |
+| `docs/learning-notes.md` | What building this taught me about systemd, git, and SQLite. |
 
 **Tests live beside the code they cover** — `src/workbench/database/tests/`,
 `src/workbench/git/tests/`. Only the ones spanning several modules at once stay in the top-level

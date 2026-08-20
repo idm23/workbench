@@ -86,8 +86,21 @@ class DeployFailed:
 type DeployResult = Deployed | AlreadyCurrent | DeployFailed
 
 
-def repo_owner() -> str:
-    return pwd.getpwuid(repo_root().stat().st_uid).pw_name
+def repo_owner() -> pwd.struct_passwd:
+    """The account that owns the checkout, and therefore owns its files."""
+    return pwd.getpwuid(repo_root().stat().st_uid)
+
+
+def _owner_environment() -> dict[str, str]:
+    """The environment a command should see when run as the checkout's owner.
+
+    Dropping privileges with setuid does not change the environment the way a
+    login would, so HOME would still point at root's. That matters: uv resolves
+    its cache from HOME, and git looks there for user configuration. Setting it
+    explicitly is the part `runuser` used to do for us.
+    """
+    owner = repo_owner()
+    return {**os.environ, "HOME": owner.pw_dir, "USER": owner.pw_name, "LOGNAME": owner.pw_name}
 
 
 def _run(argv: list[str], *, as_owner: bool, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -98,9 +111,30 @@ def _run(argv: list[str], *, as_owner: bool, timeout: int) -> subprocess.Complet
     work as root would leave root-owned files in `.git`, `.venv`, and the WAL
     beside the database — and the service, which runs unprivileged, could then
     no longer write its own data directory.
+
+    Uses subprocess's own user= rather than shelling out to `runuser`. Both
+    end up calling setuid, but runuser opens a PAM session to get there, and
+    PAM logs every one of them — three lines per command, thirty per deploy,
+    into the journal that is the only place a bad deploy explains itself. This
+    also spawns one process instead of two.
     """
     if as_owner and os.geteuid() == 0:
-        argv = ["runuser", "-u", repo_owner(), "--", *argv]
+        owner = repo_owner()
+        return subprocess.run(
+            argv,
+            cwd=repo_root(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            user=owner.pw_uid,
+            group=owner.pw_gid,
+            # Supplementary groups are not inherited across setuid, and leaving
+            # root's would hand the child more access than the owner has.
+            extra_groups=[],
+            env=_owner_environment(),
+        )
+
     return subprocess.run(
         argv,
         cwd=repo_root(),
@@ -118,7 +152,7 @@ def _fail(step: str, completed: subprocess.CompletedProcess[str]) -> DeployFaile
 
 def _uv() -> str | None:
     """Find uv, which lives in the owner's home rather than on root's PATH."""
-    home = Path(pwd.getpwnam(repo_owner()).pw_dir)
+    home = Path(repo_owner().pw_dir)
     candidate = home / ".local" / "bin" / "uv"
     if candidate.is_file():
         return str(candidate)
