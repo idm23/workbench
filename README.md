@@ -5,8 +5,10 @@
 A personal tool for managing software projects on a home server — projects, a todo tree per
 project, and tasks worked either by hand or by a Claude agent, with a written summary either way.
 
-**Status:** early. There are users, and each user has projects that point at GitHub repositories.
-Tasks, runs, worktrees, and agents are not built yet — see `CLAUDE.md` for where it is going.
+**Status:** early. Users own projects that point at GitHub repositories, and each project has a
+tree of tasks you can add, complete, and delete from a phone. A project can be cloned to the server,
+and each task can be given its own git worktree — but nothing runs in one yet. Agents are next; see
+`CLAUDE.md` for where it is going.
 
 ## Quick start
 
@@ -41,7 +43,8 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `src/workbench/install.py` | The installer proper. Python, so it shares config with the app. |
 | `src/workbench/app.py` | The web application: routes and templates. |
 | `src/workbench/database/` | `models.py` (the schema) and `db.py` (engine and sessions). |
-| `src/workbench/git/` | `github.py` — parsing repository references and reporting results. |
+| `src/workbench/git/` | `github.py`, `worktrees.py`, `revision.py` — everything that shells to git. |
+| `src/workbench/tasks.py` | Assembling the flat task rows into the tree the page renders. |
 | `src/workbench/deploy.py` | Pulls, migrates, and restarts. Run on a timer; see below. |
 | `src/workbench/config.py` | Everything read from the environment, with repo-relative defaults. |
 | `alembic/` | Migrations. Applied by the installer and by every deploy. |
