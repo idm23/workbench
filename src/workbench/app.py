@@ -33,7 +33,7 @@ from workbench.git.github import (
     parse_repo_reference,
 )
 from workbench.git.revision import head_revision
-from workbench.git.worktrees import Cloned, clone_project, remove_worktree
+from workbench.git.worktrees import Cloned, clone_project, local_checkout, remove_worktree
 from workbench.tasks import build_tree, flatten
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -214,6 +214,10 @@ def show_project(
         {
             "project": project,
             "nodes": flatten(build_tree(list(tasks))),
+            # Derived, not stored. This database is copied between instances —
+            # staging restores production's snapshot on every deploy — so a
+            # stored path would arrive pointing at the other machine's disk.
+            "checkout": local_checkout(project.owner, project.repo),
             "error": error,
             "notice": notice,
         },
@@ -236,8 +240,8 @@ def clone_repository(db: DbSession, project_id: int) -> RedirectResponse:
     if not isinstance(result, Cloned):
         return _redirect(target, error=f"{result.message} {result.stderr}".strip())
 
-    project.local_path = str(result.path)
-    db.commit()
+    # Nothing to write down: the clone's location is derivable, and the next
+    # page load asks the filesystem.
     return _redirect(target, notice=f"Cloned to {result.path}.")
 
 
@@ -316,9 +320,10 @@ def delete_task(db: DbSession, task_id: int) -> RedirectResponse:
     target = f"/projects/{project.id}"
     title = task.title
 
+    checkout = local_checkout(project.owner, project.repo)
     for doomed in _task_and_descendants(task):
-        if doomed.worktree_path and project.local_path:
-            remove_worktree(Path(project.local_path), Path(doomed.worktree_path))
+        if doomed.worktree_path and checkout is not None:
+            remove_worktree(checkout, Path(doomed.worktree_path))
 
     db.delete(task)
     db.commit()

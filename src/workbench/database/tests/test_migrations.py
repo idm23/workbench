@@ -115,11 +115,35 @@ def test_columns_added_to_populated_tables_are_nullable(alembic_config):
     command.upgrade(alembic_config, "head")
 
     with sqlite3.connect(database_of(alembic_config)) as connection:
-        rows = connection.execute(
-            "SELECT local_path, setup_command, agent_backend FROM projects"
-        ).fetchall()
+        rows = connection.execute("SELECT setup_command, agent_backend FROM projects").fetchall()
 
-    assert rows == [(None, None, None), (None, None, None)]
+    assert rows == [(None, None), (None, None)]
+
+
+def test_dropping_a_column_keeps_the_rest_of_the_row(alembic_config):
+    """SQLite cannot DROP COLUMN in place, so Alembic rebuilds the table.
+
+    A batch rewrite that gets the column list wrong silently loses data in the
+    columns it did not mean to touch, which no schema comparison would notice.
+    """
+    all_revisions = revisions(alembic_config)
+    command.upgrade(alembic_config, all_revisions[-2])
+    seed_previous_revision(database_of(alembic_config))
+
+    command.upgrade(alembic_config, "head")
+
+    with sqlite3.connect(database_of(alembic_config)) as connection:
+        projects = connection.execute(
+            "SELECT owner, repo, github_url FROM projects ORDER BY id"
+        ).fetchall()
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+
+    assert projects == [
+        ("idm23", "workbench", "https://github.com/idm23/workbench"),
+        ("idm23", "other", "https://github.com/idm23/other"),
+    ]
+    assert "local_path" not in columns
+    assert {"owner", "repo", "github_url", "setup_command", "agent_backend"} <= columns
 
 
 def test_downgrade_and_upgrade_again_with_data_present(alembic_config):

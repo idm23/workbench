@@ -10,7 +10,7 @@
   {% if project.description %}{{ project.description }}{% else %}No description.{% endif %}
 </p>
 
-{% if not project.local_path %}
+{% if not checkout %}
   <p class="msg notice">
     Not cloned to this server yet. Tasks can be added, but nothing can run until
     there is a checkout to work in.

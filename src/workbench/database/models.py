@@ -176,11 +176,6 @@ class Project(Base):
     description: Mapped[str | None] = mapped_column(Text, default=None)
     default_branch: Mapped[str | None] = mapped_column(String(100), default=None)
 
-    # Where the repository is cloned on this machine. Null until cloned, and
-    # nothing can run against the project until it is set: `git worktree add`
-    # needs a real checkout to hang worktrees off.
-    local_path: Mapped[str | None] = mapped_column(String(1000), default=None)
-
     # Run inside a newly created worktree. `git worktree add` gives tracked
     # files only — no .env, no node_modules, no venv — so most first builds in a
     # fresh worktree fail for reasons unrelated to the task.
