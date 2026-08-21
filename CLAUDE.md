@@ -106,9 +106,12 @@ manually *or* with an agent — creates a branch and a worktree; the agent runs 
 users     → projects → tasks → runs → run_events
 ```
 
-- **`projects`** — owner, repo, github_url, default_branch, plus `local_path` (the
-  server's clone, without which there is nothing to make a worktree in), `setup_command`,
-  and `agent_backend`.
+- **`projects`** — owner, repo, github_url, default_branch, plus `setup_command` and
+  `agent_backend`. Deliberately *not* the clone's path: that is derived from owner and
+  repo by `git.worktrees.local_checkout()`, because this database is copied between
+  instances. Staging restores production's snapshot on every deploy, so a stored absolute
+  path arrived in staging still pointing at production's checkout — and once runs exist,
+  that means staging creating worktrees inside production's repository.
 - **`tasks`** — self-referencing `parent_id` for the tree, `position` for sibling order,
   and `branch`/`worktree_path`, which live here rather than on runs because a plan run and
   the execute run after it share one checkout.
@@ -332,13 +335,18 @@ Wanted, not urgent. Grouped because they are one change to how promotion works.
   from branch X", but a required check that fails when the head is not `staging` gets
   there, and fails with a legible reason rather than sitting on a `staging-acceptance`
   that will never arrive.
-- **Squash-merge into `staging`**, so each pull request is one commit there.
-- **Keep `staging` rebased on `main`.** Worth deciding together with the point above:
-  if promotion merges with a *merge commit*, `main` gains a commit `staging` does not
-  have and the two diverge a little every cycle, so `staging` needs catching up each
-  time. Promoting by rebase or fast-forward instead leaves them identical, which is
-  what makes "always rebased" cheap rather than a chore. All three merge methods are
-  currently enabled on the repository.
+- **Squash-merge into `staging`**, so each pull request is one commit there — but
+  **promote to `main` with a merge commit**, never a squash or a rebase. Only a merge
+  commit leaves `staging` an ancestor of `main`, which is what advances the merge base.
+  Measured after the first squash promotion: the next pull request would have shown 16
+  files and 1,419 lines when 12 files and 1,071 lines actually differed, and that gap
+  compounds each cycle. See `docs/learning-notes.md`.
+- **Keep `staging` realigned with `main`.** Mostly falls out of the point above: once
+  promotion uses a merge commit, `staging` is always an ancestor of `main`, so catching
+  it up is a fast-forward rather than a force push. Automating even that would need a
+  bypass actor on the `staging` ruleset, because its `pull_request` rule blocks direct
+  pushes from workflows too — a lot of machinery for something the merge method gives
+  away free. Probably not worth it.
 
 ### Later
 

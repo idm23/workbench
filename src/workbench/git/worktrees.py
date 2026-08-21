@@ -100,7 +100,27 @@ def branch_name(task_id: int, title: str) -> str:
 
 
 def clone_path_for(owner: str, repo: str) -> Path:
+    """Where this project's clone belongs on this machine.
+
+    Deterministic from the owner and repository name, which is why nothing
+    stores it. A stored path would be an absolute path to one machine's disk,
+    and this database gets copied between instances — staging restores a
+    snapshot of production every deploy, so a stored path would arrive in
+    staging still pointing at production's checkout.
+    """
     return repos_dir() / f"{owner}-{repo}"
+
+
+def local_checkout(owner: str, repo: str) -> Path | None:
+    """The project's clone, or None if it has not been cloned here.
+
+    Asked of the filesystem rather than the database on purpose. It is one
+    stat, it is always right for the instance asking, and it cannot go stale —
+    a directory deleted by hand stops being a checkout immediately rather than
+    when someone remembers to clear a column.
+    """
+    path = clone_path_for(owner, repo)
+    return path if (path / ".git").exists() else None
 
 
 def worktree_path_for(task_id: int, title: str) -> Path:
