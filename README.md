@@ -44,7 +44,8 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `src/workbench/app.py` | The web application: routes and templates. |
 | `src/workbench/database/` | `models.py` (the schema) and `db.py` (engine and sessions). |
 | `src/workbench/git/` | `github.py`, `worktrees.py`, `revision.py` — everything that shells to git. |
-| `src/workbench/tasks.py` | Assembling the flat task rows into the tree the page renders. |
+| `src/workbench/tasks/` | `tree.py` (the shape a page renders) and `store.py` (every write). |
+| `src/workbench/api.py` | The JSON routes, over the same operations as the forms. |
 | `src/workbench/deploy.py` | Pulls, migrates, and restarts. Run on a timer; see below. |
 | `src/workbench/config.py` | Everything read from the environment, with repo-relative defaults. |
 | `alembic/` | Migrations. Applied by the installer and by every deploy. |
@@ -59,6 +60,38 @@ Re-running it is safe — every step checks before acting, and your data is unto
 `src/workbench/git/tests/`. Only the ones spanning several modules at once stay in the top-level
 `tests/`, which is currently the deployer and the systemd units. They are excluded from the built
 wheel, so nothing test-related is installed onto the server.
+
+## The API
+
+Tasks can be created by something other than a person with a phone — a script, a terminal, or an
+agent. The JSON routes live under `/api` and perform the **same writes** as the HTML forms, through
+`workbench.tasks.store`, so the two cannot drift.
+
+```sh
+curl -s https://homebox-core.tail4c4cf3.ts.net/api/projects
+
+curl -s -X POST https://homebox-core.tail4c4cf3.ts.net/api/projects/1/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title": "Make the clone directory configurable", "parent_id": 3}'
+
+curl -s -X PATCH https://homebox-core.tail4c4cf3.ts.net/api/tasks/7 \
+  -H 'content-type: application/json' -d '{"status": "done"}'
+```
+
+| | |
+|---|---|
+| `GET /api/projects` | id, owner, repo, whether it is cloned, open task count |
+| `GET /api/projects/{id}/tasks` | the tree, nested |
+| `POST /api/projects/{id}/tasks` | title, optional body and `parent_id` |
+| `PATCH /api/tasks/{id}` | any of title, body, status |
+| `DELETE /api/tasks/{id}` | the task and everything under it |
+
+Browsable at **`/docs`**, which FastAPI generates from the route signatures.
+
+**There is no authentication, and that is not an oversight.** These routes are exactly as exposed
+as the forms they mirror — both reachable by anything that can reach the app, which is a two-device
+personal tailnet. Adding a token to the JSON half while leaving the HTML half open would be
+theatre. If the app gains auth it belongs in front of both.
 
 ## Tests
 
