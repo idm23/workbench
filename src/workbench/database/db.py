@@ -62,3 +62,18 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+def get_db() -> Iterator[Session]:
+    """One session per request, closed afterwards.
+
+    A plain generator with no web framework in sight — FastAPI wraps it in
+    `Depends` at the call site. It lives here rather than beside the routes
+    because there are two sets of routes now, the HTML forms and the JSON API,
+    and they must not each open sessions their own way.
+    """
+    session = get_session_factory()()
+    try:
+        yield session
+    finally:
+        session.close()

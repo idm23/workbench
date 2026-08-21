@@ -9,7 +9,6 @@ Messages are passed between requests as query parameters rather than flash
 state, which keeps the app free of session middleware and a signing secret.
 """
 
-from collections.abc import Iterator
 from functools import cache
 from pathlib import Path
 from typing import Annotated
@@ -22,8 +21,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from workbench.api import router as api_router
 from workbench.config import instance
-from workbench.database.db import get_session_factory
+from workbench.database.db import get_db
 from workbench.database.models import Project, Task, TaskStatus, User
 from workbench.git.github import (
     InvalidReference,
@@ -33,20 +33,25 @@ from workbench.git.github import (
     parse_repo_reference,
 )
 from workbench.git.revision import head_revision
-from workbench.git.worktrees import Cloned, clone_project, local_checkout, remove_worktree
-from workbench.tasks import build_tree, flatten
+from workbench.git.worktrees import Cloned, clone_project, local_checkout
+from workbench.tasks import (
+    WrongProject,
+    build_tree,
+    create_task,
+    flatten,
+    set_status,
+)
+from workbench.tasks import (
+    delete_task as delete_task_and_children,
+)
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 app = FastAPI(title="Workbench")
 
-
-def get_db() -> Iterator[Session]:
-    session = get_session_factory()()
-    try:
-        yield session
-    finally:
-        session.close()
+# Mounted rather than defined here: the JSON routes are a second face on the
+# same operations, not a second implementation of them.
+app.include_router(api_router)
 
 
 DbSession = Annotated[Session, Depends(get_db)]
@@ -259,33 +264,13 @@ def add_task(
     project = _get_project_or_404(db, project_id)
     target = f"/projects/{project.id}"
 
-    cleaned = title.strip()
-    if not cleaned:
+    if not title.strip():
         return _redirect(target, error="Enter a title for the task.")
 
     parent_key = int(parent_id) if parent_id.strip().isdigit() else None
-    if parent_key is not None:
-        parent = db.get(Task, parent_key)
-        if parent is None or parent.project_id != project.id:
-            return _redirect(target, error="That parent task does not belong to this project.")
-
-    # Append within the sibling group rather than at the end of the project, so
-    # a new sub-task lands under its siblings instead of jumping the tree.
-    siblings = db.scalars(
-        select(Task.position).where(Task.project_id == project.id, Task.parent_id == parent_key)
-    ).all()
-    next_position = (max(siblings) + 1) if siblings else 0
-
-    db.add(
-        Task(
-            project_id=project.id,
-            parent_id=parent_key,
-            title=cleaned,
-            body=body.strip() or None,
-            position=next_position,
-        )
-    )
-    db.commit()
+    created = create_task(db, project, title=title, body=body, parent_id=parent_key)
+    if isinstance(created, WrongProject):
+        return _redirect(target, error=created.message)
     return _redirect(target)
 
 
@@ -297,13 +282,13 @@ def set_task_status(
     target = f"/projects/{task.project_id}"
 
     try:
-        task.status = TaskStatus(new_status)
+        status = TaskStatus(new_status)
     except ValueError:
         # The form only ever submits valid values, so this is a hand-crafted
         # request. Say what happened rather than returning a bare 422.
         return _redirect(target, error=f"{new_status!r} is not a task status.")
 
-    db.commit()
+    set_status(db, task, status)
     return _redirect(target)
 
 
@@ -316,22 +301,7 @@ def delete_task(db: DbSession, task_id: int) -> RedirectResponse:
     to be removed before the row that names it.
     """
     task = _get_task_or_404(db, task_id)
-    project = task.project
-    target = f"/projects/{project.id}"
-    title = task.title
+    target = f"/projects/{task.project_id}"
 
-    checkout = local_checkout(project.owner, project.repo)
-    for doomed in _task_and_descendants(task):
-        if doomed.worktree_path and checkout is not None:
-            remove_worktree(checkout, Path(doomed.worktree_path))
-
-    db.delete(task)
-    db.commit()
+    title = delete_task_and_children(db, task)
     return _redirect(target, notice=f"Deleted {title!r}.")
-
-
-def _task_and_descendants(task: Task) -> list[Task]:
-    collected = [task]
-    for child in task.children:
-        collected.extend(_task_and_descendants(child))
-    return collected
