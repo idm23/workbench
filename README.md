@@ -179,6 +179,30 @@ journalctl -u workbench-staging-deploy -n 50 --no-pager
 uv run scripts/staging_acceptance.py --no-report       # run the checks without reporting
 ```
 
+### Reaching staging from a phone
+
+Production is published on 443; staging goes on a second port:
+
+```sh
+tailscale serve --bg --https=8443 8788
+tailscale serve status
+```
+
+Staging is then at **https://homebox-core.tail4c4cf3.ts.net:8443**, and the port makes it obvious
+which instance is on screen. Adding it leaves the production config alone, and the certificate
+covers the hostname regardless of port.
+
+**Do not serve staging on a path** (`--set-path=/staging`). Tailscale strips the prefix before
+proxying, so the app sees `/users/1` and renders its links root-relative — the first click would
+land on production while looking like staging. Every template here uses absolute paths, so this
+would be silent and wrong rather than broken and obvious.
+
+**Anything you create on staging is temporary.** Every deploy restores a fresh snapshot of
+production's database before migrating, so tasks added while clicking around disappear on the next
+merge to `staging`. That is the point — migrations are tested against real rows rather than
+whatever the last person left behind — but it is worth knowing before wondering where something
+went.
+
 ### Setting staging up, once
 
 ```sh

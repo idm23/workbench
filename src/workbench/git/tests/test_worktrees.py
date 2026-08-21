@@ -14,9 +14,11 @@ from workbench.git.worktrees import (
     GitFailed,
     WorktreeReady,
     branch_name,
+    clone_path_for,
     diffstat,
     ensure_worktree,
     has_commits,
+    local_checkout,
     slugify,
 )
 
@@ -142,3 +144,52 @@ def test_worktree_survives_its_directory_being_deleted(repo):
 
     assert isinstance(second, WorktreeReady)
     assert second.branch == first.branch
+
+
+# --- Deriving the checkout ---------------------------------------------------
+#
+# The clone's location used to be stored on the project row. It is derived now
+# because this database is copied between instances: staging restores a
+# snapshot of production on every deploy, so a stored absolute path arrived in
+# staging still pointing at production's checkout — and once runs exist, that
+# means staging creating worktrees inside production's repository.
+
+
+def test_an_uncloned_project_has_no_checkout(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
+
+    assert local_checkout("idm23", "workbench") is None
+
+
+def test_a_directory_without_git_is_not_a_checkout(tmp_path, monkeypatch):
+    """A half-finished clone, or someone's mkdir. Not something to run in."""
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
+    clone_path_for("idm23", "workbench").mkdir(parents=True)
+
+    assert local_checkout("idm23", "workbench") is None
+
+
+def test_a_real_clone_is_found(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
+    path = clone_path_for("idm23", "workbench")
+    (path / ".git").mkdir(parents=True)
+
+    assert local_checkout("idm23", "workbench") == path
+
+
+def test_each_instance_resolves_its_own_checkout(tmp_path, monkeypatch):
+    """The whole reason this is derived rather than stored.
+
+    Two installs share a machine and a database, and must never resolve to each
+    other's clone.
+    """
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "production" / "workbench.db"))
+    production = clone_path_for("idm23", "workbench")
+    (production / ".git").mkdir(parents=True)
+    assert local_checkout("idm23", "workbench") == production
+
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "staging" / "workbench.db"))
+    assert clone_path_for("idm23", "workbench") != production
+    # Staging has restored production's database but has no clone of its own,
+    # so it correctly reports having nothing to work in.
+    assert local_checkout("idm23", "workbench") is None

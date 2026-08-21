@@ -127,6 +127,38 @@ Two answers here: `test_migrations.py` seeds rows at the *previous* revision usi
 (the ORM would insert today's shape, defeating the point), and staging restores a snapshot
 of production before migrating.
 
+## Squash from short-lived branches, merge from long-lived ones
+
+Git computes a merge base from **ancestry, not content**. Squashing discards the parent
+link: the new commit on the target branch has the same content as the source commits but
+no lineage to them, so git genuinely does not know they are already there.
+
+For a feature branch that is deleted after merging, that costs nothing and buys one tidy
+commit instead of six saying "fix typo". For a long-lived branch compared against the
+target on every cycle, it compounds — the merge base freezes at the last point the two
+genuinely shared, and every subsequent pull request re-shows work the target already has.
+
+Measured here after one squash promotion of `staging` into `main`: the next promotion
+would have displayed **16 files and 1,419 lines changed when only 12 files and 1,071
+lines actually differed**. Roughly 350 lines of it was the previous promotion, shown
+again. That gap grows with every cycle.
+
+**"Rebase and merge" has the same problem.** It replays the commits onto the target as
+*new* commits with new hashes, so the originals on the source branch are still ancestors
+of nothing. It looks like the tidiest option and breaks ancestry just as completely. Only
+**"Create a merge commit"** preserves it, because that commit's second parent *is* the
+source branch tip.
+
+A second consequence, easy to miss: with merge commits, realigning the long-lived branch
+onto the target is a **fast-forward**, which a `non_fast_forward` ruleset permits. After a
+squash it could only ever be a force push, which that rule blocks. So the merge method
+decides whether realignment is possible at all.
+
+| | method | why |
+|---|---|---|
+| feature → `staging` | Squash and merge | one commit per pull request; the branch is disposable |
+| `staging` → `main` | Create a merge commit | keeps `staging` an ancestor, so the merge base advances |
+
 ## GitHub rulesets vs branch protection
 
 Both exist and either works, but **rulesets let you type an arbitrary status check name**.
