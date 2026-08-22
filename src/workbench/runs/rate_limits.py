@@ -92,6 +92,22 @@ class RateLimitReading:
         return round(max(0.0, min(1.0, self.utilization)) * 100)
 
     @property
+    def status_label(self) -> str:
+        """The backend's status in words, for when there is no percentage.
+
+        `utilization` is optional in the protocol and genuinely absent in real
+        readings — the one recorded sample on this machine carries a status, a
+        window, and a reset time and no number at all. A panel that showed
+        `allowed` in that case would be worse than useless, so the status
+        carries the meaning whenever the number cannot.
+        """
+        return {
+            "allowed": "within limits",
+            "allowed_warning": "close to the limit",
+            "rejected": "limit reached",
+        }.get(self.status, self.status.replace("_", " "))
+
+    @property
     def level(self) -> str:
         """`ok`, `warning`, or `exhausted` — the CSS class and the meaning.
 
