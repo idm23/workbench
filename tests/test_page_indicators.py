@@ -288,3 +288,10 @@ def test_a_reading_with_no_percentage_still_marks_the_level(client, session):
     a_rate_limit_event(session, utilization=None, status="allowed_warning")
 
     assert 'class="limit warning"' in project_page(client, session)
+
+
+def test_the_panel_says_how_old_the_reading_is(client, session):
+    """These refresh only when something talks to the backend, so age is the point."""
+    a_rate_limit_event(session)
+
+    assert "as of" in project_page(client, session)

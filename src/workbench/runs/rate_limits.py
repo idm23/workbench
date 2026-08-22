@@ -141,6 +141,23 @@ class RateLimitReading:
         return f"{days}d {hours}h" if hours else f"{days}d"
 
     @property
+    def age(self) -> str:
+        """How long ago the backend said this.
+
+        Shown because these readings only refresh when something talks to the
+        backend, so the panel is a snapshot of the last time that happened
+        rather than a live gauge. Without the age, a number from this morning
+        looks exactly like one from a minute ago.
+        """
+        minutes = int((datetime.now(UTC) - self.observed_at).total_seconds() // 60)
+        if minutes < 1:
+            return "just now"
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h ago" if hours < 24 else f"{hours // 24}d ago"
+
+    @property
     def is_stale(self) -> bool:
         age = datetime.now(UTC) - self.observed_at
         return age.total_seconds() > MAX_AGE_HOURS * 3600
