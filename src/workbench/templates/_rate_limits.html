@@ -8,7 +8,10 @@
 <section class="limits" aria-label="Rate limits">
   <div class="limits-head">
     <span>Rate limits</span>
-    {% if rate_limits %}<span>subscription</span>{% endif %}
+    {# The age, not a live indicator: these refresh only when something talks
+       to the backend, and a reading from this morning should not look like one
+       from a minute ago. #}
+    {% if rate_limits %}<span>as of {{ rate_limits[0].age }}</span>{% endif %}
   </div>
 
   {% if rate_limits %}
