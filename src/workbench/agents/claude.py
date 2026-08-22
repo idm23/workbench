@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     CLINotFoundError,
     PermissionMode,
+    RateLimitEvent,
     ResultMessage,
     ServerToolResultBlock,
     ServerToolUseBlock,
@@ -217,6 +218,29 @@ def translate(message: Any) -> list[AgentEvent]:
                 AgentEvent(
                     RunEventKind.NOTICE,
                     {"text": f"System: {message.subtype}", "data": _clip_value(message.data)},
+                )
+            ]
+
+        case RateLimitEvent():
+            # The signal that actually matters when runs bill a subscription.
+            # Money is not the scarce resource there — the five-hour and weekly
+            # windows are — and this is the only place the backend says how
+            # much of one is left. Recorded structured rather than as prose so
+            # a reader can find the run that exhausted a window without
+            # rereading every notice.
+            info = message.rate_limit_info
+            return [
+                AgentEvent(
+                    RunEventKind.NOTICE,
+                    {
+                        "text": f"Rate limit {info.status} ({info.rate_limit_type}).",
+                        "rate_limit": {
+                            "status": info.status,
+                            "type": info.rate_limit_type,
+                            "utilization": info.utilization,
+                            "resets_at": info.resets_at,
+                        },
+                    },
                 )
             ]
 
