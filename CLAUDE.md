@@ -11,8 +11,11 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > task tree is live: tasks nest, complete, and delete from a phone. A project can be
 > cloned to the server, and `git/worktrees.py` can give a task its own worktree — though
 > nothing calls it yet, because that is what runs are for. `runs` and `run_events` exist
-> as tables with no reader. **No agent backend is chosen or depended on**: there is
-> nothing vendor-specific in the repo. See `README.md` for what is actually live.
+> as tables with no reader. **The first agent backend now exists** — `workbench/agents/`
+> can drive Claude and translate its output into `RunEventKind` — but nothing calls it
+> yet: there is no runner, so no run has ever been recorded. The vendor dependency is
+> confined to one module, and a test fails if it spreads. See `README.md` for what is
+> actually live.
 
 ## Reproducibility is a project goal
 
@@ -75,9 +78,20 @@ three things exist specifically to keep a later switch cheap:
   switch, and stops two backends spelling the same thing two ways. It only grows when a
   *reader* needs a new distinction; anything else is a `notice`.
 
-The remaining coupling is in the code that has not been written yet. When the agent
-slice lands, the SDK import belongs behind one adapter that yields `RunEventKind` events
-and an opaque resume token — not scattered through the runner.
+That adapter now exists. `workbench/agents/` is the seam: `protocol.py` defines what
+Workbench asks for and accepts back, `registry.py` turns a backend name into an
+implementation, and `agents/claude.py` is the only module in the repository permitted to
+import an agent SDK. It translates into `RunEventKind` and returns an opaque resume token,
+so nothing above it can tell which vendor answered.
+
+The rule is enforced rather than documented: `agents/tests/test_seam.py` parses every
+module in the package and fails if a vendor SDK is imported anywhere else. That matters
+because of how this decays — not by someone rejecting the decision, but by a series of
+individually reasonable imports of the SDK's own types from the runner or a template
+helper, after which the seam is gone and nobody notices. The registry imports backend
+modules lazily inside the factory for the same reason the test exists: the web process
+resolves backend names constantly and must never pull an SDK into its import graph to do
+it.
 
 **Tasks live in local SQLite, not GitHub Issues.** GitHub is used for code hosting,
 remotes, and PRs only. Issues were considered and rejected: every UI interaction

@@ -117,6 +117,27 @@ going through this project's logging config, not alembic's.
 Lesson: match the log *format* to the process that produced it before deciding where a
 fix belongs.
 
+## A permission mode is not a sandbox
+
+`acceptEdits` sounds like the safe middle setting for a headless agent: it lets the model
+edit files without waving through everything else. What it actually does is permit edits
+and still gate `Bash` — so the agent writes the code, tries to `git commit`, gets stopped,
+and has nowhere to send the prompt because the run is detached with nobody attached to it.
+It retries. Thirty-three turns of that, ending with a full worktree, no commits, and a bill.
+
+The mistake was reading permission modes as a security boundary. They are an *interaction*
+design — which actions are worth interrupting a human for — and on a run with no human they
+degrade into "which actions fail silently". A mode that gates Bash on a headless run does
+not contain the agent, it just makes it useless.
+
+So the execute phase runs with permissions bypassed, and the containment is somewhere else
+entirely: an unprivileged service user with no sudo, working in a throwaway worktree whose
+contents are recoverable from GitHub. The bound on an agent is the account it runs as.
+
+The plan phase is the exception that proves the rule — it gets a real read-only plan mode,
+because there read-only is the *product* rather than a restriction on it, so enforcement
+and intent point the same way.
+
 ## Migrations against empty tables prove almost nothing
 
 A migration that passes on an empty database routinely fails on real rows — a `NOT NULL`
