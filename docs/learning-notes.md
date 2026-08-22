@@ -138,6 +138,24 @@ The plan phase is the exception that proves the rule — it gets a real read-onl
 because there read-only is the *product* rather than a restriction on it, so enforcement
 and intent point the same way.
 
+## A new session does not escape the cgroup
+
+`start_new_session=True` is the usual advice for "spawn something that outlives me", and
+it does exactly one thing: puts the child in a new session and process group, so a
+terminal hangup or a `kill -- -PID` at the group no longer reaches it.
+
+systemd does not kill by process group. `KillMode=control-group`, the default, kills every
+remaining process in the unit's control group when the unit stops, and a forked child is
+in that cgroup no matter how many sessions it has started. So a detached agent run is
+still killed by a deploy restarting the app it was spawned from.
+
+Escaping means leaving the cgroup — a transient scope via `systemd-run`, or a separate
+unit — both of which need privileges an unprivileged service does not have. Worth knowing
+before designing around "detached" as though it meant "survives".
+
+The consolation is that the durable event log makes the difference smaller than it looks:
+a killed run is recoverable reading rather than lost work.
+
 ## Migrations against empty tables prove almost nothing
 
 A migration that passes on an empty database routinely fails on real rows — a `NOT NULL`
