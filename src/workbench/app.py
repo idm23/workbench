@@ -34,6 +34,8 @@ from workbench.git.github import (
 )
 from workbench.git.revision import head_revision
 from workbench.git.worktrees import Cloned, clone_project, local_checkout
+from workbench.runs.activity import activity_by_task
+from workbench.runs.rate_limits import latest_readings
 from workbench.tasks import (
     WrongProject,
     build_tree,
@@ -55,6 +57,19 @@ app.include_router(api_router)
 
 
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+def _shared(db: Session, *, limits: bool = True) -> dict:
+    """Context every page gets.
+
+    The rate-limit panel is on every page rather than on a run's own because
+    the window it describes belongs to the account, not to a run — it is spent
+    by whatever else uses the same subscription, and the moment it is worth
+    reading is before starting something, which is any page at all.
+    """
+    if not limits:
+        return {"show_limits": False}
+    return {"show_limits": True, "rate_limits": latest_readings(db)}
 
 
 def _redirect(path: str, **messages: str | None) -> RedirectResponse:
@@ -124,7 +139,9 @@ def list_users(request: Request, db: DbSession, error: str | None = None) -> HTM
         # query rather than one per user.
         select(User).options(selectinload(User.projects)).order_by(User.name)
     ).all()
-    return templates.TemplateResponse(request, "users.html", {"users": users, "error": error})
+    return templates.TemplateResponse(
+        request, "users.html", {**_shared(db), "users": users, "error": error}
+    )
 
 
 @app.post("/users")
@@ -154,7 +171,7 @@ def show_user(
     return templates.TemplateResponse(
         request,
         "user_detail.html",
-        {"user": user, "error": error, "notice": notice},
+        {**_shared(db), "user": user, "error": error, "notice": notice},
     )
 
 
@@ -217,8 +234,12 @@ def show_project(
         request,
         "project_detail.html",
         {
+            **_shared(db),
             "project": project,
             "nodes": flatten(build_tree(list(tasks))),
+            # One query for the whole tree. Asking per node is how a page that
+            # felt instant stops being one.
+            "activity": activity_by_task(db, project.id),
             # Derived, not stored. This database is copied between instances —
             # staging restores production's snapshot on every deploy — so a
             # stored path would arrive pointing at the other machine's disk.

@@ -217,6 +217,88 @@
   }
   .status.active { color: var(--accent); border-color: var(--accent); }
   .status.blocked, .status.cancelled { color: var(--danger); border-color: var(--danger); }
+
+  /* Rate limits. Runs bill a subscription, so a window is the thing that
+     actually runs out — and it is shared with everything else on the account,
+     which is why this sits on every page rather than on a run's own. */
+  .limits {
+    border: 1px solid var(--rule);
+    border-radius: .5rem;
+    padding: .6rem .75rem;
+    margin-bottom: 1.25rem;
+    background: var(--panel);
+  }
+  .limits-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: .75rem;
+    font-size: .7rem;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    font-weight: 700;
+    color: var(--muted);
+  }
+  .limits-empty { color: var(--muted); font-size: .85rem; margin: .35rem 0 0; }
+  .limit { margin-top: .5rem; }
+  .limit-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: .75rem;
+    font-size: .85rem;
+  }
+  .limit-name { color: var(--fg); }
+  .limit-meta { color: var(--muted); font-size: .8rem; white-space: nowrap; }
+  /* A meter rather than a progress bar: this is a measurement against a known
+     maximum, not a task advancing, and screen readers say so. */
+  .meter {
+    display: block;
+    width: 100%;
+    height: .4rem;
+    margin-top: .25rem;
+    border-radius: 999px;
+    background: var(--rule);
+    overflow: hidden;
+  }
+  .meter > span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--muted);
+  }
+  .limit.warning .meter > span { background: var(--accent); }
+  .limit.warning .limit-meta { color: var(--accent); }
+  .limit.exhausted .meter > span { background: var(--danger); }
+  .limit.exhausted .limit-meta { color: var(--danger); font-weight: 600; }
+
+  /* A task an agent is working on. The dot carries the meaning at a glance and
+     the label carries it for anyone the colour does not reach. */
+  .pip {
+    flex: 0 0 auto;
+    width: .5rem;
+    height: .5rem;
+    border-radius: 999px;
+    background: var(--accent);
+    display: inline-block;
+    margin-right: .35rem;
+    vertical-align: middle;
+  }
+  .status.live { color: var(--accent); border-color: var(--accent); }
+  .status.review { color: var(--fg); border-color: var(--fg); }
+  .status.pending .pip { background: var(--muted); }
+  .status.review .pip { background: var(--fg); }
+  .status.live .pip { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .25; }
+  }
+  /* Someone who has asked for less motion still gets the dot and the label. */
+  @media (prefers-reduced-motion: reduce) {
+    .status.live .pip { animation: none; }
+  }
+  .task.busy { }
+  .task.busy .task-title { font-weight: 650; }
 </style>
 </head>
 <body>
@@ -224,6 +306,7 @@
   {% block back %}{% endblock %}
   {% if error %}<p class="msg error">{{ error }}</p>{% endif %}
   {% if notice %}<p class="msg notice">{{ notice }}</p>{% endif %}
+  {% if show_limits %}{% include "_rate_limits.html" %}{% endif %}
   {% block content %}{% endblock %}
 </div>
 </body>

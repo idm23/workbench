@@ -29,12 +29,22 @@ RestartSec=2
 
 # The app only ever writes the database. ProtectSystem=strict makes the whole
 # filesystem read-only, and ReadWritePaths punches through for exactly that
-# directory. This will need revisiting when agents arrive, since they
-# legitimately need to write to repos and run build tools.
+# directory — which is also where clones and worktrees live, so an agent doing
+# its work is already covered.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=__REPO__/data
+
+# The agent's credential and session transcripts. Runs bill a subscription,
+# which means the credential is an OAuth token in the service user's home
+# rather than a key in /etc/workbench/env — so this path has to be writable,
+# not merely readable, because that token is refreshed periodically. Getting it
+# wrong fails late and confusingly: runs work for days, then stop.
+#
+# Written out by install.sh rather than left as systemd's %h, which resolves to
+# the manager's home — /root for a system service — regardless of User=.
+ReadWritePaths=-__HOME__/.claude
 
 [Install]
 WantedBy=multi-user.target

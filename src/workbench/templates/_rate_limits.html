@@ -1,0 +1,38 @@
+{#
+  How much of each rate-limit window is gone.
+
+  Rendered even with no readings, and that empty state is deliberate: runs bill
+  a subscription, so someone will look here before starting one, and a panel
+  that appears only once data exists cannot be checked in advance.
+#}
+<section class="limits" aria-label="Rate limits">
+  <div class="limits-head">
+    <span>Rate limits</span>
+    {% if rate_limits %}<span>subscription</span>{% endif %}
+  </div>
+
+  {% if rate_limits %}
+    {% for limit in rate_limits %}
+      <div class="limit {{ limit.level }}">
+        <div class="limit-row">
+          <span class="limit-name">{{ limit.label }}</span>
+          <span class="limit-meta">
+            {% if limit.percent is not none %}{{ limit.percent }}% used{% else %}{{ limit.status }}{% endif %}
+            {% if limit.resets_in %}&nbsp;·&nbsp;resets in {{ limit.resets_in }}{% endif %}
+          </span>
+        </div>
+        {% if limit.percent is not none %}
+          <span class="meter" role="meter" aria-valuenow="{{ limit.percent }}"
+                aria-valuemin="0" aria-valuemax="100"
+                aria-label="{{ limit.label }} window {{ limit.percent }} percent used">
+            <span style="width: {{ limit.percent }}%;"></span>
+          </span>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="limits-empty">
+      No reading yet — the backend reports these while an agent is running.
+    </p>
+  {% endif %}
+</section>

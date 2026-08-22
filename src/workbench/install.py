@@ -171,8 +171,8 @@ def apply_migrations() -> None:
     command.upgrade(config, "head")
 
 
-def service_user() -> str:
-    """Who the service runs as: whoever owns the checkout.
+def _service_passwd() -> pwd.struct_passwd:
+    """The passwd entry of whoever owns the checkout.
 
     Derived from the repo's owner rather than from `os.geteuid()`, because this
     is also called by the automatic deployer, which runs as root in order to
@@ -181,7 +181,38 @@ def service_user() -> str:
     deploy. The checkout's owner is the same answer in the interactive case and
     the right one in both.
     """
-    return pwd.getpwuid(repo_root().stat().st_uid).pw_name
+    return pwd.getpwuid(repo_root().stat().st_uid)
+
+
+def service_user() -> str:
+    """Who the service runs as."""
+    return _service_passwd().pw_name
+
+
+def service_home() -> Path:
+    """The service user's home directory.
+
+    Rendered into the unit rather than left to systemd's `%h`, which resolves
+    to the home of the *manager* — `/root` for a system service — no matter
+    what `User=` says. Under an agent workload that would point the credential
+    path at root's home, where the service cannot read it.
+    """
+    return Path(_service_passwd().pw_dir)
+
+
+def agent_state_dir() -> Path:
+    """Where a backend keeps credentials and session transcripts.
+
+    The subscription credential lives here rather than in `/etc/workbench/env`,
+    which is what "runs bill a subscription" concretely means on disk: the home
+    directory of the user the unit runs as is the thing that decides who pays.
+
+    It has to be writable, not merely readable, and that is easy to get wrong
+    because it fails *late* — an OAuth token is refreshed periodically, so a
+    read-only path works for days and then stops. Both this directory and the
+    `ReadWritePaths` entry in the unit exist for that one reason.
+    """
+    return service_home() / ".claude"
 
 
 def systemd_is_running() -> bool:
@@ -193,6 +224,7 @@ def render_unit(template_name: str) -> str:
     replacements = {
         "__REPO__": str(repo_root()),
         "__USER__": service_user(),
+        "__HOME__": str(service_home()),
         "__HOST__": host(),
         "__PORT__": str(port()),
         "__BRANCH__": deploy_branch(),
@@ -333,6 +365,13 @@ def main() -> int:
 
         step("Checking prerequisites")
         check_prerequisites()
+
+        step("Preparing the agent's state directory")
+        # Created here rather than left to first use: the service runs under
+        # ProtectSystem=strict, so a directory that does not exist by the time
+        # the unit starts cannot be created by anything inside it.
+        agent_state_dir().mkdir(parents=True, exist_ok=True)
+        info(f"agent state directory ready at {agent_state_dir()}")
 
         step("Preparing the database")
         # uv run already built .venv from uv.lock before this module was

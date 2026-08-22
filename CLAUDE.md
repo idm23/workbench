@@ -11,11 +11,13 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > task tree is live: tasks nest, complete, and delete from a phone. A project can be
 > cloned to the server, and `git/worktrees.py` can give a task its own worktree — though
 > nothing calls it yet, because that is what runs are for. `runs` and `run_events` exist
-> as tables with no reader. **The first agent backend now exists** — `workbench/agents/`
-> can drive Claude and translate its output into `RunEventKind` — but nothing calls it
-> yet: there is no runner, so no run has ever been recorded. The vendor dependency is
-> confined to one module, and a test fails if it spreads. See `README.md` for what is
-> actually live.
+> as tables with no reader. **The agent seam and the runner now exist**:
+> `workbench/agents/` drives Claude behind a vendor-neutral interface, and
+> `python -m workbench.runs.runner <id>` carries out a run end to end, writing every
+> event to `run_events` as it happens. The task tree marks whichever task a run is
+> working, and every page shows how much of each rate-limit window is left. Nothing
+> spawns a runner yet — that is the runs slice — so no run has been started from the
+> app. See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
@@ -92,6 +94,39 @@ helper, after which the seam is gone and nobody notices. The registry imports ba
 modules lazily inside the factory for the same reason the test exists: the web process
 resolves backend names constantly and must never pull an SDK into its import graph to do
 it.
+
+**Runs bill a subscription, not the metered API.** Chosen deliberately, and the
+default in `config.py` rather than a convention someone has to remember.
+
+The thing being defended against is silence. Both credentials are read from the process
+environment, so an `ANTHROPIC_API_KEY` arriving for any reason — exported in a shell,
+inherited from a parent, added to `/etc/workbench/env` for an unrelated tool — would move
+every run onto per-token billing with nothing visible in Workbench changing. The first
+sign would be an invoice. So the runner *strips* those variables rather than merely
+declining to set them, and `WORKBENCH_BILLING=api` is how someone opts in out loud.
+
+Three consequences that shaped code:
+
+- **The credential is a file in the service user's home**, not a secret in
+  `/etc/workbench/env`. Which account pays is therefore decided by which user the unit
+  runs as — concrete rather than ambient. It also has to be *writable*, because the OAuth
+  token is refreshed periodically, which is why the unit's `ReadWritePaths` covers
+  `~/.claude`. Get that wrong and runs work for days and then stop.
+- **The scarce resource is a rate-limit window, not dollars.** `RateLimitEvent` is
+  translated into a structured notice carrying the window type, utilisation, and reset
+  time, because "which run exhausted the five-hour window" is the question that will
+  actually get asked. Those readings are recovered from `run_events` and shown as a meter
+  on every page — every page, because the window belongs to the account rather than to a
+  run, and is spent by anything else using the same subscription. The panel renders with
+  no readings too: the moment someone wants it is *before* starting a run, so one that
+  appeared only after the first run would be useless exactly when it was needed. It also
+  raises the stakes on the concurrency cap: three taps starting three agents wastes a
+  window rather than a few dollars.
+- **`runs.total_cost_usd` is not a bill.** Under subscription auth it is the backend's
+  own token valuation. Useful for spotting a runaway run, misleading if read as money.
+
+None of this is Claude-specific by construction: `API_CREDENTIAL_VARS` is a list in
+`config.py`, and the next backend adds its own spelling to it.
 
 **Tasks live in local SQLite, not GitHub Issues.** GitHub is used for code hosting,
 remotes, and PRs only. Issues were considered and rejected: every UI interaction
@@ -263,12 +298,25 @@ Workbench is intended to eventually be developed inside Workbench, and a task en
 they trigger lands on a different cgroup and cannot kill the deployer — and since the
 timer owns deployment, nothing has to reach back into the app to trigger one at all.
 
-The other half is still open, and is the broader problem: if agent runs live inside the
-uvicorn process, *any* restart — deploy, crash, OOM — orphans them, and a deploy now
-happens on a timer without anyone watching. Agents should therefore run as detached child
-processes writing to a durable event log, with the web tier as a pure reader. That is a
-prerequisite for the runs slice rather than a nicety, because automatic deploys make the
-orphaning routine instead of occasional.
+The web tier is now a pure reader, and the runner is a separate process reached only by
+a run id: `python -m workbench.runs.runner <id>`. Every event is committed as it happens,
+so a run that dies halfway is still legible, and the runner catches SIGTERM to record
+`cancelled` rather than vanishing.
+
+**But `start_new_session=True` is not enough on its own, and this changes what the runs
+slice has to do.** A new session detaches a process from its process group; it does not
+move it out of the unit's control group. systemd's default `KillMode=control-group` kills
+*all remaining processes in the cgroup* on unit stop, so a runner spawned by the app is
+still killed by a deploy restarting that app — verified in `systemd.kill(5)` rather than
+assumed. Deploys land every five minutes with nobody watching, so this would be routine,
+not rare.
+
+The options are a transient scope (`systemd-run --scope`, which needs privileges the app
+deliberately lacks), a `workbench-run@.service` template started over D-Bus (needs a
+polkit rule), or accepting it and relying on graceful cancellation plus a retry. The
+runner is written so that all three work: it takes a run id, records its own outcome, and
+assumes nothing about who started it. Whichever is chosen belongs with the code that
+spawns runs.
 
 ## Open questions
 
@@ -284,7 +332,9 @@ Unresolved. Recorded here so they are not rediscovered later.
   it — that arrives with the runner. A phone that sleeps mid-run would currently lose
   everything emitted during the gap.
 - **Nothing caps concurrency.** Three taps starts three agents, each running builds.
-  `config.py` has no `max_concurrent_runs` yet.
+  `config.py` has no `max_concurrent_runs` yet. Since runs bill a subscription, what this
+  wastes is a rate-limit window rather than a few dollars, which makes it more pressing
+  than it first looked — and the window is shared with whatever else uses the account.
 - **`setup_command` is per project, but the need is per worktree.** A project whose setup
   is "symlink `.env` and the venv from the main checkout" cannot express that as one
   command without knowing the source path.
