@@ -14,8 +14,10 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > as tables with no reader. **The agent seam and the runner now exist**:
 > `workbench/agents/` drives Claude behind a vendor-neutral interface, and
 > `python -m workbench.runs.runner <id>` carries out a run end to end, writing every
-> event to `run_events` as it happens. Nothing spawns it yet — that is the runs slice —
-> so no run has been started from the app. See `README.md` for what is actually live.
+> event to `run_events` as it happens. The task tree marks whichever task a run is
+> working, and every page shows how much of each rate-limit window is left. Nothing
+> spawns a runner yet — that is the runs slice — so no run has been started from the
+> app. See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
@@ -113,8 +115,13 @@ Three consequences that shaped code:
 - **The scarce resource is a rate-limit window, not dollars.** `RateLimitEvent` is
   translated into a structured notice carrying the window type, utilisation, and reset
   time, because "which run exhausted the five-hour window" is the question that will
-  actually get asked. It also raises the stakes on the concurrency cap: three taps
-  starting three agents wastes a window rather than a few dollars.
+  actually get asked. Those readings are recovered from `run_events` and shown as a meter
+  on every page — every page, because the window belongs to the account rather than to a
+  run, and is spent by anything else using the same subscription. The panel renders with
+  no readings too: the moment someone wants it is *before* starting a run, so one that
+  appeared only after the first run would be useless exactly when it was needed. It also
+  raises the stakes on the concurrency cap: three taps starting three agents wastes a
+  window rather than a few dollars.
 - **`runs.total_cost_usd` is not a bill.** Under subscription auth it is the backend's
   own token valuation. Useful for spotting a runaway run, misleading if read as money.
 
