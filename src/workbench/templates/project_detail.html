@@ -23,8 +23,9 @@
 {% if nodes %}
   <ul class="tree">
     {% for node in nodes %}
+      {% set busy = activity.get(node.task.id) %}
       <li style="padding-left: {{ node.depth * 1.25 }}rem;">
-        <div class="task {{ 'done' if node.task.status == 'done' }}">
+        <div class="task {{ 'done' if node.task.status == 'done' }} {{ 'busy' if busy }}">
           <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
             <input type="hidden" name="new_status"
                    value="{{ 'open' if node.task.status == 'done' else 'done' }}">
@@ -40,6 +41,13 @@
 
             <div class="task-note">
               {% if node.progress %}{{ node.progress }} done&nbsp;·&nbsp;{% endif %}
+              {% if busy %}
+                {# The dot reads at a glance; the word is what carries the
+                   meaning for anyone the colour does not reach. #}
+                <span class="status {{ 'live' if busy.is_live else 'review' if busy.needs_attention else 'pending' }}"
+                      title="Run {{ busy.run_id }} is {{ busy.status }}"
+                ><span class="pip"></span>{{ busy.label }}</span>&nbsp;
+              {% endif %}
               <span class="status {{ node.task.status }}">{{ node.task.status }}</span>
               {% if node.task.branch %}
                 <span class="mono">&nbsp;{{ node.task.branch }}</span>
