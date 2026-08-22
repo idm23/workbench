@@ -6,6 +6,12 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.14",
+    # The first agent backend. Imported only by workbench.agents.claude, so
+    # this is the one dependency the rest of the app must never reach for.
+    # The wheel bundles its own CLI binary, which it prefers over anything on
+    # PATH — verified under `env -i PATH=/usr/bin:/bin` — so the server still
+    # needs no Node.
+    "claude-agent-sdk>=0.2.144",
     "fastapi>=0.115",
     "httpx>=0.28",
     "jinja2>=3.1",
