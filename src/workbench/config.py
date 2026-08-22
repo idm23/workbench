@@ -5,6 +5,7 @@ that installing on a new machine needs no configuration step.
 """
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -88,6 +89,53 @@ def default_agent_backend() -> str:
     silently relabelled.
     """
     return os.environ.get("WORKBENCH_AGENT_BACKEND", DEFAULT_BACKEND).strip() or DEFAULT_BACKEND
+
+
+#: Credential variables that switch a backend from a subscription to
+#: metered API billing. Named here rather than inside a backend because the
+#: choice is Workbench's, and the next backend will have its own spelling of
+#: the same idea to add to this list.
+API_CREDENTIAL_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def billing_mode() -> str:
+    """Whether runs bill a subscription or a metered API key.
+
+    Defaults to `subscription`, which is a decision rather than a fallback.
+    The failure it prevents is silent: an `ANTHROPIC_API_KEY` exported into a
+    shell, inherited by a service, or added to `/etc/workbench/env` for some
+    unrelated tool would switch every run onto per-token billing without
+    changing anything visible in Workbench. Nobody would notice until a bill
+    arrived.
+
+    So the runner strips those variables rather than merely declining to set
+    them, and someone who genuinely wants metered billing says so out loud with
+    `WORKBENCH_BILLING=api`.
+    """
+    return os.environ.get("WORKBENCH_BILLING", "subscription").strip().lower() or "subscription"
+
+
+def bills_subscription() -> bool:
+    return billing_mode() != "api"
+
+
+def agent_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment an agent process should run with.
+
+    A copy, and pure, so the decision above can be tested without a subprocess
+    or a mutated interpreter. The runner applies it to itself once at startup,
+    which is the single place where every backend inherits from.
+
+    Note what is *not* removed: the agent still needs a credential, and under a
+    subscription that is the OAuth token in the service user's home directory.
+    This makes the account concrete rather than ambient — the home directory of
+    the user the unit runs as is the thing that decides who pays.
+    """
+    env = dict(os.environ if base is None else base)
+    if bills_subscription():
+        for name in API_CREDENTIAL_VARS:
+            env.pop(name, None)
+    return env
 
 
 def deploy_branch() -> str:
