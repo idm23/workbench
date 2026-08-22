@@ -17,7 +17,7 @@
         <div class="limit-row">
           <span class="limit-name">{{ limit.label }}</span>
           <span class="limit-meta">
-            {% if limit.percent is not none %}{{ limit.percent }}% used{% else %}{{ limit.status }}{% endif %}
+            {% if limit.percent is not none %}{{ limit.percent }}% used{% else %}{{ limit.status_label }}{% endif %}
             {% if limit.resets_in %}&nbsp;·&nbsp;resets in {{ limit.resets_in }}{% endif %}
           </span>
         </div>

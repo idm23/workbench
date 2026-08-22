@@ -61,8 +61,19 @@ def client(session):
     return TestClient(app)
 
 
-def a_rate_limit_event(db, *, window="five_hour", status="allowed", utilization=0.4, hours=2):
-    """A notice shaped the way the Claude adapter writes one."""
+def a_rate_limit_event(
+    db,
+    *,
+    window: str = "five_hour",
+    status: str = "allowed",
+    utilization: float | None = 0.4,
+    hours: int = 2,
+):
+    """A notice shaped the way the Claude adapter writes one.
+
+    `utilization` is passed as None to model a real reading that omits it —
+    which the one recorded on this machine does.
+    """
     task = db.query(Task).first()
     run = Run(task_id=task.id, phase=RunPhase.EXECUTE, backend="claude", status=RunStatus.SUCCEEDED)
     db.add(run)
@@ -255,3 +266,25 @@ def test_the_marker_carries_a_word_and_not_only_a_colour(client, session):
     a_run(session, status=RunStatus.RUNNING)
 
     assert "working</span>" in _squashed(project_page(client, session))
+
+
+def test_a_reading_with_no_percentage_still_says_something(client, session):
+    """`utilization` is optional in the protocol, and really is absent sometimes.
+
+    The one rate-limit record on this machine carries a status, a window, and a
+    reset time with no number at all. Showing the raw `allowed` there would be
+    worse than useless.
+    """
+    a_rate_limit_event(session, utilization=None, status="rejected")
+
+    page = project_page(client, session)
+
+    assert "limit reached" in page
+    assert 'role="meter"' not in page
+
+
+def test_a_reading_with_no_percentage_still_marks_the_level(client, session):
+    """The backend's own status is enough to colour it, with or without a number."""
+    a_rate_limit_event(session, utilization=None, status="allowed_warning")
+
+    assert 'class="limit warning"' in project_page(client, session)
