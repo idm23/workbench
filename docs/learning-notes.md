@@ -156,6 +156,30 @@ before designing around "detached" as though it meant "survives".
 The consolation is that the durable event log makes the difference smaller than it looks:
 a killed run is recoverable reading rather than lost work.
 
+## A self-updating deployer is always one deploy behind itself
+
+The deployer pulls, then acts. But it imported its own code *before* pulling, so the run
+that brings in a change to the deployer is the last run that does not perform it. The new
+behaviour starts on the deploy after.
+
+That is fine for a change to a step that already runs. It is not fine for a *new* step,
+because the deploy that installs the code also reports success — the service restarts into
+the new version, `/healthz` shows the new revision, everything looks landed — while the new
+install step has never executed once. It then waits for an unrelated commit to come along.
+
+Found the hard way: agent runs need a polkit rule, the deployer learned to write one, and
+the deploy that delivered that knowledge did not use it. Every run failed with "interactive
+authentication required" on a machine whose revision said the fix was deployed.
+
+The general answer is to make installing *convergent* rather than event-driven — run it on
+every tick, not only when a commit arrived. It is idempotent and compares before writing,
+so an idle tick costs four template renders and no writes, and a unit deleted by hand comes
+back on its own.
+
+Same family as "it cannot install itself": a machine with no timer never fetches the commit
+that would give it one. Anything that installs the mechanism it depends on needs a manual
+first push or a convergent loop.
+
 ## Run the suite the way CI runs it
 
 `python -m pytest` and `uv run pytest` are not the same command. `-m` puts the working

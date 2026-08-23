@@ -379,6 +379,24 @@ def deploy() -> DeployResult:
     """One deployment attempt. Safe to call when there is nothing to do."""
     advanced = advance_checkout()
     if not isinstance(advanced, Advanced):
+        if isinstance(advanced, AlreadyCurrent):
+            # Converge the units even with nothing to pull.
+            #
+            # A change to the *deployer* only takes effect on the deploy after
+            # the one that delivered it: this process imported its own code
+            # before pulling, so the run that brings in a new install step is
+            # the last run that does not perform it. Without this line the new
+            # step then waits for an unrelated commit to come along, and in the
+            # meantime the machine is running code whose install half never
+            # happened.
+            #
+            # Installing is idempotent and compares rendered content before
+            # writing, so on the overwhelmingly common no-op tick this reads
+            # four templates and does nothing. That also makes it
+            # self-healing: a unit or rule deleted by hand comes back.
+            failure = refresh_units()
+            if failure is not None:
+                return failure
         return advanced
 
     failure = rebuild_and_restart()
