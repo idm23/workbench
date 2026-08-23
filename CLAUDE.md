@@ -311,12 +311,15 @@ still killed by a deploy restarting that app — verified in `systemd.kill(5)` r
 assumed. Deploys land every five minutes with nobody watching, so this would be routine,
 not rare.
 
-The options are a transient scope (`systemd-run --scope`, which needs privileges the app
-deliberately lacks), a `workbench-run@.service` template started over D-Bus (needs a
-polkit rule), or accepting it and relying on graceful cancellation plus a retry. The
-runner is written so that all three work: it takes a run id, records its own outcome, and
-assumes nothing about who started it. Whichever is chosen belongs with the code that
-spawns runs.
+The options are a transient user scope (`systemd-run --user --scope`, which needs
+lingering enabled at install time), a `workbench-run@.service` template started over D-Bus
+(needs a polkit rule), or accepting it and relying on graceful cancellation plus a resume.
+The runner is written so that all three work: it takes a run id, records its own outcome,
+and assumes nothing about who started it.
+
+**`docs/running-agents.md` is the long version** — what a run consists of, why a process
+group is not a control group, and what each option costs. Worth reading before that file,
+because the runner looks over-built until the cgroup behaviour is clear.
 
 ## Open questions
 
