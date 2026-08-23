@@ -49,6 +49,12 @@ exclude = ["**/tests"]
 # sit next to. test_deploy and test_units cover behaviour that spans install,
 # config, and the unit templates together.
 testpaths = ["src/workbench", "tests"]
+# The repository root, so `scripts/` is importable and the suite behaves the
+# same however it is invoked. Without this, `python -m pytest` passes and
+# `uv run pytest` fails: only the former puts the working directory on
+# sys.path, and CI uses the latter. A suite whose result depends on how it was
+# started is worse than one that is simply wrong.
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py314"

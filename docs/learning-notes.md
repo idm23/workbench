@@ -156,6 +156,20 @@ before designing around "detached" as though it meant "survives".
 The consolation is that the durable event log makes the difference smaller than it looks:
 a killed run is recoverable reading rather than lost work.
 
+## Run the suite the way CI runs it
+
+`python -m pytest` and `uv run pytest` are not the same command. `-m` puts the working
+directory on `sys.path`; the console script does not. So a test importing something from
+`scripts/` passes locally and fails in CI with `ModuleNotFoundError`, and the diff that
+broke it looks innocent.
+
+`pythonpath = ["."]` in `[tool.pytest.ini_options]` settles it for both, which is the
+actual fix — a suite whose result depends on how it was started is worse than one that is
+simply wrong, because the disagreement is invisible until something else fails.
+
+The habit that would have caught it: verify with the invocation the workflow uses, not the
+one that is convenient to type.
+
 ## git forks background work you did not ask for
 
 `git commit` and `git push` can spawn `gc --auto`, which detaches and keeps writing into
