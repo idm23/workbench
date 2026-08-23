@@ -174,20 +174,86 @@ occasional "why did that stop", answered by the `cancelled` reason in the log.
 rare accident in a tool whose purpose is agents that open pull requests — it is the normal
 working loop.
 
-## Recommendation
+## The decision: a unit per run
 
-**Option 1.** It is the smallest privilege that actually solves it: one line in
-`install.sh`, no standing policy, and it removes a whole category of "my run vanished"
-that would otherwise need explaining every time. Option 2's per-run units are genuinely
-nicer to operate, but a polkit rule granting unit-start rights to the account that runs
-model-authored commands is a bigger thing to hand over than lingering, and the operational
-niceness can be added later if it turns out to be missed.
+**Option 2**, with the polkit rule scoped as narrowly as polkit allows.
 
-Option 3 is more defensible than it first looks, because resume means an interrupted run
-costs time rather than work. It is the right answer if lingering proves awkward on this
-machine.
+The reasoning that settled it was not the deploy problem — option 1 solves that
+just as well — but where this is going. Workbench is meant to grow into something
+that dispatches work across a small pile of machines, some with GPUs. A unit is a
+*job*: addressable by name, inspectable with `systemctl status`, stoppable,
+loggable, and limitable. That is the right shape to grow into, and a bare process
+is not.
 
-Whichever is chosen, `runs/runner.py` does not change: it takes a run id, records its own
-outcome, and assumes nothing about who started it. That is deliberate — the decision here
-is about the *spawn*, and it should stay swappable while the answer is still being tested
-against a real machine.
+Two corrections came out of that conversation and are worth keeping, because both
+are easy to get backwards.
+
+**A systemd unit is not remote dispatch.** systemd is an init system, not a
+scheduler; there is no "run this unit over there". What makes another machine
+cheap later is the *seam*, not the mechanism: `runs.executor` records where a run
+ran, `runs.handle` is opaque and meaningful only to that executor, and a remote
+node arrives as a third implementation of `Executor`. Unit-per-run is then the
+local half of that story — including on the far node, which will very likely run
+its own jobs as units too.
+
+`executor` cannot be backfilled, which is the same argument that put `backend` on
+the row. The moment a second executor exists, every earlier row is ambiguous
+without it.
+
+**Unit-per-run does not require polkit — but the useful version does.** A named
+transient unit can be created in the *user* manager with no privilege at all:
+
+```console
+$ systemd-run --user --unit=wb-demo --property=MemoryMax=256M -- sleep 20
+$ systemctl --user show wb-demo.service -p ControlGroup -p MemoryMax
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/wb-demo.service
+MemoryMax=268435456
+```
+
+Real unit, real cgroup, real limit, no root. What decides against it is which
+controllers the user manager was delegated:
+
+```console
+$ cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers
+memory pids
+```
+
+No `cpu`, no `io` — `CPUQuotaPerSecUSec` was accepted and silently ignored. And
+device policy, which is how GPU access would eventually be scoped, is system-unit
+only regardless. For jobs whose whole point is heavy resource use, that is
+disqualifying. (Delegation defaults vary by version; the figures above are
+systemd 249. Worth re-checking on any machine before relying on it.)
+
+## What that costs, and how it is bounded
+
+An unprivileged account cannot ask the system manager to start anything, so this
+needs a polkit rule. That is a real grant, and the account receiving it is the one
+that runs model-authored shell commands — so it is written as narrowly as the
+mechanism permits:
+
+```javascript
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") return;
+    if (subject.user !== "workbench") return;
+    if (/^workbench-run@[0-9]+\.service$/.test(action.lookup("unit") || "")) {
+        return polkit.Result.YES;
+    }
+});
+```
+
+One action, one user, and a unit pattern anchored at both ends with a digits-only
+instance. Everything else falls through to polkit's normal rules, which is a
+refusal. The rule file is named per instance for the same reason the units are —
+production and staging grant different patterns, and a shared filename would mean
+whichever installed last silently revoked the other's ability to start runs.
+
+`install.sh` writes both the template unit and the rule, so the reproducibility
+promise still holds: a clone and one script, with no "and then add a polkit rule"
+step living in someone's memory.
+
+## What is still true
+
+`runs/runner.py` did not change for any of this. It takes a run id, records its
+own outcome, and assumes nothing about who started it — which is what let the
+decision be made after the runner was written, and what will let a GPU node be
+added without touching it.

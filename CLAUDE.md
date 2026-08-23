@@ -311,11 +311,20 @@ still killed by a deploy restarting that app — verified in `systemd.kill(5)` r
 assumed. Deploys land every five minutes with nobody watching, so this would be routine,
 not rare.
 
-The options are a transient user scope (`systemd-run --user --scope`, which needs
-lingering enabled at install time), a `workbench-run@.service` template started over D-Bus
-(needs a polkit rule), or accepting it and relying on graceful cancellation plus a resume.
-The runner is written so that all three work: it takes a run id, records its own outcome,
-and assumes nothing about who started it.
+**Settled: one systemd unit per run.** `workbench-run@<id>.service`, started over D-Bus by
+the app and therefore in its own control group, so a deploy restarting the web service
+cannot reach it. Chosen over a transient user scope not for the deploy problem — either
+would do — but because a unit is a *job*: addressable, inspectable, stoppable, and
+resource-limited, which is the shape this grows into when work starts being dispatched to
+other machines.
+
+Two things that are easy to get backwards. A unit is not remote dispatch; systemd is an
+init system, not a scheduler, and what makes another machine cheap is `runs.executor` plus
+an opaque `runs.handle` — a third `Executor` implementation, not a different init system.
+And unit-per-run does not *require* polkit: a named unit in the user manager needs no
+privilege, but only gets the controllers that manager was delegated (`memory pids` here —
+no `cpu`, no `io`, and no device policy), which rules it out for the heavy jobs this is
+for.
 
 **`docs/running-agents.md` is the long version** — what a run consists of, why a process
 group is not a control group, and what each option costs. Worth reading before that file,
