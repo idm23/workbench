@@ -40,6 +40,18 @@ def git(path, *args) -> str:
     ).stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def no_privileged_installs(monkeypatch):
+    """Never let these tests touch /etc.
+
+    `deploy()` now converges the units on an idle tick as well as a real one,
+    and `install_units` writes to /etc/systemd/system with sudo. That is
+    covered in `test_units.py` against rendered content; here it would be a
+    test that asks for a password, or worse, gets one.
+    """
+    monkeypatch.setattr("workbench.deploy.refresh_units", lambda: None)
+
+
 @pytest.fixture
 def checkout(tmp_path, monkeypatch):
     """A checkout with an `origin` it can actually fetch from.

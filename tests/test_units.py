@@ -314,3 +314,48 @@ def test_a_failure_installing_the_rule_is_reported_not_raised(monkeypatch):
 
     assert result is not None
     assert "read-only filesystem" in str(result)
+
+
+def test_units_are_installed_even_when_there_is_nothing_to_pull(monkeypatch):
+    """The trap that left a machine running code whose install half never ran.
+
+    A change to the deployer takes effect on the deploy *after* the one that
+    delivered it — the process imported its own code before pulling — so the
+    run that brings in a new install step is the last run that does not perform
+    it. Without converging on an idle tick, that step then waits for an
+    unrelated commit.
+    """
+    from workbench import deploy
+
+    called: list[str] = []
+    monkeypatch.setattr(deploy, "advance_checkout", lambda: deploy.AlreadyCurrent("abc1234"))
+    monkeypatch.setattr(deploy, "refresh_units", lambda: called.append("refreshed"))
+
+    result = deploy.deploy()
+
+    assert isinstance(result, deploy.AlreadyCurrent)
+    assert called == ["refreshed"]
+
+
+def test_an_idle_tick_does_not_restart_anything(monkeypatch):
+    """Converging is not deploying: nothing was pulled, so nothing is rebuilt."""
+    from workbench import deploy
+
+    monkeypatch.setattr(deploy, "advance_checkout", lambda: deploy.AlreadyCurrent("abc1234"))
+    monkeypatch.setattr(deploy, "refresh_units", lambda: None)
+    monkeypatch.setattr(
+        deploy, "rebuild_and_restart", lambda: pytest.fail("should not rebuild on an idle tick")
+    )
+
+    assert isinstance(deploy.deploy(), deploy.AlreadyCurrent)
+
+
+def test_a_failure_converging_is_reported(monkeypatch):
+    from workbench import deploy
+
+    monkeypatch.setattr(deploy, "advance_checkout", lambda: deploy.AlreadyCurrent("abc1234"))
+    monkeypatch.setattr(
+        deploy, "refresh_units", lambda: deploy.DeployFailed("installing systemd units", "nope")
+    )
+
+    assert isinstance(deploy.deploy(), deploy.DeployFailed)
