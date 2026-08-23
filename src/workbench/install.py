@@ -21,6 +21,7 @@ from alembic import command
 from alembic.config import Config
 
 from workbench.config import (
+    RUN_TIMEOUT_SECONDS,
     deploy_branch,
     deploy_unit_name,
     ensure_data_dir,
@@ -28,6 +29,7 @@ from workbench.config import (
     instance,
     port,
     repo_root,
+    run_unit_prefix,
     service_name,
 )
 from workbench.logs import BOLD, RED, YELLOW, configure_console_logging, paint
@@ -55,6 +57,10 @@ def units() -> tuple[tuple[str, str], ...]:
         (f"{service_name()}.service", "workbench.service.template"),
         (f"{deploy_unit_name()}.service", "workbench-deploy.service.template"),
         (f"{deploy_unit_name()}.timer", "workbench-deploy.timer.template"),
+        # A template unit, never enabled: started on demand as
+        # `workbench-run@<run id>.service`. One per run, so each gets its own
+        # cgroup and survives the app restarting under it.
+        (f"{run_unit_prefix()}@.service", "workbench-run@.service.template"),
     )
 
 
@@ -234,6 +240,8 @@ def render_unit(template_name: str) -> str:
         # A staging install restores production's database before migrating;
         # production leaves this empty and never restores anything.
         "__RESTORE_FROM__": os.environ.get("WORKBENCH_RESTORE_FROM", "").strip(),
+        "__RUN_PREFIX__": run_unit_prefix(),
+        "__RUN_TIMEOUT__": str(RUN_TIMEOUT_SECONDS),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
@@ -286,8 +294,68 @@ def install_units() -> set[str]:
     return changed
 
 
+#: Where polkit reads local authorisation rules.
+POLKIT_DIR = Path("/etc/polkit-1/rules.d")
+
+
+def polkit_rule_name() -> str:
+    """The rule file for this instance.
+
+    Instance-scoped for the same reason the units are, and it is easy to miss
+    because the failure is silent and delayed: production and staging grant
+    *different* unit patterns, so a shared filename would mean whichever
+    installed last silently revoked the other's ability to start runs.
+
+    Numbered so it is read after the packaged defaults; the directory is shared
+    with the rest of the system.
+    """
+    return f"50-{run_unit_prefix()}.rules"
+
+
+def polkit_rule_path() -> Path:
+    return POLKIT_DIR / polkit_rule_name()
+
+
+def install_polkit_rule() -> bool:
+    """Let the service user start its own run units, and nothing else.
+
+    Without this an unprivileged account cannot ask the system manager to start
+    anything, so every run would fail at the moment it was started. With it,
+    that account can manage units matching `workbench-run@<digits>.service` and
+    still nothing else — which matters more than usual here, because it is the
+    account that runs model-authored shell commands.
+
+    Returns whether the file changed, so the caller can say so.
+    """
+    if not POLKIT_DIR.is_dir():
+        warn(f"{POLKIT_DIR} does not exist; runs will not be able to start units.")
+        return False
+
+    rendered = render_unit("workbench-run.rules.template")
+    target = polkit_rule_path()
+    if target.is_file() and target.read_text() == rendered:
+        info("polkit rule already up to date")
+        return False
+
+    # Staged then copied with privilege, as the units are: the unprivileged
+    # side never needs write access to /etc.
+    staged = repo_root() / "data" / f"{polkit_rule_name()}.staged"
+    staged.write_text(rendered)
+    try:
+        run(["cp", str(staged), str(target)], privileged=True)
+        # World-readable and root-owned: polkit refuses rules it does not trust.
+        run(["chmod", "0644", str(target)], privileged=True)
+        run(["chown", "root:root", str(target)], privileged=True)
+    finally:
+        staged.unlink(missing_ok=True)
+
+    info(f"wrote {target}")
+    return True
+
+
 def install_service() -> None:
     install_units()
+    install_polkit_rule()
 
     run(["systemctl", "enable", "--quiet", service_name()], privileged=True)
     run(["systemctl", "restart", service_name()], privileged=True)

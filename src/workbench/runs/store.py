@@ -77,14 +77,30 @@ def append_event(
     return event
 
 
-def start_run(db: Session, run: Run, pid: int) -> Run:
-    """Mark a queued run as running, recording the process that owns it.
+def record_launch(db: Session, run: Run, executor: str, handle: str) -> Run:
+    """Record how a run was started, and what to ask about it later.
 
-    The pid is what makes cancelling possible and what lets a later reap tell
-    "still working" from "died without saying so".
+    Written by whoever starts the run rather than by the runner itself, and
+    before the process exists. The ordering matters: a run that is executing
+    while nothing knows how to stop it is unreachable, so the handle is stored
+    first and the process started second. The worst case is then a handle
+    pointing at something that never started, which reaping notices.
+    """
+    run.executor = executor
+    run.handle = handle
+    db.commit()
+    return run
+
+
+def mark_running(db: Session, run: Run) -> Run:
+    """The runner announcing that it has actually begun.
+
+    Separate from `record_launch` because they are different facts told by
+    different processes: one says how it was started, this says it is under
+    way. Between them a run is `queued` with a handle, which is exactly what a
+    unit that has been asked to start but has not reached ExecStart is.
     """
     run.status = RunStatus.RUNNING
-    run.pid = pid
     db.commit()
     append_event(db, run.id, RunEventKind.STATUS, {"status": RunStatus.RUNNING.value})
     return run
@@ -132,9 +148,10 @@ def finish_run(
     if num_turns is not None:
         run.num_turns = num_turns
     run.finished_at = datetime.now(UTC)
-    # The process is over either way, and a stale pid is worse than none: it
-    # will eventually belong to something else entirely.
-    run.pid = None
+    # The job is over either way, and a stale handle is worse than none: a pid
+    # will eventually belong to something else entirely, and a unit name will
+    # be reused by nothing but still invites a pointless stop.
+    run.handle = None
     db.commit()
     append_event(db, run.id, RunEventKind.STATUS, {"status": status.value})
     logger.info("Run %s finished: %s", run.id, status.value)

@@ -6,14 +6,21 @@ module and their behaviour is pinned here rather than in any one caller.
 """
 
 from workbench.database.models import RunEvent, RunEventKind, RunPhase, RunStatus
-from workbench.runs.store import append_event, create_run, finish_run, next_seq, start_run
+from workbench.runs.store import (
+    append_event,
+    create_run,
+    finish_run,
+    mark_running,
+    next_seq,
+    record_launch,
+)
 
 
-def test_a_new_run_is_queued_with_no_process(db, task):
+def test_a_new_run_is_queued_with_nothing_started(db, task):
     run = create_run(db, task, RunPhase.PLAN, backend="fake")
 
     assert run.status is RunStatus.QUEUED
-    assert run.pid is None
+    assert run.handle is None
     assert run.finished_at is None
 
 
@@ -46,15 +53,17 @@ def test_an_event_is_committed_immediately(db, run):
     assert not db.in_transaction() or db.get(RunEvent, 1) is not None
 
 
-def test_starting_a_run_records_the_owning_process(db, run):
-    start_run(db, run, pid=4242)
+def test_the_launch_is_recorded_before_anything_runs(db, run):
+    """A run executing while nothing knows how to stop it is unreachable."""
+    record_launch(db, run, executor="systemd-unit", handle="workbench-run@1.service")
 
-    assert run.status is RunStatus.RUNNING
-    assert run.pid == 4242
+    assert run.executor == "systemd-unit"
+    assert run.handle == "workbench-run@1.service"
+    assert run.status is RunStatus.QUEUED
 
 
 def test_starting_a_run_logs_the_transition(db, run):
-    start_run(db, run, pid=1)
+    mark_running(db, run)
 
     events = db.query(RunEvent).filter_by(run_id=run.id).all()
     assert [e.kind for e in events] == [RunEventKind.STATUS]
@@ -69,12 +78,14 @@ def test_finishing_records_the_outcome_and_the_time(db, run):
     assert run.finished_at is not None
 
 
-def test_finishing_clears_the_pid(db, run):
-    """A stale pid is worse than none — it will belong to something else."""
-    start_run(db, run, pid=4242)
+def test_finishing_clears_the_handle(db, run):
+    """A stale handle invites stopping something that is no longer the run."""
+    record_launch(db, run, executor="local-process", handle="4242")
+    mark_running(db, run)
     finish_run(db, run, RunStatus.SUCCEEDED)
 
-    assert run.pid is None
+    assert run.handle is None
+    assert run.executor == "local-process"
 
 
 def test_finishing_leaves_fields_it_was_not_given(db, run):

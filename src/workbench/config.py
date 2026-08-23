@@ -4,9 +4,13 @@ Everything defaults to something that works from a fresh clone with no setup, so
 that installing on a new machine needs no configuration step.
 """
 
+import logging
 import os
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def repo_root() -> Path:
@@ -91,6 +95,57 @@ def default_agent_backend() -> str:
     return os.environ.get("WORKBENCH_AGENT_BACKEND", DEFAULT_BACKEND).strip() or DEFAULT_BACKEND
 
 
+#: How a run is started when nothing selects otherwise. A name, not an import:
+#: nothing here knows what implements it. `local-process` is the safe default
+#: because it works anywhere, including the container the fresh-install test
+#: runs in, which has no systemd at all.
+DEFAULT_EXECUTOR = "local-process"
+
+#: The executor used where systemd is available and nothing overrides it. One
+#: transient unit per run: its own cgroup, so a deploy restarting the app does
+#: not take running agents with it, plus journald logs and resource limits per
+#: run. See docs/running-agents.md.
+SYSTEMD_EXECUTOR = "systemd-unit"
+
+
+def default_executor() -> str:
+    """Which executor to start runs with on this machine.
+
+    Detected rather than configured by default, because the right answer is a
+    property of the machine: a server with systemd should get one unit per run,
+    and a container without it must still be able to run something. An explicit
+    `WORKBENCH_EXECUTOR` wins over both.
+    """
+    configured = os.environ.get("WORKBENCH_EXECUTOR", "").strip()
+    if configured:
+        return configured
+    if shutil.which("systemctl") and Path("/run/systemd/system").is_dir():
+        return SYSTEMD_EXECUTOR
+    return DEFAULT_EXECUTOR
+
+
+#: How many runs may be active at once, across every project. Runs bill a
+#: subscription, so what three simultaneous agents waste is a rate-limit window
+#: shared with everything else on the account — not a few dollars.
+DEFAULT_MAX_CONCURRENT_RUNS = 2
+
+
+def max_concurrent_runs() -> int:
+    """The cap on queued-or-running runs. Zero or less means no cap.
+
+    Deliberately small. Three taps on a phone should not start three agents,
+    and the number that matters is not this machine's CPU count.
+    """
+    raw = os.environ.get("WORKBENCH_MAX_CONCURRENT_RUNS", "").strip()
+    if not raw:
+        return DEFAULT_MAX_CONCURRENT_RUNS
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("WORKBENCH_MAX_CONCURRENT_RUNS is not a number: %r", raw)
+        return DEFAULT_MAX_CONCURRENT_RUNS
+
+
 #: Credential variables that switch a backend from a subscription to
 #: metered API billing. Named here rather than inside a backend because the
 #: choice is Workbench's, and the next backend will have its own spelling of
@@ -168,6 +223,29 @@ def service_name() -> str:
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""
     return f"{service_name()}-deploy"
+
+
+def run_unit_prefix() -> str:
+    """The systemd template unit runs are started from, without `@`.
+
+    Instance-scoped like `service_name()`, and for the same reason: production
+    and staging share a machine, and `workbench-run@42` started by one of them
+    would otherwise be the same unit as the other's run 42 — different rows,
+    different worktrees, one unit name.
+    """
+    suffix = instance()
+    return f"workbench-{suffix}-run" if suffix else "workbench-run"
+
+
+def run_unit_name(run_id: int) -> str:
+    """The unit for one run. This is the handle stored on the row."""
+    return f"{run_unit_prefix()}@{run_id}.service"
+
+
+#: How long a run may take before systemd stops it. A backstop below the
+#: backend's own turn limit rather than a replacement for it: turns bound what
+#: the agent does, this bounds the process regardless of why it is stuck.
+RUN_TIMEOUT_SECONDS = 3600
 
 
 def github_token() -> str | None:

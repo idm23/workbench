@@ -50,7 +50,7 @@ from workbench.git.worktrees import (
     run_setup_command,
     uncommitted_diffstat,
 )
-from workbench.runs.store import append_event, finish_run, start_run
+from workbench.runs.store import append_event, finish_run, mark_running
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +289,7 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
 
 def execute(db: Session, run: Run) -> Run:
     """One run, start to finish, always ending in a recorded outcome."""
-    start_run(db, run, os.getpid())
+    mark_running(db, run)
     append_event(
         db,
         run.id,

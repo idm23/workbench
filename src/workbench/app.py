@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 from workbench.api import router as api_router
 from workbench.config import instance
 from workbench.database.db import get_db
-from workbench.database.models import Project, Task, TaskStatus, User
+from workbench.database.models import Project, Run, RunPhase, Task, TaskStatus, User
 from workbench.git.github import (
     InvalidReference,
     RepoMetadata,
@@ -35,6 +35,7 @@ from workbench.git.github import (
 from workbench.git.revision import head_revision
 from workbench.git.worktrees import Cloned, clone_project, local_checkout
 from workbench.runs.activity import activity_by_task
+from workbench.runs.lifecycle import NotCancellable, cancel_run, start_run
 from workbench.runs.rate_limits import latest_readings
 from workbench.tasks import (
     WrongProject,
@@ -311,6 +312,49 @@ def set_task_status(
 
     set_status(db, task, status)
     return _redirect(target)
+
+
+@app.post("/tasks/{task_id}/runs")
+def start_task_run(
+    db: DbSession, task_id: int, phase: Annotated[str, Form()] = "plan"
+) -> RedirectResponse:
+    """Hand a task to an agent.
+
+    The refusals — the concurrency cap, a task already being worked, an
+    executor that would not start — come back as messages rather than errors,
+    because every one of them is an ordinary answer to a button press and the
+    person reading it is on a phone.
+    """
+    task = _get_task_or_404(db, task_id)
+    target = f"/projects/{task.project_id}"
+
+    try:
+        chosen = RunPhase(phase)
+    except ValueError:
+        return _redirect(target, error=f"{phase!r} is not a run phase.")
+
+    if task.children:
+        # A task with children describes work rather than being work, so an
+        # agent pointed at one has no single thing to do.
+        return _redirect(target, error="Break this into a sub-task and run that instead.")
+
+    result = start_run(db, task, chosen)
+    if isinstance(result, Run):
+        return _redirect(target, notice=f"Run {result.id} started ({chosen.value}).")
+    return _redirect(target, error=result.message)
+
+
+@app.post("/runs/{run_id}/cancel")
+def cancel_task_run(db: DbSession, run_id: int) -> RedirectResponse:
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    target = f"/projects/{run.task.project_id}"
+    result = cancel_run(db, run)
+    if isinstance(result, NotCancellable):
+        return _redirect(target, error=result.message)
+    return _redirect(target, notice=f"Run {run_id} asked to stop.")
 
 
 @app.post("/tasks/{task_id}/delete")

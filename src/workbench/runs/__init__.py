@@ -2,7 +2,13 @@
 
 from workbench.runs.activity import TaskActivity, activity_by_task
 from workbench.runs.rate_limits import RateLimitReading, latest_readings
-from workbench.runs.store import append_event, create_run, finish_run, start_run
+from workbench.runs.store import (
+    append_event,
+    create_run,
+    finish_run,
+    mark_running,
+    record_launch,
+)
 
 __all__ = [
     "RateLimitReading",
@@ -12,5 +18,6 @@ __all__ = [
     "create_run",
     "finish_run",
     "latest_readings",
-    "start_run",
+    "mark_running",
+    "record_launch",
 ]
