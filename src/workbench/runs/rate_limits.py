@@ -92,6 +92,22 @@ class RateLimitReading:
         return round(max(0.0, min(1.0, self.utilization)) * 100)
 
     @property
+    def status_label(self) -> str:
+        """The backend's status in words, for when there is no percentage.
+
+        `utilization` is optional in the protocol and genuinely absent in real
+        readings — the one recorded sample on this machine carries a status, a
+        window, and a reset time and no number at all. A panel that showed
+        `allowed` in that case would be worse than useless, so the status
+        carries the meaning whenever the number cannot.
+        """
+        return {
+            "allowed": "within limits",
+            "allowed_warning": "close to the limit",
+            "rejected": "limit reached",
+        }.get(self.status, self.status.replace("_", " "))
+
+    @property
     def level(self) -> str:
         """`ok`, `warning`, or `exhausted` — the CSS class and the meaning.
 
@@ -123,6 +139,23 @@ class RateLimitReading:
             return f"{hours}h {minutes}m" if minutes else f"{hours}h"
         days, hours = divmod(hours, 24)
         return f"{days}d {hours}h" if hours else f"{days}d"
+
+    @property
+    def age(self) -> str:
+        """How long ago the backend said this.
+
+        Shown because these readings only refresh when something talks to the
+        backend, so the panel is a snapshot of the last time that happened
+        rather than a live gauge. Without the age, a number from this morning
+        looks exactly like one from a minute ago.
+        """
+        minutes = int((datetime.now(UTC) - self.observed_at).total_seconds() // 60)
+        if minutes < 1:
+            return "just now"
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h ago" if hours < 24 else f"{hours // 24}d ago"
 
     @property
     def is_stale(self) -> bool:

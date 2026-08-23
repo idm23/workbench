@@ -344,6 +344,17 @@ Unresolved. Recorded here so they are not rediscovered later.
 - **Is "no commits" a failure?** A run where the agent correctly concludes nothing needs
   changing produced no pull request, but calling that `failed` reads as a malfunction when
   it was judgement. Probably wants a third outcome.
+- **Rate-limit readings are only as fresh as the last run.** The panel updates when a
+  backend reports a reading, and nothing else asks. A one-turn probe session does emit
+  one — measured, it works — but it costs about 11,600 cache-creation tokens a shot,
+  because the CLI rebuilds its system prompt and tool definitions every fresh session.
+  That rules out a timer: probing every fifteen minutes would spend a substantial slice
+  of a five-hour window measuring that window. Wants on-demand refresh past a staleness
+  threshold, default off, and a `rate_limit_readings` table — a probe has no run to hang
+  events on, and that table would also retire the `json_extract` scan. Note that
+  `utilization` was null in both real samples, so the percentage bar is the optional
+  extra and the status is the primary signal.
+
 - **Event log growth is unbounded.** Every tool call of every run is a row, kept forever.
   Fine now; wants pruning before it is not.
 - **Whether a parent task's status should derive from its children.** Currently
