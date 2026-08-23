@@ -11,9 +11,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from workbench.app import app
-from workbench.database.db import get_db, make_engine
+from workbench.database.db import get_db, get_engine, get_session_factory, make_engine
 from workbench.database.models import Base, Project, Run, RunStatus, Task, User
 from workbench.runs import lifecycle
+from workbench.runs import stream as stream_module
 from workbench.runs.executors import Started, StartRefused
 
 
@@ -44,9 +45,22 @@ class FakeExecutor:
 
 @pytest.fixture
 def session(tmp_path, monkeypatch):
-    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "test.db"))
+    """The app's database, and the process-wide engine, pointed at one file.
+
+    Both, and at the *same* path, which matters here in a way it does not for
+    the other route tests. The event stream cannot use the request's session —
+    it outlives the request that opened it — so it reaches the database through
+    `session_scope`, which builds its own engine from `WORKBENCH_DB`. Point
+    those two at different files and the page renders from one while the stream
+    reads from the other.
+    """
+    db_path = tmp_path / "data" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("WORKBENCH_DB", str(db_path))
     monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "2")
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
+    get_engine.cache_clear()
+    get_session_factory.cache_clear()
+    engine = make_engine(f"sqlite+pysqlite:///{db_path}")
     Base.metadata.create_all(engine)
 
     def override():
@@ -70,6 +84,20 @@ def session(tmp_path, monkeypatch):
         db.commit()
         yield db
     app.dependency_overrides.clear()
+    get_engine.cache_clear()
+    get_session_factory.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def brisk(monkeypatch):
+    """Real streaming, minus the waiting.
+
+    A finished run's stream sweeps a few more times before closing, to be
+    correct whatever order the writer committed in. At the real interval that
+    is three seconds per test, which is three seconds CI spends watching a
+    clock rather than checking anything.
+    """
+    monkeypatch.setattr(stream_module, "POLL_SECONDS", 0.001)
 
 
 @pytest.fixture
@@ -230,3 +258,102 @@ def test_a_running_task_offers_to_stop_instead(client, session, cloned, executor
 
     assert "/runs/1/cancel" in page
     assert "Stop run" in page
+
+
+# --- Reading a run back ----------------------------------------------------
+
+
+def a_finished_run(session, *, status=RunStatus.SUCCEEDED):
+    from workbench.database.models import RunEventKind, RunPhase
+    from workbench.runs.store import append_event, create_run, finish_run, mark_running
+
+    run = create_run(session, a_task(session), RunPhase.EXECUTE, backend="claude")
+    mark_running(session, run)
+    append_event(session, run.id, RunEventKind.TEXT, {"text": "Looking at the code."})
+    append_event(session, run.id, RunEventKind.TOOL_USE, {"name": "Bash"})
+    finish_run(session, run, status, summary="Added the tests.", diffstat=" a.py | 2 +-")
+    return run
+
+
+def test_a_run_page_renders_what_happened(client, session):
+    run = a_finished_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "Looking at the code." in page
+    assert "Added the tests." in page
+    assert "a.py" in page
+
+
+def test_the_page_renders_without_the_stream(client, session):
+    """A run read back a week later has no stream to open."""
+    run = a_finished_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "EventSource" not in page
+
+
+def test_a_live_run_page_opens_a_stream_from_where_it_got_to(client, session, executor):
+    client.post(f"/tasks/{a_task(session).id}/runs", data={"phase": "plan"})
+    run = session.query(Run).one()
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "EventSource" in page
+    assert f"/runs/{run.id}/events?after=" in page
+
+
+def test_the_reported_cost_is_labelled_as_not_a_bill(client, session):
+    """Under a subscription it is a token valuation, not money charged."""
+    run = a_finished_run(session)
+    run.total_cost_usd = 0.42
+    session.commit()
+
+    assert "not an amount charged" in client.get(f"/runs/{run.id}").text
+
+
+def test_a_missing_run_is_a_404(client, session):
+    assert client.get("/runs/999").status_code == 404
+
+
+def test_the_stream_is_served_as_server_sent_events(client, session):
+    run = a_finished_run(session)
+
+    response = client.get(f"/runs/{run.id}/events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    # Without this a buffering proxy waits for the whole response, which is
+    # the one thing streaming cannot survive.
+    assert response.headers["x-accel-buffering"] == "no"
+
+
+def test_the_stream_replays_the_whole_log(client, session):
+    run = a_finished_run(session)
+
+    body = client.get(f"/runs/{run.id}/events").text
+
+    assert "Looking at the code." in body
+    assert body.count("\nevent: ") >= 3
+    assert "event: end" in body
+
+
+def test_the_stream_resumes_from_the_last_event_id_header(client, session):
+    """What a browser sends by itself on reconnect."""
+    run = a_finished_run(session)
+
+    body = client.get(f"/runs/{run.id}/events", headers={"Last-Event-ID": "2"}).text
+
+    assert "Looking at the code." not in body
+    assert "id: 3" in body
+
+
+def test_the_after_parameter_resumes_too(client, session):
+    """What the page uses on first load, having already rendered the past."""
+    run = a_finished_run(session)
+
+    body = client.get(f"/runs/{run.id}/events?after=2").text
+
+    assert "Looking at the code." not in body

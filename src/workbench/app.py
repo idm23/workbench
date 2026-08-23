@@ -15,7 +15,7 @@ from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +37,7 @@ from workbench.git.worktrees import Cloned, clone_project, local_checkout
 from workbench.runs.activity import activity_by_task
 from workbench.runs.lifecycle import NotCancellable, cancel_run, start_run
 from workbench.runs.rate_limits import latest_readings
+from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.tasks import (
     WrongProject,
     build_tree,
@@ -55,6 +56,11 @@ app = FastAPI(title="Workbench")
 # Mounted rather than defined here: the JSON routes are a second face on the
 # same operations, not a second implementation of them.
 app.include_router(api_router)
+
+
+#: A run with more events than this is read in pages by the stream rather
+#: than rendered in one response. A long agent run is thousands of rows.
+MAX_RENDERED_EVENTS = 500
 
 
 DbSession = Annotated[Session, Depends(get_db)]
@@ -355,6 +361,63 @@ def cancel_task_run(db: DbSession, run_id: int) -> RedirectResponse:
     if isinstance(result, NotCancellable):
         return _redirect(target, error=result.message)
     return _redirect(target, notice=f"Run {run_id} asked to stop.")
+
+
+@app.get("/runs/{run_id}", response_class=HTMLResponse)
+def show_run(request: Request, db: DbSession, run_id: int) -> HTMLResponse:
+    """One run, with everything it has said so far.
+
+    Rendered server-side rather than left to the stream to fill in. A run read
+    back a week later has no stream to open, and a page that is blank until
+    JavaScript connects is a page that is blank when JavaScript fails.
+    """
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    events = fetch_events(db, run_id, after_seq=0, limit=MAX_RENDERED_EVENTS)
+    return templates.TemplateResponse(
+        request,
+        "run_detail.html",
+        {
+            **_shared(db),
+            "run": run,
+            "task": run.task,
+            "events": events,
+            # Where the browser should resume from, so the stream continues the
+            # page rather than repeating it.
+            "last_seq": events[-1].seq if events else 0,
+            "live": not run.status.is_terminal,
+        },
+    )
+
+
+@app.get("/runs/{run_id}/events")
+async def stream_run_events(request: Request, run_id: int) -> StreamingResponse:
+    """The run's event log, as server-sent events.
+
+    The app's one `async def` route, which is why every database read inside it
+    goes through `asyncio.to_thread`: the events being streamed are written by
+    a different process, so there is nothing to await on but the table.
+
+    Resumable by construction. A browser reconnecting sends `Last-Event-ID`,
+    which is the sequence number it last saw, and gets everything after it —
+    so a phone that slept through half a run misses nothing.
+    """
+    resume = request.query_params.get("after") or request.headers.get("last-event-id")
+
+    return StreamingResponse(
+        stream(run_id, parse_last_event_id(resume)),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Tells a buffering reverse proxy not to. Without it the whole
+            # point of streaming is lost to a proxy waiting for a full
+            # response before sending anything.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/tasks/{task_id}/delete")

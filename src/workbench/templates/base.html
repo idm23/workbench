@@ -299,6 +299,90 @@
   }
   .task.busy { }
   .task.busy .task-title { font-weight: 650; }
+
+  /* A run's page: metadata, then the event log as it arrives. */
+  h2.section {
+    font-size: .8rem;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--muted);
+    margin: 1.75rem 0 .6rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+  .run-meta {
+    border: 1px solid var(--rule);
+    border-radius: .5rem;
+    padding: .25rem .75rem;
+    margin-bottom: 1.25rem;
+    background: var(--panel);
+  }
+  .run-meta > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: .45rem 0;
+    font-size: .9rem;
+    border-top: 1px solid var(--rule);
+    overflow-wrap: anywhere;
+  }
+  .run-meta > div:first-child { border-top: none; }
+  .run-meta span:first-child { color: var(--muted); flex: 0 0 auto; }
+  .block {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: .5rem;
+    padding: .8rem;
+    margin: 0 0 1.25rem;
+    font-size: .85rem;
+    line-height: 1.45;
+    /* Long tool output and diffstats scroll inside their own box rather than
+       making the whole page scroll sideways on a phone. */
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  ul.events { list-style: none; margin: 0 0 1.75rem; padding: 0; }
+  .ev {
+    display: flex;
+    gap: .6rem;
+    padding: .5rem 0;
+    border-top: 1px solid var(--rule);
+    font-size: .9rem;
+  }
+  .ev:last-child { border-bottom: 1px solid var(--rule); }
+  .ev-kind {
+    flex: 0 0 5.2rem;
+    font-size: .65rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-weight: 700;
+    color: var(--muted);
+    padding-top: .2rem;
+  }
+  .ev-body { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* Reasoning and tool plumbing are dimmed: they are worth being able to read
+     but should not compete with what the agent actually said. */
+  .ev.thinking .ev-body, .ev.tool_result .ev-body, .ev.notice .ev-body { color: var(--muted); }
+  .ev.tool_use .ev-body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .ev.status .ev-kind { color: var(--accent); }
+
+  .live-dot { font-size: .65rem; letter-spacing: .06em; color: var(--accent); font-weight: 700; }
+  .live-dot.on::before {
+    content: "";
+    display: inline-block;
+    width: .4rem; height: .4rem;
+    border-radius: 999px;
+    background: var(--accent);
+    margin-right: .3rem;
+    vertical-align: middle;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot.on::before { animation: none; }
+  }
 </style>
 </head>
 <body>

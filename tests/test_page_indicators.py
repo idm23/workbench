@@ -213,7 +213,7 @@ def test_a_running_execute_run_marks_its_task(client, session):
 
     page = project_page(client, session)
 
-    assert "working</span>" in _squashed(page)
+    assert "working</a>" in _squashed(page)
     assert 'class="pip"' in page
 
 
@@ -221,7 +221,7 @@ def test_a_running_plan_run_says_planning_instead(client, session):
     """The phase is the part a person cares about."""
     a_run(session, status=RunStatus.RUNNING, phase=RunPhase.PLAN)
 
-    assert "planning</span>" in _squashed(project_page(client, session))
+    assert "planning</a>" in _squashed(project_page(client, session))
 
 
 def test_a_queued_run_is_marked_but_not_as_live(client, session):
@@ -229,7 +229,7 @@ def test_a_queued_run_is_marked_but_not_as_live(client, session):
 
     page = project_page(client, session)
 
-    assert "queued</span>" in _squashed(page)
+    assert "queued</a>" in _squashed(page)
     assert 'class="status live"' not in page
 
 
@@ -237,7 +237,7 @@ def test_a_plan_waiting_on_a_person_is_marked(client, session):
     """The state most easily forgotten: nothing else on the page says so."""
     a_run(session, status=RunStatus.AWAITING_REVIEW, phase=RunPhase.PLAN)
 
-    assert "review</span>" in _squashed(project_page(client, session))
+    assert "review</a>" in _squashed(project_page(client, session))
 
 
 def test_a_finished_run_leaves_no_marker(client, session):
@@ -258,14 +258,14 @@ def test_the_newest_run_decides_what_is_shown(client, session):
     a_run(session, status=RunStatus.AWAITING_REVIEW, phase=RunPhase.PLAN)
     a_run(session, status=RunStatus.RUNNING, phase=RunPhase.EXECUTE)
 
-    assert "working</span>" in _squashed(project_page(client, session))
+    assert "working</a>" in _squashed(project_page(client, session))
 
 
 def test_the_marker_carries_a_word_and_not_only_a_colour(client, session):
     """Colour alone is not an indicator someone can necessarily read."""
     a_run(session, status=RunStatus.RUNNING)
 
-    assert "working</span>" in _squashed(project_page(client, session))
+    assert "working</a>" in _squashed(project_page(client, session))
 
 
 def test_a_reading_with_no_percentage_still_says_something(client, session):
