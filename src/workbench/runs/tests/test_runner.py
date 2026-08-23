@@ -111,10 +111,10 @@ def test_the_agent_is_pointed_at_that_worktree(db, run, checkout, backend):
     assert str(backend.requests[0].worktree) == run.task.worktree_path
 
 
-def test_the_pid_is_recorded_while_running_and_cleared_after(db, run, checkout, backend):
+def test_the_handle_is_cleared_once_the_run_is_over(db, run, checkout, backend):
     execute(db, run)
 
-    assert run.pid is None
+    assert run.handle is None
     statuses = [e for e in events_for(db, run) if e.kind is RunEventKind.STATUS]
     assert statuses[0].payload["status"] == "running"
 
@@ -291,7 +291,7 @@ def test_a_run_is_never_left_running_whatever_happens(db, task, checkout, monkey
         execute(db, run)
 
         assert run.status is not RunStatus.RUNNING
-        assert run.pid is None
+        assert run.handle is None
         assert run.finished_at is not None
 
 
