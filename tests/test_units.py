@@ -19,10 +19,16 @@ import pytest
 from workbench.config import deploy_unit_name, service_name
 from workbench.install import InstallError, check_not_under_private_tmp, render_unit, units
 
-UNIT_NAMES = ["workbench.service", "workbench-deploy.service", "workbench-deploy.timer"]
+UNIT_NAMES = [
+    "workbench.service",
+    "workbench-deploy.service",
+    "workbench-deploy.timer",
+    "workbench-run@.service",
+]
 
 SERVICE_NAME = "workbench"
 DEPLOY_NAME = "workbench-deploy"
+RUN_NAME = "workbench-run"
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +52,7 @@ def test_every_unit_is_rendered(rendered):
         f"{SERVICE_NAME}.service",
         f"{DEPLOY_NAME}.service",
         f"{DEPLOY_NAME}.timer",
+        f"{RUN_NAME}@.service",
     }
 
 
@@ -153,6 +160,7 @@ def test_staging_units_are_named_apart_from_production(staging):
         "workbench-staging.service",
         "workbench-staging-deploy.service",
         "workbench-staging-deploy.timer",
+        "workbench-staging-run@.service",
     }
 
 

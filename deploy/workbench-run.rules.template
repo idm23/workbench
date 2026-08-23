@@ -1,0 +1,24 @@
+// Rendered by install.sh into /etc/polkit-1/rules.d/.
+//
+// Lets the service user start and stop *its own run units* and nothing else.
+// Without this, `systemctl start __RUN_PREFIX__@42` from an unprivileged
+// account is refused: talking to the system manager needs authorisation.
+//
+// The narrowness is the point. The account this grants to is the one that runs
+// model-authored shell commands, so "may manage units" would be a standing
+// general privilege handed to an agent. Matching on the unit name makes it a
+// specific one: these units, this user, nothing else. Anything not matched
+// falls through to polkit's normal rules, which is a refusal.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return;
+    }
+    if (subject.user !== "__USER__") {
+        return;
+    }
+    // Anchored at both ends, and the instance is digits only, so a unit called
+    // `__RUN_PREFIX__@42.service.evil` or `../something` does not match.
+    if (/^__RUN_PREFIX__@[0-9]+\.service$/.test(action.lookup("unit") || "")) {
+        return polkit.Result.YES;
+    }
+});

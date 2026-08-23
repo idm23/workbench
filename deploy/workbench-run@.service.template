@@ -1,0 +1,54 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+# One unit per run: `systemctl start __RUN_PREFIX__@42.service` runs row 42.
+#
+# The point of a unit rather than a child process is the control group. systemd
+# kills a unit's whole cgroup when it stops it, and a process forked from the
+# web app lives in *that* app's cgroup — so a deploy restarting the app would
+# take every running agent with it, however detached the process is in the Unix
+# sense. A unit of its own is a cgroup of its own. See docs/running-agents.md.
+#
+# Deliberately has no [Install] section. It is never enabled and never wanted at
+# boot; it is started on demand, by run id.
+
+[Unit]
+Description=Workbench run %i (__SERVICE__)
+After=network-online.target
+
+[Service]
+Type=exec
+User=__USER__
+WorkingDirectory=__REPO__
+
+ExecStart=__REPO__/.venv/bin/python -m workbench.runs.runner %i
+
+Environment=WORKBENCH_DB=__REPO__/data/workbench.db
+Environment=WORKBENCH_INSTANCE=__INSTANCE__
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# A run still going after this is stuck rather than slow. Independent of the
+# backend's turn limit: turns bound what the agent chooses to do, this bounds
+# the process whatever the reason — a hung network call, a build that waits for
+# input that never comes.
+RuntimeMaxSec=__RUN_TIMEOUT__
+
+# Long enough for the runner's SIGTERM handler to record `cancelled` and for
+# the backend's own child to wind up. The default 90s would also work; this
+# says the intent out loud.
+TimeoutStopSec=30
+
+# Not restarted. A failed run is a row with an error on it and a person's
+# decision about whether to try again, not something to retry blindly against a
+# rate limit.
+Restart=no
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+
+# Where the agent legitimately writes: its worktree and the clone it came from,
+# both inside data/, and the database it records into.
+ReadWritePaths=__REPO__/data
+
+# The backend's credential and session transcripts. Writable, not merely
+# readable — the subscription's OAuth token is refreshed periodically.
+ReadWritePaths=-__HOME__/.claude
