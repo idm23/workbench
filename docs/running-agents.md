@@ -251,6 +251,110 @@ whichever installed last silently revoked the other's ability to start runs.
 promise still holds: a clone and one script, with no "and then add a polkit rule"
 step living in someone's memory.
 
+## What polkit is, and why the rule is shaped that way
+
+Worth writing down because it is obvious while you are holding it and gone in three
+months.
+
+**polkit is the authorisation layer for privileged operations requested over D-Bus.** Not
+authentication — it does not care who you are in the login sense — and not file
+permissions. It answers a third question: *an unprivileged process owned by user X is
+asking a privileged daemon to do Y; should the daemon comply?*
+
+It exists because of a structural shift. The old way to let a normal user do a privileged
+thing was a setuid-root binary, which is a large and permanent attack surface. The modern
+way is a daemon that stays root while unprivileged clients *ask* it over D-Bus — at which
+point the daemon needs a policy for who may ask what. polkit is that policy engine, shared
+by systemd, NetworkManager, udisks and others.
+
+### What happens when Workbench starts a run
+
+`systemctl start workbench-run@42.service` starts nothing itself. It sends a `StartUnit`
+method call to **PID 1** over the system bus. PID 1 is root and will not act on an
+unprivileged request without checking, so it asks polkitd whether this uid may perform
+`org.freedesktop.systemd1.manage-units` on that unit.
+
+systemd's declared default for that action is not permissive:
+
+```console
+$ pkaction --action-id org.freedesktop.systemd1.manage-units --verbose
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+```
+
+`auth_admin` means "prompt for an administrator's password". A system service has no
+session, no terminal, and nobody to type it. Asking polkit directly what it would say to a
+process like ours confirms it:
+
+```console
+$ pkcheck --action-id org.freedesktop.systemd1.manage-units --process $$
+Authorization requires authentication and -u wasn't passed.
+exit=2
+```
+
+Denied. So the rule is not belt-and-braces: without it every run fails at the moment it is
+started.
+
+### The rule is four filters and a refusal
+
+In order, and all of them must pass:
+
+1. The action must be `manage-units`. Not `manage-unit-files`, not `reload-daemon`.
+2. The subject must be the service user.
+3. The unit must match `^workbench-run@[0-9]+\.service$` — anchored at both ends, with a
+   digits-only instance.
+4. Anything that reaches the end returns `undefined`, meaning "no opinion", and polkit
+   falls through to the `auth_admin` refusal above.
+
+**The unit name cannot be supplied by the caller**, which matters more than it looks.
+polkit only accepts operation details from the action's owner:
+
+```console
+$ pkcheck --action-id ... --detail unit workbench-run@42.service
+Only trusted callers (e.g. uid 0 or an action owner) can use CheckAuthorization()
+and pass details
+```
+
+So the value the rule matches on is systemd's own view of what is being started, not a
+string the requesting process controls. There is no spoofing it with a cleverly crafted
+argument — which is exactly the property that makes matching on it worth doing.
+
+### Why not sudoers
+
+A narrow entry would also work and is more familiar:
+
+```
+workbench ALL=(root) NOPASSWD: /usr/bin/systemctl start workbench-run@*.service
+```
+
+polkit wins here for one specific reason: **sudoers matches on argv text, polkit matches on
+structured data from systemd.** Command-pattern wildcards are a well-known source of
+escapes, and the account on the other end of this grant runs model-authored shell commands.
+Matching systemd's own notion of which unit is starting is a smaller thing to get wrong. It
+also leaves "the service user has no sudo" true, which is easier to reason about than "no
+sudo except this one line".
+
+### When polkit stops being involved
+
+- **If runs moved to the user manager.** That manager belongs to the user, so no privileged
+  daemon is in the path and no rule is needed. That is the option rejected above over
+  controller delegation; if that ever changes, the rule goes with it.
+- **If the service ran as root** — which is the thing the unprivileged account exists to
+  prevent.
+- **If a run moved to another machine.** That node's executor answers for itself, and this
+  rule becomes local-only.
+
+### The one link not proven here
+
+The rule depends on `action.lookup("unit")` returning the unit name. That is the documented
+systemd pattern, but verifying it needs a rule that logs what it sees, which needs root on
+a real machine.
+
+The failure mode is safe. If the detail is absent the regex fails, the rule returns
+`undefined`, and polkit refuses — so a broken grant surfaces as "access denied" in the run's
+`error` column on the first attempt, never as a silent widening.
+
 ## What is still true
 
 `runs/runner.py` did not change for any of this. It takes a run id, records its
