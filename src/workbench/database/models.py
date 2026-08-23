@@ -22,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from workbench.config import DEFAULT_BACKEND
+from workbench.config import DEFAULT_BACKEND, DEFAULT_EXECUTOR
 
 # Explicit constraint naming matters more than usual here: SQLite cannot ALTER
 # most constraints, so Alembic rewrites the table instead (batch mode), and it
@@ -321,9 +321,22 @@ class Run(Base):
     # with `backend` above.
     resume_token: Mapped[str | None] = mapped_column(String(200), default=None)
 
-    # The detached runner process. Used to cancel a run, and to notice one that
-    # died without recording an outcome.
-    pid: Mapped[int | None] = mapped_column(Integer, default=None)
+    # How this run was started, and what to ask about it afterwards.
+    #
+    # Recorded per run for the same reason `backend` is: the moment a second
+    # executor exists — a systemd unit here, a job on a GPU node later — every
+    # earlier row is ambiguous without it, and nothing can backfill where a run
+    # actually ran.
+    executor: Mapped[str] = mapped_column(String(50), default=DEFAULT_EXECUTOR)
+
+    # An opaque reference to the running job, meaningful only to the executor
+    # that issued it: a unit name for systemd, a pid for a bare process, a
+    # remote job id later. Never parsed, and always read together with
+    # `executor` above — exactly like `resume_token` and `backend`.
+    #
+    # Set by whatever starts the run rather than by the runner itself, so there
+    # is no window where a run is executing and nothing knows how to stop it.
+    handle: Mapped[str | None] = mapped_column(String(200), default=None)
 
     plan: Mapped[str | None] = mapped_column(Text, default=None)
     summary: Mapped[str | None] = mapped_column(Text, default=None)
