@@ -277,3 +277,40 @@ def test_systemd_accepts_the_units(rendered, tmp_path):
     ]
 
     assert ours == [], "\n".join(ours)
+
+
+def test_a_deploy_installs_everything_an_install_does(monkeypatch):
+    """The gap that made every run fail with access denied on an updated box.
+
+    `install.sh` wrote the polkit rule and the deployer did not, so a machine
+    that only ever updated automatically got the run unit without the
+    authorisation to start it. The fix for that would have been a remembered
+    manual step, which is the thing the automatic deployer exists to abolish.
+    """
+    from workbench import deploy
+
+    called: list[str] = []
+    monkeypatch.setattr("workbench.install.systemd_is_running", lambda: True)
+    monkeypatch.setattr("workbench.install.install_units", lambda: called.append("units"))
+    monkeypatch.setattr("workbench.install.install_polkit_rule", lambda: called.append("polkit"))
+
+    assert deploy.refresh_units() is None
+    assert called == ["units", "polkit"]
+
+
+def test_a_failure_installing_the_rule_is_reported_not_raised(monkeypatch):
+    """A deploy reports into the journal rather than dying on a traceback."""
+    from workbench import deploy
+
+    monkeypatch.setattr("workbench.install.systemd_is_running", lambda: True)
+    monkeypatch.setattr("workbench.install.install_units", lambda: None)
+
+    def explode():
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr("workbench.install.install_polkit_rule", explode)
+
+    result = deploy.refresh_units()
+
+    assert result is not None
+    assert "read-only filesystem" in str(result)
