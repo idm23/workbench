@@ -81,6 +81,49 @@ def git(*args: str, cwd: Path, check: bool = True) -> str:
     return run(["git", *args], cwd=cwd, check=check).stdout.strip()
 
 
+def quiet_git(path: Path) -> None:
+    """Stop git running background maintenance in a throwaway repository.
+
+    `gc --auto` forks a detached process after some commands, and it writes
+    into `.git` on its own schedule. That is fine for a repository someone
+    keeps and fatal for one this script deletes a moment later: the collision
+    surfaces as ENOTEMPTY on a directory that was empty when it was scanned.
+    """
+    run(["git", "config", "gc.auto", "0"], cwd=path)
+    run(["git", "config", "maintenance.auto", "false"], cwd=path)
+
+
+def remove_tree(path: Path, attempts: int = 5) -> None:
+    """Delete a scratch directory, tolerating a writer that has not finished.
+
+    Deleting scaffolding is not what this test is testing, so a failure here
+    must not fail it — a suite that goes red over its own temporary files is
+    one people stop believing, which is expensive when the thing it guards is
+    the deploy path.
+
+    The leftovers are logged rather than swallowed, because if this ever fires
+    despite `quiet_git` above, what appeared in the directory is the whole
+    diagnosis.
+    """
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if attempt == attempts - 1:
+                leftovers = sorted(str(p.relative_to(path)) for p in path.rglob("*"))
+                logger.warning(
+                    "Could not remove %s (%s). Left behind: %s",
+                    path,
+                    error,
+                    ", ".join(leftovers[:20]) or "nothing",
+                )
+                return
+            time.sleep(0.2 * (attempt + 1))
+
+
 def systemctl(*args: str, check: bool = True) -> str:
     return run(["sudo", "systemctl", *args], check=check).stdout.strip()
 
@@ -103,16 +146,20 @@ def build_origin() -> None:
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     ORIGIN.mkdir(parents=True)
     run(["git", "init", "-q", "--bare", "-b", "main", str(ORIGIN)])
+    # The receiving end runs `gc --auto` too, and this repository outlives the
+    # push by the length of the whole test.
+    quiet_git(ORIGIN)
 
     seed = WORKSPACE / "seed"
     shutil.copytree(REPO_ROOT, seed, ignore=shutil.ignore_patterns(*EXCLUDED))
     run(["git", "init", "-q", "-b", "main"], cwd=seed)
+    quiet_git(seed)
     run(["git", "config", "user.email", "ci@example.com"], cwd=seed)
     run(["git", "config", "user.name", "CI"], cwd=seed)
     run(["git", "add", "-A"], cwd=seed)
     run(["git", "commit", "-qm", "working tree under test"], cwd=seed)
     run(["git", "push", "-q", str(ORIGIN), "main"], cwd=seed)
-    shutil.rmtree(seed)
+    remove_tree(seed)
 
     run(["git", "clone", "-q", str(ORIGIN), str(CHECKOUT)])
     run(["git", "config", "user.email", "ci@example.com"], cwd=CHECKOUT)
@@ -122,8 +169,9 @@ def build_origin() -> None:
 def commit_to_origin(message: str, edit: dict[str, str]) -> str:
     """Apply file changes on origin's main and return the new revision."""
     staging = WORKSPACE / "push"
-    shutil.rmtree(staging, ignore_errors=True)
+    remove_tree(staging)
     run(["git", "clone", "-q", str(ORIGIN), str(staging)])
+    quiet_git(staging)
     run(["git", "config", "user.email", "ci@example.com"], cwd=staging)
     run(["git", "config", "user.name", "CI"], cwd=staging)
 
@@ -136,7 +184,8 @@ def commit_to_origin(message: str, edit: dict[str, str]) -> str:
     run(["git", "commit", "-qm", message], cwd=staging)
     run(["git", "push", "-q", "origin", "main"], cwd=staging)
     revision = git("rev-parse", "HEAD", cwd=staging)
-    shutil.rmtree(staging)
+    # Same exposure as the seed above, and this one runs once per deploy test.
+    remove_tree(staging)
     return revision
 
 
