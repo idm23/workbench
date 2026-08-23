@@ -14,10 +14,12 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > as tables with no reader. **The agent seam and the runner now exist**:
 > `workbench/agents/` drives Claude behind a vendor-neutral interface, and
 > `python -m workbench.runs.runner <id>` carries out a run end to end, writing every
-> event to `run_events` as it happens. The task tree marks whichever task a run is
-> working, and every page shows how much of each rate-limit window is left. Nothing
-> spawns a runner yet — that is the runs slice — so no run has been started from the
-> app. See `README.md` for what is actually live.
+> event to `run_events` as it happens. Runs start and stop from the task tree, each as its
+> own systemd unit, and a run's page streams its output live and replays anything a
+> sleeping phone missed. Every page shows how much of each rate-limit window is left.
+> **No agent has yet run on the real server**: the polkit grant that lets the app start a
+> unit is proven against a stub and not against the machine. See `README.md` for what is
+> actually live.
 
 ## Reproducibility is a project goal
 
@@ -339,14 +341,10 @@ Unresolved. Recorded here so they are not rediscovered later.
   task's worktree orphans the `resume_token` its runs point at. Per-task worktrees narrow
   this but do not close it. Some SDKs expose a pluggable session store, which would let
   those live in our own SQLite instead of on disk.
-- **SSE has no replay yet.** The `run_events` table exists precisely so the stream can be
-  replayed from `Last-Event-ID` before tailing live, but nothing writes to or reads from
-  it — that arrives with the runner. A phone that sleeps mid-run would currently lose
-  everything emitted during the gap.
-- **Nothing caps concurrency.** Three taps starts three agents, each running builds.
-  `config.py` has no `max_concurrent_runs` yet. Since runs bill a subscription, what this
-  wastes is a rate-limit window rather than a few dollars, which makes it more pressing
-  than it first looked — and the window is shared with whatever else uses the account.
+- **Polling is how the stream tails.** There is no in-process signal available: the runner
+  is a different process in a different cgroup, and SQLite has no LISTEN/NOTIFY, so the
+  table is the only thing the two share. Once per second per open page is fine at this
+  scale and would not be on a busy one.
 - **`setup_command` is per project, but the need is per worktree.** A project whose setup
   is "symlink `.env` and the venv from the main checkout" cannot express that as one
   command without knowing the source path.
@@ -391,6 +389,14 @@ than no list at all.
 - **Blocking `sqlite3` in async handlers.** Route handlers are sync `def`, which FastAPI
   runs in a threadpool. The one `async def` endpoint will be the event stream, reaching
   the database through `asyncio.to_thread`.
+- **SSE replay.** Done, and it is the reason `run_events` is numbered per run rather than
+  globally. A reader says how far it got — through `Last-Event-ID` on reconnect, or `after`
+  on first load — and gets the rest exactly once. A phone that sleeps through half a run
+  loses nothing, and reading a run back a week later is the same query with a different
+  number in it.
+- **Nothing caps concurrency.** `max_concurrent_runs` defaults to 2, and `start` reaps
+  before checking it — otherwise a run killed mid-flight holds a slot forever and the cap
+  becomes a way to lock yourself out.
 - **Store token and cost per run.** `runs.total_cost_usd` and `runs.num_turns` exist. A
   backend that reports neither leaves them null rather than zero.
 - **`open/active/done` has nowhere for a failed or cancelled run.** Task statuses are

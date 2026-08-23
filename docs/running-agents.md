@@ -355,6 +355,33 @@ The failure mode is safe. If the detail is absent the regex fails, the rule retu
 `undefined`, and polkit refuses — so a broken grant surfaces as "access denied" in the run's
 `error` column on the first attempt, never as a silent widening.
 
+## Watching one
+
+The same split explains how you watch a run, and why it is a query rather than a
+subscription.
+
+Nothing in the web process can be notified when the agent says something. The runner is a
+different process, in a different cgroup, quite possibly started before this web process
+existed — and SQLite has no LISTEN/NOTIFY. The only thing the two share is the table.
+
+So `GET /runs/42/events` polls it: everything with `seq >` what the reader has already
+seen, once a second, framed as server-sent events. That sounds crude and is exactly right,
+because it makes resumption free. A reader that says "I have seen up to 41" can always be
+told the rest, whether it disconnected a second ago or slept through the whole run. The
+browser sends `Last-Event-ID` by itself on reconnect; the page passes `?after=` on first
+load, having already rendered the past server-side.
+
+Two consequences worth keeping in mind:
+
+- **The page renders without the stream.** A run read back a week later has no stream to
+  open, and a page that is blank until JavaScript connects is blank when JavaScript fails.
+  The stream only ever adds to what the server already rendered.
+- **The reader sweeps past the end.** `finish_run` commits the terminal status and *then*
+  appends the status event, so a stream that stopped the instant it saw a terminal status
+  could miss the last thing that happened. Sweeping for a few more polls makes the reader
+  correct whatever order the writer used — which is the property that survives someone
+  reworking the writer later.
+
 ## What is still true
 
 `runs/runner.py` did not change for any of this. It takes a run id, records its

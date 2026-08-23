@@ -44,9 +44,11 @@
               {% if busy %}
                 {# The dot reads at a glance; the word is what carries the
                    meaning for anyone the colour does not reach. #}
-                <span class="status {{ 'live' if busy.is_live else 'review' if busy.needs_attention else 'pending' }}"
-                      title="Run {{ busy.run_id }} is {{ busy.status }}"
-                ><span class="pip"></span>{{ busy.label }}</span>&nbsp;
+                <a class="status {{ 'live' if busy.is_live else 'review' if busy.needs_attention else 'pending' }}"
+                   href="/runs/{{ busy.run_id }}"
+                   style="text-decoration: none;"
+                   title="Run {{ busy.run_id }} is {{ busy.status }}"
+                ><span class="pip"></span>{{ busy.label }}</a>&nbsp;
               {% endif %}
               <span class="status {{ node.task.status }}">{{ node.task.status }}</span>
               {% if node.task.branch %}
