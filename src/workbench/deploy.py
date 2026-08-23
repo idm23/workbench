@@ -442,11 +442,18 @@ def run_acceptance() -> None:
 
 
 def refresh_units() -> DeployFailed | None:
-    """Reinstall the systemd units if their templates changed in this pull.
+    """Reinstall the systemd units and the polkit rule, if either changed.
 
     Without this, a change to the unit — a new `ReadWritePaths` entry, say —
     would sit in the repository and never reach systemd, and the failure would
     show up much later as a permission error inside an agent run.
+
+    The polkit rule is here for exactly that reason, and it was missed the
+    first time: an install by hand wrote it, but a deploy did not, so a machine
+    updated automatically would grow the ability to *ask* systemd to start a
+    run unit without the authorisation to have it granted. Every run would fail
+    with access denied, and the fix would have been a manual `install.sh` — the
+    kind of remembered step this whole file exists to abolish.
 
     Safe to run as root because `install.service_user()` reads the checkout's
     owner rather than the current user.
@@ -454,13 +461,14 @@ def refresh_units() -> DeployFailed | None:
     # Imported here rather than at module scope: install.py pulls in httpx and
     # alembic, and this function is skipped on the overwhelmingly common
     # already-up-to-date path.
-    from workbench.install import install_units, systemd_is_running
+    from workbench.install import install_polkit_rule, install_units, systemd_is_running
 
     if not systemd_is_running():
         return None
 
     try:
         install_units()
+        install_polkit_rule()
     except Exception as error:
         # install.py signals failure by raising, so this is the boundary where
         # that becomes a result again. Broad on purpose: a deploy must report
