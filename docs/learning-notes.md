@@ -117,6 +117,76 @@ going through this project's logging config, not alembic's.
 Lesson: match the log *format* to the process that produced it before deciding where a
 fix belongs.
 
+## A permission mode is not a sandbox
+
+`acceptEdits` sounds like the safe middle setting for a headless agent: it lets the model
+edit files without waving through everything else. What it actually does is permit edits
+and still gate `Bash` — so the agent writes the code, tries to `git commit`, gets stopped,
+and has nowhere to send the prompt because the run is detached with nobody attached to it.
+It retries. Thirty-three turns of that, ending with a full worktree, no commits, and a bill.
+
+The mistake was reading permission modes as a security boundary. They are an *interaction*
+design — which actions are worth interrupting a human for — and on a run with no human they
+degrade into "which actions fail silently". A mode that gates Bash on a headless run does
+not contain the agent, it just makes it useless.
+
+So the execute phase runs with permissions bypassed, and the containment is somewhere else
+entirely: an unprivileged service user with no sudo, working in a throwaway worktree whose
+contents are recoverable from GitHub. The bound on an agent is the account it runs as.
+
+The plan phase is the exception that proves the rule — it gets a real read-only plan mode,
+because there read-only is the *product* rather than a restriction on it, so enforcement
+and intent point the same way.
+
+## A new session does not escape the cgroup
+
+`start_new_session=True` is the usual advice for "spawn something that outlives me", and
+it does exactly one thing: puts the child in a new session and process group, so a
+terminal hangup or a `kill -- -PID` at the group no longer reaches it.
+
+systemd does not kill by process group. `KillMode=control-group`, the default, kills every
+remaining process in the unit's control group when the unit stops, and a forked child is
+in that cgroup no matter how many sessions it has started. So a detached agent run is
+still killed by a deploy restarting the app it was spawned from.
+
+Escaping means leaving the cgroup — a transient scope via `systemd-run`, or a separate
+unit — both of which need privileges an unprivileged service does not have. Worth knowing
+before designing around "detached" as though it meant "survives".
+
+The consolation is that the durable event log makes the difference smaller than it looks:
+a killed run is recoverable reading rather than lost work.
+
+## Run the suite the way CI runs it
+
+`python -m pytest` and `uv run pytest` are not the same command. `-m` puts the working
+directory on `sys.path`; the console script does not. So a test importing something from
+`scripts/` passes locally and fails in CI with `ModuleNotFoundError`, and the diff that
+broke it looks innocent.
+
+`pythonpath = ["."]` in `[tool.pytest.ini_options]` settles it for both, which is the
+actual fix — a suite whose result depends on how it was started is worse than one that is
+simply wrong, because the disagreement is invisible until something else fails.
+
+The habit that would have caught it: verify with the invocation the workflow uses, not the
+one that is convenient to type.
+
+## git forks background work you did not ask for
+
+`git commit` and `git push` can spawn `gc --auto`, which detaches and keeps writing into
+`.git` after the command you ran has already exited. For a repository you keep, that is
+the point. For one a script deletes a moment later, it is a race: `shutil.rmtree` scans a
+directory, the detached process creates a file in it, and the `rmdir` fails with ENOTEMPTY
+on a directory that was empty when it was looked at.
+
+It shows up as an intermittent failure that never reproduces locally, because whether the
+collision lands depends on timing and on directory-entry order.
+
+Two fixes, and both are worth having. At the source, `gc.auto=0` and
+`maintenance.auto=false` on any throwaway repository, so nothing detaches. At the sink, a
+delete that retries and then gives up *without failing the test* — because deleting
+scaffolding is not what the test is testing, and a suite that goes red over its own
+temporary files is one people stop believing.
+
 ## Migrations against empty tables prove almost nothing
 
 A migration that passes on an empty database routinely fails on real rows — a `NOT NULL`

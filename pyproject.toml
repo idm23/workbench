@@ -6,6 +6,12 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.14",
+    # The first agent backend. Imported only by workbench.agents.claude, so
+    # this is the one dependency the rest of the app must never reach for.
+    # The wheel bundles its own CLI binary, which it prefers over anything on
+    # PATH — verified under `env -i PATH=/usr/bin:/bin` — so the server still
+    # needs no Node.
+    "claude-agent-sdk>=0.2.144",
     "fastapi>=0.115",
     "httpx>=0.28",
     "jinja2>=3.1",
@@ -43,6 +49,12 @@ exclude = ["**/tests"]
 # sit next to. test_deploy and test_units cover behaviour that spans install,
 # config, and the unit templates together.
 testpaths = ["src/workbench", "tests"]
+# The repository root, so `scripts/` is importable and the suite behaves the
+# same however it is invoked. Without this, `python -m pytest` passes and
+# `uv run pytest` fails: only the former puts the working directory on
+# sys.path, and CI uses the latter. A suite whose result depends on how it was
+# started is worse than one that is simply wrong.
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py314"
