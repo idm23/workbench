@@ -156,6 +156,23 @@ before designing around "detached" as though it meant "survives".
 The consolation is that the durable event log makes the difference smaller than it looks:
 a killed run is recoverable reading rather than lost work.
 
+## git forks background work you did not ask for
+
+`git commit` and `git push` can spawn `gc --auto`, which detaches and keeps writing into
+`.git` after the command you ran has already exited. For a repository you keep, that is
+the point. For one a script deletes a moment later, it is a race: `shutil.rmtree` scans a
+directory, the detached process creates a file in it, and the `rmdir` fails with ENOTEMPTY
+on a directory that was empty when it was looked at.
+
+It shows up as an intermittent failure that never reproduces locally, because whether the
+collision lands depends on timing and on directory-entry order.
+
+Two fixes, and both are worth having. At the source, `gc.auto=0` and
+`maintenance.auto=false` on any throwaway repository, so nothing detaches. At the sink, a
+delete that retries and then gives up *without failing the test* — because deleting
+scaffolding is not what the test is testing, and a suite that goes red over its own
+temporary files is one people stop believing.
+
 ## Migrations against empty tables prove almost nothing
 
 A migration that passes on an empty database routinely fails on real rows — a `NOT NULL`
