@@ -10,6 +10,7 @@ These run wherever pytest does; the `systemd-analyze` check skips itself when
 that tool is absent.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -68,6 +69,49 @@ def test_no_placeholder_survives(rendered, unit):
     leftover = [line for line in rendered[unit].splitlines() if "__" in line]
 
     assert leftover == []
+
+
+def test_no_placeholder_survives_in_the_polkit_rule():
+    """The rule is rendered by the same function but is not one of `units()`,
+    so it sat outside the check above — which is a bad place for it. An
+    unsubstituted `__USER__` there is not a broken path, it is a rule granting
+    nothing to nobody, and every run failing at start with an authorisation
+    error that names neither the unit nor the account."""
+    leftover = [
+        line for line in render_unit("workbench-run.rules.template").splitlines() if "__" in line
+    ]
+
+    assert leftover == []
+
+
+@pytest.mark.parametrize("as_instance", ["", "staging"])
+def test_the_polkit_rule_grants_the_account_the_unit_runs_as(monkeypatch, as_instance):
+    """The agreement three files have to reach without ever seeing each other.
+
+    systemd reads `User=` from the unit; polkit matches `subject.user` against
+    the uid that asks. If those two names diverge the service starts perfectly
+    and every run dies at the moment it is started, with an error that mentions
+    neither file. Nothing else in the suite would catch it.
+    """
+    monkeypatch.setenv("WORKBENCH_INSTANCE", as_instance)
+
+    rule = render_unit("workbench-run.rules.template")
+    service = render_unit("workbench-run@.service.template")
+
+    granted = re.search(r'subject\.user !== "([^"]+)"', rule)
+    runs_as = re.search(r"^User=(.+)$", service, re.MULTILINE)
+
+    assert granted is not None and runs_as is not None
+    assert granted.group(1) == runs_as.group(1)
+
+
+def test_the_polkit_rule_grants_only_this_instances_units(staging):
+    """Production and staging grant different unit patterns. A rule that
+    matched the other instance's would let staging start production's runs."""
+    monkeypatch_free_rule = render_unit("workbench-run.rules.template")
+
+    assert "workbench-staging-run" in monkeypatch_free_rule
+    assert "workbench-run@" not in monkeypatch_free_rule
 
 
 def test_the_app_runs_unprivileged(rendered):

@@ -24,7 +24,6 @@ here are ordinary conditions — a dirty checkout, a diverged branch, no network
 """
 
 import logging
-import os
 import pwd
 import shutil
 import sqlite3
@@ -32,6 +31,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+# Imported as a module, not by name. These are reached through the module
+# attribute at call time so that a test patching `workbench.install.x` is
+# actually patching what this calls — with names bound at import, it would not
+# be, and the first thing to notice would be a unit test shelling out to sudo.
+from workbench import install
 from workbench.config import (
     database_path,
     deploy_branch,
@@ -92,15 +96,14 @@ def repo_owner() -> pwd.struct_passwd:
 
 
 def _owner_environment() -> dict[str, str]:
-    """The environment a command should see when run as the checkout's owner.
+    """The environment a command sees when run as the checkout's owner.
 
-    Dropping privileges with setuid does not change the environment the way a
-    login would, so HOME would still point at root's. That matters: uv resolves
-    its cache from HOME, and git looks there for user configuration. Setting it
-    explicitly is the part `runuser` used to do for us.
+    The installer owns the implementation, because it needs exactly the same
+    thing and two copies of "become the service account" is two places for it
+    to drift — one of which would then be creating root-owned files in a
+    directory the service has to write.
     """
-    owner = repo_owner()
-    return {**os.environ, "HOME": owner.pw_dir, "USER": owner.pw_name, "LOGNAME": owner.pw_name}
+    return install.owner_environment()
 
 
 def _run(argv: list[str], *, as_owner: bool, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -112,28 +115,13 @@ def _run(argv: list[str], *, as_owner: bool, timeout: int) -> subprocess.Complet
     beside the database — and the service, which runs unprivileged, could then
     no longer write its own data directory.
 
-    Uses subprocess's own user= rather than shelling out to `runuser`. Both
-    end up calling setuid, but runuser opens a PAM session to get there, and
-    PAM logs every one of them — three lines per command, thirty per deploy,
-    into the journal that is the only place a bad deploy explains itself. This
-    also spawns one process instead of two.
+    The drop itself lives in `install.service_run`, because the installer needs
+    exactly the same thing and two copies of "become the service account" is
+    two places for it to drift — one of which would then be creating root-owned
+    files in a directory the service has to write.
     """
-    if as_owner and os.geteuid() == 0:
-        owner = repo_owner()
-        return subprocess.run(
-            argv,
-            cwd=repo_root(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            user=owner.pw_uid,
-            group=owner.pw_gid,
-            # Supplementary groups are not inherited across setuid, and leaving
-            # root's would hand the child more access than the owner has.
-            extra_groups=[],
-            env=_owner_environment(),
-        )
+    if as_owner:
+        return install.service_run(argv, timeout=timeout)
 
     return subprocess.run(
         argv,
@@ -306,7 +294,9 @@ def rebuild_and_restart() -> DeployFailed | None:
     """
     uv = _uv()
     if uv is None:
-        return DeployFailed("syncing dependencies", "uv is not installed for the service user")
+        return DeployFailed(
+            "syncing dependencies", "uv is not installed for the account that owns the checkout"
+        )
     synced = _run(
         [uv, "sync", "--frozen", "--no-dev"],
         as_owner=True,
@@ -366,9 +356,7 @@ def rebuild_and_restart() -> DeployFailed | None:
     # code which dies on startup reports success into the journal while
     # Restart=always thrashes, and the first sign of trouble is the app being
     # unreachable from a phone.
-    from workbench.install import health_check
-
-    unhealthy = health_check()
+    unhealthy = install.health_check()
     if unhealthy is not None:
         return DeployFailed("waiting for the service to come back", unhealthy)
 
@@ -473,20 +461,18 @@ def refresh_units() -> DeployFailed | None:
     with access denied, and the fix would have been a manual `install.sh` — the
     kind of remembered step this whole file exists to abolish.
 
-    Safe to run as root because `install.service_user()` reads the checkout's
-    owner rather than the current user.
+    Safe to run as root, and now load-bearing rather than incidental:
+    `install.service_user()` reads the *checkout's owner*, which after the move
+    to /srv is the dedicated service account. Reading the effective uid here
+    would re-render every unit with `User=root` on the first automatic deploy
+    and hand an agent a root shell.
     """
-    # Imported here rather than at module scope: install.py pulls in httpx and
-    # alembic, and this function is skipped on the overwhelmingly common
-    # already-up-to-date path.
-    from workbench.install import install_polkit_rule, install_units, systemd_is_running
-
-    if not systemd_is_running():
+    if not install.systemd_is_running():
         return None
 
     try:
-        install_units()
-        install_polkit_rule()
+        install.install_units()
+        install.install_polkit_rule()
     except Exception as error:
         # install.py signals failure by raising, so this is the boundary where
         # that becomes a result again. Broad on purpose: a deploy must report

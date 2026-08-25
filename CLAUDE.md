@@ -17,9 +17,12 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > event to `run_events` as it happens. Runs start and stop from the task tree, each as its
 > own systemd unit, and a run's page streams its output live and replays anything a
 > sleeping phone missed. Every page shows how much of each rate-limit window is left.
+> The installer now creates a dedicated `workbench` account, relocates the deployment to
+> `/srv`, and finishes by saying what a person still has to do by hand —
+> `python -m workbench.doctor` answers the same questions any time afterwards.
 > **No agent has yet run on the real server**: the polkit grant that lets the app start a
-> unit is proven against a stub and not against the machine. See `README.md` for what is
-> actually live.
+> unit is proven against a stub and not against the machine, and nobody has signed the
+> agent in. See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
@@ -45,14 +48,29 @@ The claim is kept honest by `scripts/test_fresh_install.py`, which provisions a 
 Ubuntu container, runs the install, drives the app over HTTP, and re-runs the install to
 prove it repeats. A setup step that creeps outside `install.sh` makes that test fail.
 
-Two things are deliberately *not* automated, and are decisions rather than oversights:
+Two things are deliberately *not* automated, and are decisions rather than oversights.
+Both need a browser login against an account no script can know about:
 
-- **Joining a Tailscale network.** It needs a browser login against an account the
-  script cannot know about. `install.sh` finishes with a working service on localhost
-  and prints the two commands to expose it.
-- **A dedicated `workbench` service user.** The service currently runs as whoever ran
-  the installer. An unprivileged account only starts bounding anything once agents are
-  executing model-authored shell commands, so it belongs to that slice.
+- **Joining a Tailscale network.**
+- **Signing the agent in.** Under a subscription the credential is an OAuth token minted
+  by an interactive login, as the service account.
+
+The rule they bend is narrower than it looks: a step may be un-automatable, but it may
+not be *undiscoverable*. So `install.sh` finishes by running `python -m workbench.doctor`
+and printing each outstanding step with the exact command. `scripts/test_fresh_install.py`
+asserts the login step is named in that output, which is what keeps the promise from
+quietly decaying — the failure it prevents is a machine that installs and deploys
+perfectly and then fails every run at authentication with nothing anywhere saying why.
+Which is exactly what happened here first time.
+
+**The dedicated `workbench` account is no longer deferred.** It is created by the
+installer, and the deployment is relocated to `/srv/<service name>` and chowned to it.
+That location is forced rather than chosen: Ubuntu creates home directories mode 0750,
+so a checkout under a person's home is one a separate account cannot even traverse.
+Keeping the checkout *owned by* the service account is what lets
+`install._service_passwd()` and `deploy.repo_owner()` stay as they are — both already
+read the checkout's owner, so nothing needs a `getpwnam` in the render path and no
+machine lacking the account goes red.
 
 ## Decisions already made
 
@@ -193,9 +211,16 @@ in `docs/server-conventions.md`.
   account bounds the blast radius to files recoverable from GitHub.
 - Secrets in `/etc/workbench/env` (mode 0600, owned by the service user), loaded via
   `EnvironmentFile`. Alternatively authenticate the bundled CLI once as that user to
-  bill against a Claude subscription instead of the API. Either way the credential is
-  readable by model-authored shell commands running as that user — inherent, but worth
-  stating.
+  bill against a Claude subscription instead of the API — which is what this install
+  does: `sudo -iu workbench <venv>/bin/python -m workbench.doctor --login`. Either way
+  the credential is readable by model-authored shell commands running as that user —
+  inherent, but worth stating.
+- **The credential is two paths, not one.** `~/.claude` is a directory; `~/.claude.json`
+  is a separate file beside it. An allowlist naming only the first leaves the second
+  read-only under `ProtectSystem=strict`, and the CLI writes both. That failure arrives
+  late — reads work, so runs succeed until the OAuth token is refreshed and cannot be
+  saved. Both units grant both paths, and the run unit also grants `~/.ssh`, which `ssh`
+  writes on first connection.
 - The service user needs its own SSH deploy key and `user.name`/`user.email`, or
   unattended pushes and agent commits will fail. Prefer per-repo deploy keys or a
   fine-grained PAT over an account-wide key, which would grant push to every repo.
@@ -284,12 +309,40 @@ that predates this. Worth noting because it is the one place the reproducibility
 bends: a *fresh* clone gets the timer from the first install, and only an existing
 deployment needs the manual step.
 
-**The deployer runs as root, the app does not.** It needs to restart the unit, so it drops
-to the checkout's owner with `runuser` for every command touching git, the virtualenv, or
-the database. Doing that work as root would leave root-owned files that the unprivileged
-service could no longer write. For the same reason `install.service_user()` reads the
-*checkout's owner* rather than the current euid — reading the euid would silently
-re-render the unit with `User=root` on the first automatic deploy.
+**The deployer runs as root, the app does not, and the installer now works the same way.**
+Both need root — one to restart the unit, the other to create an account and write to
+/etc — and both drop to the checkout's owner for every command touching git, the
+virtualenv, the database, or that account's home. Doing any of it as root leaves
+root-owned files the unprivileged service can no longer write, which surfaces later as a
+service that starts and then cannot save anything.
+
+That drop lives in `install.service_run` and `deploy._run` delegates to it. One copy on
+purpose: two spellings of "become the service account" is two places for it to drift, and
+the drifting one would be creating root-owned files in a directory the service must
+write. It uses `subprocess`'s own `user=` rather than `runuser`, because runuser opens a
+PAM session and PAM logs every one — three lines per command into the journal that is the
+only place a bad deploy explains itself.
+
+For the same reason `install.service_user()` reads the *checkout's owner* rather than the
+current euid — reading the euid would silently re-render every unit with `User=root` on
+the first automatic deploy, handing an agent a root shell. Now that the checkout is owned
+by the service account, that indirection is load-bearing rather than incidental.
+
+**`install.py` imports nothing but the standard library**, and that is a constraint rather
+than an aesthetic. It runs *before* a virtualenv exists, because one of the first things
+it decides is whether this checkout is where the deployment belongs — and building a few
+hundred megabytes of environment in a directory it is about to abandon is the one cost
+worth restructuring to avoid. `install.sh` therefore starts it with `uv run --no-project`
+and a `PYTHONPATH`, and the environment is built afterwards, at the deployment, by the
+account that will own it.
+
+**Relocation copies rather than moves.** The checkout someone cloned is left exactly as it
+was, so the operation needs no confirmation, breaks nothing if it fails, and leaves the
+old database as a free point-in-time backup; rolling back is re-running the old
+installer with `WORKBENCH_DEPLOYMENT_ROOT` pointing at itself. A deployment already there
+and already owned by the account is handed off to rather than copied over, which is what
+makes re-running the *abandoned* checkout's `install.sh` harmless — and somebody will,
+because that is the directory they remember.
 
 ### Known trap: self-deployment
 

@@ -20,9 +20,20 @@ cd workbench
 ./install.sh
 ```
 
-That is the whole install. It fetches `uv` if you do not have it, creates a virtualenv with the
-exact locked dependency versions, applies migrations, installs a systemd service, and waits until
-the app answers on <http://127.0.0.1:8787>. It asks for `sudo` once, for the service.
+That is the whole install. It fetches `uv` if you do not have it, creates a dedicated
+unprivileged `workbench` account, moves the deployment to `/srv/workbench` and gives it to that
+account, builds a virtualenv with the exact locked dependency versions, applies migrations,
+installs a systemd service, and waits until the app answers on <http://127.0.0.1:8787>. It asks
+for `sudo` once, up front.
+
+**Where it ends up is not where you cloned it.** The service runs as its own account, and Ubuntu
+creates home directories mode 0750 — so a checkout under your home is one that account cannot even
+traverse. The installer therefore *copies* the checkout to `/srv/workbench`, leaving yours exactly
+as it was, and continues from there. Re-running `./install.sh` from either directory afterwards is
+safe: the one you cloned hands off to the deployment rather than copying over it.
+
+It finishes by printing whatever still needs a person — signing the agent in, adding a deploy key,
+publishing over Tailscale. `python -m workbench.doctor` re-checks all of it at any time.
 
 `install.sh` itself is a short shell bootstrap whose only job is getting `uv` onto the machine —
 the actual work lives in `src/workbench/install.py`, which imports `workbench.config` so the port
@@ -47,6 +58,7 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `src/workbench/tasks/` | `tree.py` (the shape a page renders) and `store.py` (every write). |
 | `src/workbench/api.py` | The JSON routes, over the same operations as the forms. |
 | `src/workbench/deploy.py` | Pulls, migrates, and restarts. Run on a timer; see below. |
+| `src/workbench/doctor.py` | What still needs a person, and whether they have done it. |
 | `src/workbench/config.py` | Everything read from the environment, with repo-relative defaults. |
 | `alembic/` | Migrations. Applied by the installer and by every deploy. |
 | `scripts/` | The end-to-end tests and the staging acceptance run. |

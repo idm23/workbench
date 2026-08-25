@@ -78,6 +78,9 @@ def checkout(tmp_path, monkeypatch):
     (work / "pyproject.toml").write_text('[project]\nname = "workbench"\n')
     monkeypatch.setattr("workbench.deploy.repo_root", lambda: work)
     monkeypatch.setattr("workbench.config.repo_root", lambda: work)
+    # install too, because the deployer's privilege drop lives there now — one
+    # copy shared with the installer rather than two that can drift.
+    monkeypatch.setattr("workbench.install.repo_root", lambda: work)
     return work, origin
 
 
