@@ -118,6 +118,11 @@ def worktree_tarball() -> bytes:
     return buffer.getvalue()
 
 
+#: Where the install's own output is kept inside the container, so it can be
+#: both watched live and asserted on afterwards.
+INSTALL_LOG = "/tmp/install.log"
+
+
 def run_test(image: str, from_github: bool, container: str) -> None:
     step(f"Starting a clean {image} container")
     docker_quiet("run", "-d", "--name", container, image, "sleep", "infinity")
@@ -145,7 +150,29 @@ def run_test(image: str, from_github: bool, container: str) -> None:
         )
 
     step("Running install.sh")
-    docker("exec", container, "bash", "-c", f"cd {TARGET} && ./install.sh")
+    # Through `tee` rather than captured, because install.sh's progress is the
+    # most useful thing to watch when this fails — and `pipefail` because
+    # otherwise the pipeline reports tee's exit code and a failed install
+    # sails through as a pass.
+    docker(
+        "exec",
+        container,
+        "bash",
+        "-c",
+        f"set -o pipefail; cd {TARGET} && ./install.sh 2>&1 | tee {INSTALL_LOG}",
+    )
+    install_output = docker_quiet("exec", container, "cat", INSTALL_LOG)
+
+    step("Confirming the install named the steps it cannot do for you")
+    # The reproducibility rule does not promise every step is automatable — it
+    # promises none is undiscoverable. Minting the agent's credential needs a
+    # browser login against an account no script can know, so the bar it has to
+    # clear is that the installer says so, out loud, with the command. This
+    # assertion is the whole of that promise: without it the step silently
+    # slips back out of the output and is rediscovered by a failed run, which
+    # is exactly how it was found the first time.
+    if "auth login" not in install_output:
+        raise TestFailureError("the install did not tell anyone how to authenticate the agent")
 
     step("Starting the app (no systemd in a container)")
     docker(

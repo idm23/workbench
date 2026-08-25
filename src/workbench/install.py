@@ -13,6 +13,7 @@ import os
 import pwd
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -397,6 +398,42 @@ def wait_for_health() -> None:
     info("healthy")
 
 
+def report_outstanding() -> bool:
+    """Say what a person still has to do by hand, and whether anything failed.
+
+    The reproducibility rule does not say every step can be automated — it says
+    no step may be undiscoverable. Two here genuinely cannot be: joining a
+    tailnet and minting the agent's credential both need a browser login
+    against an account no installer can know about.
+
+    So this is the bargain's other half. An install that finishes with work
+    outstanding says so, in the terminal, with the exact commands — rather than
+    leaving it to be discovered days later by a run that fails at
+    authentication with nothing anywhere explaining why. Which is what
+    happened, and is why this function exists.
+    """
+    # Imported here rather than at module scope: the doctor reaches a backend,
+    # and the installer must stay importable on a machine where nothing is
+    # installed yet.
+    from workbench.doctor import CheckState, run_checks
+
+    checks = run_checks()
+    outstanding = [check for check in checks if check.state is not CheckState.OK]
+    if not outstanding:
+        info("nothing left to do by hand")
+        return True
+
+    logger.info("\n%s", paint(BOLD, "==> What is left to do by hand"))
+    for check in outstanding:
+        marker = paint(RED, "FAIL") if check.state is CheckState.FAIL else paint(YELLOW, "todo")
+        logger.info("    %s  %s", marker, check.title)
+        logger.info("          %s", check.detail)
+        if check.fix:
+            logger.info("          %s", paint(BOLD, check.fix))
+
+    return not any(check.failed for check in checks)
+
+
 def report_success() -> None:
     logger.info("\n%s", paint(BOLD, f"Workbench is running at http://{host()}:{port()}"))
     logger.info(
@@ -417,6 +454,8 @@ it needs a browser login to your own tailnet):
     tailscale serve --bg {port()}
 
 Useful commands:
+
+    {sys.executable} -m workbench.doctor   # re-check the steps below
 
     systemctl status {service_name()}
     journalctl -u {service_name()} -f
@@ -454,6 +493,14 @@ def main() -> int:
             info("Skipping the service. Start Workbench manually with:")
             info(f"    .venv/bin/uvicorn workbench.app:app --host {host()} --port {port()}")
             logger.info("\n%s\n", paint(BOLD, "Install complete (without the service)."))
+
+            # Still says what a person has to do by hand. Whether systemd is
+            # present has no bearing on whether anyone has signed the agent in,
+            # and an install that stays silent about it on one path is one that
+            # can quietly stop saying it at all — which is what this early
+            # return did until the container harness caught it.
+            step("Checking what still needs a person")
+            report_outstanding()
             return 0
 
         install_service()
@@ -461,6 +508,9 @@ def main() -> int:
         step("Waiting for the service to answer")
         wait_for_health()
         report_success()
+
+        step("Checking what still needs a person")
+        report_outstanding()
         return 0
 
     except InstallError as error:
