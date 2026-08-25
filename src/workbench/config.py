@@ -7,6 +7,7 @@ that installing on a new machine needs no configuration step.
 import logging
 import os
 import shutil
+import socket
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -191,6 +192,25 @@ def agent_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
         for name in API_CREDENTIAL_VARS:
             env.pop(name, None)
     return env
+
+
+def agent_git_identity() -> tuple[str, str]:
+    """The name and email commits by this instance are authored with.
+
+    The service account is not a person and has no identity of its own, but git
+    refuses to commit without one — and the failure is not a prompt, because
+    nothing here is interactive. It is an agent run dying several minutes in,
+    having done the work.
+
+    The default email is deliberately non-routable rather than a real address:
+    it identifies the machine that made the commit, which is the useful thing,
+    without inventing a mailbox. Override either half when commits should be
+    attributed to a GitHub account instead.
+    """
+    name = os.environ.get("WORKBENCH_GIT_NAME", "").strip() or "Workbench"
+    default_email = f"workbench@{socket.gethostname()}"
+    email = os.environ.get("WORKBENCH_GIT_EMAIL", "").strip() or default_email
+    return name, email
 
 
 def deploy_branch() -> str:

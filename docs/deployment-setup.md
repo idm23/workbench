@@ -170,6 +170,51 @@ staging.
 
 ---
 
+## Step 7 — Finish what the installer could not
+
+`./install.sh` ends by printing this list, and `python -m workbench.doctor` prints it again
+any time. Both are run **as the service account**, because that is whose credential and whose
+key these are — `sudo -u` keeps your own `$HOME` and would answer about the wrong account, so
+use `sudo -iu`.
+
+Two steps are here rather than in the installer because both need a browser login against an
+account no script can know about. Everything else it does for you.
+
+**Sign the agent in.** Under a subscription the credential is an OAuth token in the service
+account's home, and which account pays is decided by which user the unit runs as — so this
+has to happen as that account and nowhere else.
+
+```sh
+sudo -iu workbench /srv/workbench/.venv/bin/python -m workbench.doctor --login
+```
+
+Choose the Claude subscription, not Console. `--login` passes `--claudeai` for exactly this
+reason: Console authenticates perfectly well and bills the metered API, and nothing visible
+in Workbench would change — the first sign would be an invoice.
+
+**Add the deploy key.** The installer generated a keypair; it cannot authorise one. The
+doctor prints the public half, along with the URL to paste it into:
+
+Settings → Deploy keys → **Add deploy key** → paste → tick **Allow write access**.
+
+A per-repo deploy key rather than an account-wide key, because an account key would grant
+push to every repository this user can reach — and the account holding it runs
+model-authored shell commands.
+
+Then re-check until it is clean:
+
+```sh
+sudo -iu workbench /srv/workbench/.venv/bin/python -m workbench.doctor
+```
+
+It exits 0 when nothing is outstanding. Warnings and unknowns — no tailnet on this machine,
+no network right now — do not set the exit code; only failures do.
+
+Repeat both for staging, as `workbench-staging`. Two accounts means two logins, which is the
+price of a staging agent that cannot reach production's checkout or database.
+
+---
+
 ## Two things worth knowing in advance
 
 **The status is posted by your PAT, so GitHub attributes it to your user account rather than

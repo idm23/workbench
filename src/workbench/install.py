@@ -38,6 +38,7 @@ from pathlib import Path
 
 from workbench.config import (
     RUN_TIMEOUT_SECONDS,
+    agent_git_identity,
     agent_home,
     deploy_branch,
     deploy_unit_name,
@@ -672,6 +673,81 @@ def ensure_agent_state_dir(account: pwd.struct_passwd) -> None:
     info(f"agent state directory ready at {target}")
 
 
+def ensure_agent_identity(account: pwd.struct_passwd) -> None:
+    """Give the account what it needs to commit and to push.
+
+    Both are unattended: an agent commits its own work, and the deployer
+    pushes. Neither can answer a prompt, so an unset identity or a missing key
+    is not a question — it is a run that dies several minutes in, having
+    already done the work.
+
+    Only the automatable half happens here. A keypair can be generated; a
+    keypair cannot be *authorised*, because that means pasting the public half
+    into a GitHub repository nobody here has credentials for. So this is the
+    same bargain as the agent's login: do what can be done, and let the doctor
+    name what is left, with the key to paste.
+
+    Nothing already set is overwritten. Someone who has configured this
+    account by hand has made a decision, and re-running the installer must not
+    quietly undo it.
+    """
+    name, email = agent_git_identity()
+    for setting, value in (("user.name", name), ("user.email", email)):
+        existing = service_run(["git", "config", "--global", "--get", setting])
+        if existing.returncode == 0 and existing.stdout.strip():
+            continue
+        service_run_or_fail(
+            ["git", "config", "--global", setting, value],
+            f"setting git {setting}",
+        )
+        info(f"git {setting} = {value}")
+
+    ssh_dir = Path(account.pw_dir) / ".ssh"
+    run(
+        ["install", "-d", "-o", account.pw_name, "-g", account.pw_name, "-m", "0700", str(ssh_dir)],
+        privileged=True,
+    )
+
+    key = ssh_dir / "id_ed25519"
+    if not key.exists():
+        service_run_or_fail(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", email, "-f", str(key)],
+            "generating an SSH key",
+        )
+        info(f"generated {key}")
+
+    _trust_github(ssh_dir)
+
+
+def _trust_github(ssh_dir: Path) -> None:
+    """Record GitHub's host key, so the first push is not the first prompt.
+
+    ssh writes `known_hosts` itself on first connection — but the run unit is
+    non-interactive and, until recently, could not write its own home under
+    ProtectSystem=strict. Doing it here means the first agent push fails for
+    reasons to do with the key, if it fails at all, rather than for reasons to
+    do with a host it has never met.
+
+    A warning rather than an error when it does not work: this needs the
+    network, and an install on a machine that cannot currently reach GitHub is
+    not a broken install.
+    """
+    known_hosts = ssh_dir / "known_hosts"
+    if known_hosts.is_file() and "github.com" in known_hosts.read_text():
+        return
+
+    scanned = service_run(["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "github.com"], timeout=30)
+    if scanned.returncode != 0 or not scanned.stdout.strip():
+        warn("could not reach github.com to record its host key; the first push may fail")
+        return
+
+    with known_hosts.open("a") as handle:
+        handle.write(scanned.stdout)
+    shutil.chown(known_hosts, user=_service_passwd().pw_name, group=_service_passwd().pw_name)
+    known_hosts.chmod(0o644)
+    info(f"recorded github.com in {known_hosts}")
+
+
 def systemd_is_running() -> bool:
     return shutil.which("systemctl") is not None and Path("/run/systemd/system").is_dir()
 
@@ -946,6 +1022,9 @@ def main() -> int:
 
         step("Preparing the agent's state directory")
         ensure_agent_state_dir(account)
+
+        step("Preparing the account's git identity and SSH key")
+        ensure_agent_identity(account)
 
         step("Preparing the database")
         apply_migrations()

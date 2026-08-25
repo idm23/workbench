@@ -345,7 +345,9 @@ def check_git_identity() -> Check:
             title=title,
             state=CheckState.FAIL,
             detail=f"Unset for {running_account().pw_name!r}: {', '.join(missing)}.",
-            fix='git config --global user.name "Workbench"',
+            # The installer sets these, so an account missing them has either
+            # never been through one or had them cleared by hand.
+            fix="sudo ./install.sh",
         )
 
     return Check(key="git-identity", title=title, state=CheckState.OK, detail="Set.")
@@ -372,6 +374,8 @@ def check_deploy_key() -> Check:
             fix=f'ssh-keygen -t ed25519 -N "" -f {key}',
         )
 
+    public_half = _public_key(key)
+
     probe = _run(
         [
             "ssh",
@@ -394,13 +398,48 @@ def check_deploy_key() -> Check:
     if "successfully authenticated" in answer or answer.startswith("Hi "):
         return Check(key="deploy-key", title=title, state=CheckState.OK, detail=first_line)
 
+    # The public key itself, not a command that prints it. The person reading
+    # this is about to paste it into a browser, and one of the two machines
+    # involved is reached over ssh — so making them run something else first,
+    # in another window, is a step for no reason.
     return Check(
         key="deploy-key",
         title=title,
         state=CheckState.FAIL,
-        detail=f"GitHub did not recognise the key: {first_line}",
-        fix=f"cat {key}.pub   # add as a deploy key with write access",
+        detail=(
+            f"GitHub did not recognise the key: {first_line}\n"
+            f"          Add this as a deploy key with write access, at\n"
+            f"          https://github.com/{_repository_slug()}/settings/keys/new\n"
+            f"          {public_half}"
+        ),
     )
+
+
+def _public_key(private: Path) -> str:
+    """The public half, as a single line ready to paste."""
+    public = (
+        private.with_suffix(private.suffix + ".pub") if private.suffix else Path(f"{private}.pub")
+    )
+    try:
+        return public.read_text().strip()
+    except OSError:
+        return f"(could not read {public})"
+
+
+def _repository_slug() -> str:
+    """owner/repo for this checkout, for the link in the message above.
+
+    Best effort: it only builds a URL. A wrong or missing remote costs a
+    slightly less helpful message, never a wrong verdict.
+    """
+    probe = _run(["git", "-C", str(repo_root()), "remote", "get-url", "origin"])
+    if probe is None or probe.returncode != 0:
+        return "<owner>/<repo>"
+
+    remote = probe.stdout.strip().removesuffix(".git")
+    if ":" in remote and "//" not in remote:  # git@github.com:owner/repo
+        return remote.rsplit(":", 1)[-1]
+    return "/".join(remote.rsplit("/", 2)[-2:])
 
 
 def check_snapshot_source() -> Check:
@@ -590,16 +629,18 @@ def report(checks: list[Check]) -> None:
         logger.info("    %s  %s", paint(colour, label), check.title)
         logger.info("          %s", check.detail)
 
-    outstanding = [
-        check for check in checks if check.state in (CheckState.FAIL, CheckState.WARN) and check.fix
-    ]
+    outstanding = [check for check in checks if check.state in (CheckState.FAIL, CheckState.WARN)]
     if not outstanding:
         return
 
     logger.info("\n%s", paint(BOLD, "==> What is left to do"))
     for check in outstanding:
         logger.info("    %s", check.title)
-        logger.info("        %s", paint(BOLD, check.fix or ""))
+        # Not every outstanding thing is a single command — a deploy key is a
+        # public half to paste into a browser, which lives in the detail. This
+        # deliberately does not filter on `fix`: a FAIL silently missing from
+        # the list of things to do is worse than a slightly longer list.
+        logger.info("        %s", paint(BOLD, check.fix) if check.fix else check.detail)
 
 
 def as_payload(checks: list[Check]) -> dict[str, object]:

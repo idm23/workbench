@@ -148,10 +148,17 @@ def test_github_authenticating_is_a_pass_despite_exiting_one(monkeypatch, tmp_pa
     assert doctor.check_deploy_key().state is CheckState.OK
 
 
-def test_a_rejected_key_fails_and_says_where_to_paste_the_public_half(monkeypatch, tmp_path):
+def test_a_rejected_key_hands_over_the_public_half_to_paste(monkeypatch, tmp_path):
+    """The key itself, not a command that prints it.
+
+    Whoever reads this is about to paste it into a browser, and one of the two
+    machines involved is reached over ssh — so telling them to go and run
+    something else first, in another window, is a step for no reason.
+    """
     key = tmp_path / ".ssh" / "id_ed25519"
     key.parent.mkdir()
     key.touch()
+    key.with_name("id_ed25519.pub").write_text("ssh-ed25519 AAAAC3Nz-the-public-half workbench\n")
     monkeypatch.setattr(doctor, "running_account", lambda: _account(tmp_path))
     monkeypatch.setattr(
         doctor, "_run", answer(stdout="Permission denied (publickey).", returncode=255)
@@ -160,7 +167,35 @@ def test_a_rejected_key_fails_and_says_where_to_paste_the_public_half(monkeypatc
     check = doctor.check_deploy_key()
 
     assert check.state is CheckState.FAIL
-    assert check.fix is not None and str(key) in check.fix
+    assert "ssh-ed25519 AAAAC3Nz-the-public-half" in check.detail
+
+
+def test_the_public_key_survives_a_missing_pub_file(tmp_path):
+    """Reported rather than raised: a doctor that crashes tells you less than
+    one that says it could not tell."""
+    assert "could not read" in doctor._public_key(tmp_path / "id_ed25519")
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [
+        ("git@github.com:idm23/workbench.git", "idm23/workbench"),
+        ("https://github.com/idm23/workbench.git", "idm23/workbench"),
+        ("https://github.com/idm23/workbench", "idm23/workbench"),
+    ],
+)
+def test_the_paste_link_names_this_repository(monkeypatch, remote, expected):
+    """Both remote spellings, because which one a checkout has depends on how
+    it was cloned and this only ever builds a URL."""
+    monkeypatch.setattr(doctor, "_run", answer(stdout=remote))
+
+    assert doctor._repository_slug() == expected
+
+
+def test_no_remote_still_produces_a_usable_message(monkeypatch):
+    monkeypatch.setattr(doctor, "_run", answer(returncode=128))
+
+    assert doctor._repository_slug() == "<owner>/<repo>"
 
 
 def test_a_missing_key_names_the_command_that_makes_one(monkeypatch, tmp_path):
@@ -305,3 +340,21 @@ def _account(home):
             real.pw_shell,
         )
     )
+
+
+def test_a_failure_with_no_single_command_still_reaches_the_to_do_list(caplog):
+    """A deploy key is a public half to paste, not a command to run. Filtering
+    the list on `fix` quietly dropped it — and a FAIL missing from the list of
+    things to do is worse than a slightly longer list."""
+    check = doctor.Check(
+        key="deploy-key",
+        title="The account can push to GitHub",
+        state=CheckState.FAIL,
+        detail="Add this key: ssh-ed25519 AAAA-paste-me",
+    )
+
+    with caplog.at_level("INFO"):
+        doctor.report([check])
+
+    assert "ssh-ed25519 AAAA-paste-me" in caplog.text
+    assert caplog.text.count("The account can push to GitHub") == 2

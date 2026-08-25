@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from workbench.config import (
+    agent_git_identity,
     agent_home,
     deploy_unit_name,
     deployment_root,
@@ -327,6 +328,25 @@ def test_the_agent_home_is_not_inside_the_checkout():
     checkout; these have to survive that."""
     assert agent_home() == Path("/home/workbench")
     assert not agent_home().is_relative_to(deployment_root())
+
+
+def test_the_account_commits_under_a_name_that_identifies_the_machine():
+    """git refuses to commit without an identity, and nothing here can answer a
+    prompt — so the failure is an agent run dying several minutes in, having
+    already done the work. The default email is non-routable on purpose: it
+    says which machine made the commit without inventing a mailbox."""
+    name, email = agent_git_identity()
+
+    assert name == "Workbench"
+    assert email.startswith("workbench@")
+
+
+def test_the_identity_can_be_pointed_at_a_real_account(monkeypatch):
+    """For when commits should be attributed to a GitHub user instead."""
+    monkeypatch.setenv("WORKBENCH_GIT_NAME", "Ian's Robot")
+    monkeypatch.setenv("WORKBENCH_GIT_EMAIL", "robot@example.com")
+
+    assert agent_git_identity() == ("Ian's Robot", "robot@example.com")
 
 
 # --- PrivateTmp ---------------------------------------------------------------

@@ -209,6 +209,26 @@ def run_test(image: str, from_github: bool, container: str) -> None:
         "a virtualenv was built in the checkout the install was about to leave",
     )
 
+    step("Confirming the account can author a commit and has a key to push with")
+    # Both are unattended on the server: an agent commits its own work and the
+    # deployer pushes. Neither can answer a prompt, so a missing identity or
+    # key is not a question — it is a run dying several minutes in, having
+    # already done the work.
+    _expect(
+        container,
+        f"su -s /bin/bash {ACCOUNT} -c 'git config --global --get user.email'",
+        f"{ACCOUNT} has no git identity, so an agent could not commit",
+    )
+    _expect(
+        container,
+        f"test -f /home/{ACCOUNT}/.ssh/id_ed25519.pub",
+        f"{ACCOUNT} has no SSH key, so the deployer could not push",
+    )
+    # The half a person has to paste. The install cannot authorise a key, so
+    # naming it is the whole of the obligation — same bargain as the login.
+    if "ssh-ed25519 " not in install_output:
+        raise TestFailureError("the install did not print the public key to add as a deploy key")
+
     step("Starting the app as the service account (no systemd in a container)")
     docker(
         "exec",
