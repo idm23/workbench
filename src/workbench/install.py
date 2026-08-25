@@ -664,12 +664,36 @@ def ensure_agent_state_dir(account: pwd.struct_passwd) -> None:
     Created *as the account*, which is the part that is easy to get wrong. A
     root-owned `~/.claude` fails late and confusingly — the agent reads the
     credential fine for days, then cannot save the refreshed one.
+
+    Taken from the account's own passwd entry rather than from `agent_home()`,
+    because the two only agree when this install created the account. Pin the
+    deployment somewhere else and the service account is whoever owns it, whose
+    home is wherever their home actually is.
     """
-    target = agent_home() / ".claude"
-    run(
-        ["install", "-d", "-o", account.pw_name, "-g", account.pw_name, "-m", "0700", str(target)],
-        privileged=True,
-    )
+    target = Path(account.pw_dir) / ".claude"
+    if target.is_dir():
+        # Ownership only. `install -d -m` re-applies the mode to a directory
+        # that already exists, and this path is a *person's* home directory
+        # whenever the deployment root is overridden — the rollback in
+        # docs/deployment-setup.md does exactly that. Tightening someone's own
+        # ~/.claude as a side effect of a re-install is not this function's
+        # business.
+        run(["chown", f"{account.pw_name}:{account.pw_name}", str(target)], privileged=True)
+    else:
+        run(
+            [
+                "install",
+                "-d",
+                "-o",
+                account.pw_name,
+                "-g",
+                account.pw_name,
+                "-m",
+                "0700",
+                str(target),
+            ],
+            privileged=True,
+        )
     info(f"agent state directory ready at {target}")
 
 
@@ -1009,13 +1033,22 @@ def main() -> int:
         # captured, so the password prompt is visible rather than a hang.
         become_root()
 
-        step("Preparing the service account")
-        account = ensure_service_account()
-
         if needs_relocation():
+            # The account is created only here, because this is the only place
+            # anything is given to it. A checkout that is already the
+            # deployment has an owner, and that owner *is* the service account
+            # by definition — `service_user()` reads it. Creating a second,
+            # unused account in that case would leave `User=` and the polkit
+            # rule naming one identity while another owned the files.
+            step("Preparing the service account")
+            account = ensure_service_account()
+
             step(f"Moving the deployment to {deployment_root()}")
             hand_off_to(relocate(account))
             return 0  # unreachable: hand_off_to execs
+
+        account = _service_passwd()
+        info(f"deployment at {repo_root()}, owned by '{account.pw_name}'")
 
         step("Building the environment")
         build_environment(ensure_uv_for_owner(account))
