@@ -7,8 +7,17 @@ project, and tasks worked either by hand or by a Claude agent, with a written su
 
 **Status:** early. Users own projects that point at GitHub repositories, and each project has a
 tree of tasks you can add, complete, and delete from a phone. A project can be cloned to the server,
-and each task can be given its own git worktree — but nothing runs in one yet. Agents are next; see
-`CLAUDE.md` for where it is going.
+and each task can be given its own git worktree.
+
+Agents exist: `workbench/agents/` drives Claude behind a vendor-neutral seam, a run is carried out
+by its own systemd unit, and a run's page streams output live and replays whatever a sleeping phone
+missed. The service runs as a dedicated unprivileged account that owns nothing but its own
+deployment under `/srv`.
+
+**No agent has yet completed a run on the real server.** Signing one in needs a browser login that
+no installer can perform, so `./install.sh` finishes by saying so with the exact command, and
+`python -m workbench.doctor` re-checks it — along with the deploy key and the tailnet — any time
+afterwards. See `CLAUDE.md` for where it is going.
 
 ## Quick start
 

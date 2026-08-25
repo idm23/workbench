@@ -170,6 +170,90 @@ staging.
 
 ---
 
+## Moving an existing server to `/srv` and a service account
+
+Only for a machine installed before this landed. A fresh clone gets all of it from the
+first install and can skip to Step 7.
+
+Nothing moves on its own. The deployer only re-renders units — it never relocates — so
+the timer can deliver this code to a server for days and change nothing until somebody
+runs `install.sh` by hand. That is the same "one last manual install" carve-out the timer
+itself needed, and it is deliberate: relocating a live deployment underneath a running
+service is not something a five-minute timer should decide to do at 3am.
+
+**Relocation copies, it never moves.** The old checkout and its database are left exactly
+as they were, which is what makes every step below reversible and why there is no backup
+step you must not skip. Take one anyway at step 2 — it costs a second.
+
+```sh
+# 1. Look before touching anything. A dirty checkout or an in-flight deploy is
+#    a reason to stop, not to continue carefully.
+cd ~/workbench && git status --porcelain && git rev-parse --short HEAD
+systemctl is-active workbench workbench-staging
+systemctl list-timers 'workbench*'
+
+# 2. Stop both timers, and DISABLE them — so a reboot part-way through cannot
+#    restart one into a half-moved install.
+sudo systemctl disable --now workbench-deploy.timer
+sudo systemctl disable --now workbench-staging-deploy.timer
+
+# 3. The only irreplaceable thing on the box. Through the backup API, never cp:
+#    the database is live and in WAL mode, so a file copy is stale or torn.
+cd ~/workbench && .venv/bin/python -c \
+  "import sqlite3; a=sqlite3.connect('data/workbench.db'); b=sqlite3.connect('$HOME/workbench-precutover.db'); a.backup(b); b.close(); a.close()"
+
+# 4. Production. This is the one manual install.
+cd ~/workbench && git pull && ./install.sh
+```
+
+That last command asks for `sudo` once, then: creates the `workbench` account; stops the
+service; copies `~/workbench` to `/srv/workbench` (no virtualenv, no worktrees, the
+database through the backup API); chowns it; re-execs itself from there; installs `uv`
+into the account's home where the deployer looks for it; builds the virtualenv as the
+account; migrates; sets the account's git identity and generates its SSH key; re-renders
+every unit with `User=workbench` and `WorkingDirectory=/srv/workbench`; rewrites the
+polkit rule to grant that account; restarts; health-checks; and prints what is left.
+
+Unit names and the polkit filename do not change, so nothing needs removing — everything
+is rewritten in place. The only leftovers are the two old checkouts, and they are your
+rollback.
+
+```sh
+# 5. Staging — AFTER production, because its WORKBENCH_RESTORE_FROM is baked
+#    into its deploy unit and now has to point into /srv.
+cd ~/workbench-staging && git pull
+WORKBENCH_INSTANCE=staging WORKBENCH_PORT=8788 WORKBENCH_DEPLOY_BRANCH=staging \
+  WORKBENCH_RESTORE_FROM=/srv/workbench/data/workbench.db ./install.sh
+
+# 6. Do Step 7 below for both accounts, then re-arm.
+sudo systemctl enable --now workbench-deploy.timer
+sudo systemctl enable --now workbench-staging-deploy.timer
+
+# 7. Prove it — then wait one timer interval and prove it again, because the
+#    first automatic deploy after a cutover is the one that finds what was
+#    missed.
+curl -s localhost:8787/healthz && curl -s localhost:8788/healthz
+systemctl show workbench -p User -p WorkingDirectory
+sudo journalctl -u workbench-staging-deploy -n 50 --no-pager  # the restore worked
+tailscale serve status
+```
+
+**If it goes wrong**, the old checkout is untouched:
+
+```sh
+cd ~/workbench && WORKBENCH_DEPLOYMENT_ROOT="$PWD" ./install.sh
+```
+
+That re-renders the units back to the old location and owner and restarts. Your
+pre-cutover database copy from step 3 is the belt to that pair of braces.
+
+One thing the cutover does that is worth knowing about: `tasks.worktree_path` holds
+absolute paths, and worktrees are not copied. Rows pointing into the old checkout have
+their path cleared, so the next run makes a fresh worktree. Branches are untouched, so no
+work is lost.
+
+---
+
 ## Step 7 — Finish what the installer could not
 
 `./install.sh` ends by printing this list, and `python -m workbench.doctor` prints it again

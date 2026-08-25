@@ -309,6 +309,13 @@ that predates this. Worth noting because it is the one place the reproducibility
 bends: a *fresh* clone gets the timer from the first install, and only an existing
 deployment needs the manual step.
 
+**The move to `/srv` bends it the same way, and deliberately.** The deployer re-renders
+units but never relocates, so this code can reach a server and change nothing until
+somebody runs `install.sh` by hand. Relocating a live deployment underneath a running
+service is not a decision a five-minute timer should be making unattended at 3am. The
+cutover is in `docs/deployment-setup.md`; it is reversible, because the relocation copies
+rather than moves.
+
 **The deployer runs as root, the app does not, and the installer now works the same way.**
 Both need root — one to restart the unit, the other to create an account and write to
 /etc — and both drop to the checkout's owner for every command touching git, the
@@ -401,9 +408,22 @@ Unresolved. Recorded here so they are not rediscovered later.
 - **`setup_command` is per project, but the need is per worktree.** A project whose setup
   is "symlink `.env` and the venv from the main checkout" cannot express that as one
   command without knowing the source path.
-- **Nothing bounds an agent's blast radius.** It will run as the service user with
-  whatever permissions the backend is given, and can read both credentials. This is what
-  the dedicated `workbench` user is for.
+- **How much does the dedicated account actually bound?** It now exists — the service
+  runs as `workbench`, which owns `/srv/workbench` and nothing else and has no sudo — so
+  the blast radius is bounded to files recoverable from GitHub, plus the credential in
+  that account's home, which model-authored shell commands can still read. That last part
+  is inherent to running an agent on a subscription and is not fixed by any account
+  boundary. What is genuinely untested is whether the bound holds in practice, because no
+  agent has yet run on the real server.
+- **Does the agent work under `ProtectSystem=strict`?** The credential paths are now
+  granted explicitly (`~/.claude`, `~/.claude.json`, `~/.ssh`), but every one of those was
+  reasoned about rather than observed — no token has been refreshed on this machine. The
+  doctor reports `unknown` rather than crying wolf if the probe cannot run, and the fix
+  for anything missed is one more `ReadWritePaths` line.
+- **Is `tailscale serve status` readable by a non-operator account?** The banner's check
+  runs as the service account, which is not the tailnet operator. If it turns out to need
+  that, the check degrades to `unknown` and the fix is
+  `sudo tailscale set --operator=workbench`.
 - **Is "no commits" a failure?** A run where the agent correctly concludes nothing needs
   changing produced no pull request, but calling that `failed` reads as a malfunction when
   it was judgement. Probably wants a third outcome.
