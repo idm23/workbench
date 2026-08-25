@@ -218,6 +218,39 @@
   .status.active { color: var(--accent); border-color: var(--accent); }
   .status.blocked, .status.cancelled { color: var(--danger); border-color: var(--danger); }
 
+  /* Setup warnings. Above the rate-limit panel deliberately: a window that is
+     80% spent still lets an agent run, and a backend with no credential does
+     not — so a setup problem outranks a usage gauge. Two states rather than
+     one, because "nobody can reach this from a phone" and "no agent can run"
+     are not the same size of problem. */
+  .setup { margin-bottom: 1.25rem; }
+  .setup-item {
+    border: 1px solid var(--rule);
+    border-left-width: 3px;
+    border-radius: .5rem;
+    padding: .6rem .75rem;
+    margin-bottom: .5rem;
+  }
+  .setup-item.urgent { border-left-color: var(--danger); background: var(--danger-bg); }
+  .setup-item.todo { border-left-color: var(--muted); background: var(--notice-bg); }
+  .setup-title { font-weight: 600; }
+  .setup-item.urgent .setup-title { color: var(--danger); }
+  .setup-detail {
+    color: var(--muted);
+    font-size: .85rem;
+    margin-top: .15rem;
+    /* Details carry newlines — a deploy key's is a pasteable public half. */
+    white-space: pre-wrap;
+  }
+  .setup-fix {
+    margin-top: .4rem;
+    font-size: .8rem;
+    /* Long commands scroll rather than widening the page. A body that scrolls
+       sideways on a phone is the one layout failure that ruins every page. */
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
   /* Rate limits. Runs bill a subscription, so a window is the thing that
      actually runs out — and it is shared with everything else on the account,
      which is why this sits on every page rather than on a run's own. */
@@ -390,7 +423,8 @@
   {% block back %}{% endblock %}
   {% if error %}<p class="msg error">{{ error }}</p>{% endif %}
   {% if notice %}<p class="msg notice">{{ notice }}</p>{% endif %}
-  {% if show_limits %}{% include "_rate_limits.html" %}{% endif %}
+  {% if warnings %}{% include "_setup_warnings.html" %}{% endif %}
+  {% include "_rate_limits.html" %}
   {% block content %}{% endblock %}
 </div>
 </body>

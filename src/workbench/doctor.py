@@ -38,8 +38,10 @@ import pwd
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 
 from workbench.config import (
@@ -746,3 +748,106 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# --- The web-facing half ------------------------------------------------------
+#
+# The install says these things once. Nobody re-reads a terminal, and the state
+# they describe changes long afterwards — a credential expires, a serve mapping
+# is reset. So the app says them too, on every page, until they are fixed.
+
+
+#: Which findings are worth interrupting a page for. Deliberately not all of
+#: them: an unset git identity or an unauthorised deploy key breaks a *run*,
+#: and a run says so where it happens. These two are the ones that make every
+#: page misleading — a task tree offering to start an agent that cannot
+#: authenticate, and an app that looks published and is reachable from nowhere.
+BANNER_KEYS = ("agent-credential", "tailscale-serve")
+
+#: Long enough that a page load never waits on a probe the last one just did,
+#: short enough that fixing the problem clears the banner while the person who
+#: fixed it is still looking at the page.
+PAGE_STATUS_TTL_SECONDS = 60
+
+#: Bounded well below any patience a browser has. On expiry the page renders
+#: with no banner rather than late — see `_probe_page_warnings`.
+PAGE_STATUS_TIMEOUT_SECONDS = 15
+
+
+@dataclass(frozen=True)
+class PageWarning:
+    """One finding, in the shape a template wants."""
+
+    key: str
+    title: str
+    detail: str
+    fix: str | None
+
+    #: A failure rather than a warning. Drives the styling, and nothing else.
+    urgent: bool
+
+
+def page_warnings() -> tuple[PageWarning, ...]:
+    """What every page should be saying, cached for `PAGE_STATUS_TTL_SECONDS`.
+
+    Keyed on a coarse time bucket, which is what gives this a TTL without a
+    mutable module-level slot or a lock. `maxsize=1` rather than `@cache`: the
+    key is a monotonically rising integer, so an unbounded cache is a leak.
+
+    Contrast `app.deployed_revision`, which caches for the life of the process
+    and argues it is safe *because* a running process cannot change revision.
+    That reasoning does not transfer — the whole point of this is that someone
+    goes and fixes the thing while the process keeps running.
+    """
+    return _warnings_at(int(time.monotonic() // PAGE_STATUS_TTL_SECONDS))
+
+
+@lru_cache(maxsize=1)
+def _warnings_at(_bucket: int) -> tuple[PageWarning, ...]:
+    return _probe_page_warnings()
+
+
+def _probe_page_warnings() -> tuple[PageWarning, ...]:
+    """Ask a subprocess, because the answer needs a backend and this is the web.
+
+    The web process must never pull a vendor SDK into its import graph — see
+    CLAUDE.md and `agents/tests/test_seam.py`. Importing the registry here is
+    fine, but *calling* it would load ~100MB of vendor code into uvicorn to
+    answer a question asked once a minute. A process boundary keeps that where
+    it belongs, and matches what `git/revision.py` and `runs/executors.py`
+    already do: subprocess, explicit timeout, never raises.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-m", "workbench.doctor", "--json", "--offline"],
+            capture_output=True,
+            text=True,
+            timeout=PAGE_STATUS_TIMEOUT_SECONDS,
+            cwd=repo_root(),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("could not check setup state: %s", error)
+        return ()
+
+    # Note what is *not* checked: the return code. The doctor exits 1 whenever
+    # anything failed, which is precisely when there is something to show —
+    # treating non-zero as unreadable would blank the banner exactly when it
+    # was needed.
+    try:
+        payload = json.loads(probe.stdout)
+    except json.JSONDecodeError:
+        logger.warning("setup check returned no readable status")
+        return ()
+
+    return tuple(
+        PageWarning(
+            key=check["key"],
+            title=check["title"],
+            detail=check["detail"],
+            fix=check.get("fix"),
+            urgent=check["state"] == CheckState.FAIL,
+        )
+        for check in payload.get("checks", [])
+        if check["key"] in BANNER_KEYS and check["state"] in (CheckState.FAIL, CheckState.WARN)
+    )

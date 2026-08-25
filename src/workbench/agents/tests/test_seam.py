@@ -103,3 +103,41 @@ def test_the_web_app_does_not_drag_an_sdk_into_its_process():
         f"Importing workbench.app pulled in {result.stdout.strip()}. "
         "Reach a backend through the registry, which imports it lazily."
     )
+
+
+def test_serving_a_page_does_not_drag_an_sdk_into_the_process():
+    """The hole the import-time probe above cannot see.
+
+    A lazy import inside a *route* never fires while `workbench.app` is merely
+    imported, so the check above would pass while every page load pulled a
+    hundred megabytes of vendor code into uvicorn. That is exactly the shape
+    the tempting shortcut takes here — the setup banner needs to know whether a
+    backend has a credential, and calling the registry to find out would be one
+    line and would look harmless.
+
+    It is not harmless, and the rule is worth no more than its enforcement: an
+    unenforceable rule decays by a series of individually reasonable edits, and
+    this is the edit. So the banner asks a subprocess, and this renders a page
+    and looks.
+    """
+    probe = (
+        "import sys; "
+        "from fastapi.testclient import TestClient; "
+        "from workbench.app import app; "
+        "TestClient(app).get('/'); "
+        f"leaked = {sorted(VENDOR_PACKAGES)!r}; "
+        "print(sorted(set(leaked) & sys.modules.keys()))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"The probe failed to run.\n{result.stderr}"
+    assert result.stdout.strip() == "[]", (
+        f"Serving a page pulled in {result.stdout.strip()}. "
+        "Ask a backend across a process boundary, not by importing one."
+    )
