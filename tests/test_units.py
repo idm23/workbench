@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from workbench.config import deploy_unit_name, service_name
+from workbench.config import (
+    agent_home,
+    deploy_unit_name,
+    deployment_root,
+    service_account,
+    service_name,
+)
 from workbench.install import InstallError, check_not_under_private_tmp, render_unit, units
 
 UNIT_NAMES = [
@@ -215,6 +221,68 @@ def test_instance_names_are_derived_consistently(monkeypatch):
 
     assert service_name() == "workbench-staging"
     assert deploy_unit_name() == "workbench-staging-deploy"
+
+
+# --- Where a deployment lives, and who owns it --------------------------------
+#
+# The unit name, the directory under /srv, and the account are deliberately one
+# rule with one spelling. They are read by three things that never see each
+# other — the unit's `User=`, the polkit rule's `subject.user`, and the
+# filesystem — and a disagreement between any two of them is not a visible bug.
+# It is every run failing to start with an authorisation error naming neither.
+
+
+def test_the_deployment_lives_outside_anybodys_home():
+    """A checkout under /home cannot be reached by the account that serves it.
+
+    Ubuntu creates home directories mode 0750, so this is not a preference:
+    the service could not traverse into a checkout under one.
+    """
+    assert deployment_root() == Path("/srv/workbench")
+    assert not deployment_root().is_relative_to(Path("/home"))
+
+
+def test_the_account_is_the_service_name():
+    """The invariant the whole scheme rests on. If this can drift, so can the
+    unit and the polkit rule that are rendered from it."""
+    assert service_account() == service_name() == "workbench"
+
+
+def test_staging_gets_its_own_account_and_directory(staging):
+    """Staging restores production's database every deploy and runs the same
+    agent code. Sharing an account would leave a staging agent holding write
+    access to production's checkout, worktrees, and database."""
+    assert service_account() == "workbench-staging"
+    assert deployment_root() == Path("/srv/workbench-staging")
+    assert agent_home() == Path("/home/workbench-staging")
+
+
+def test_the_instances_share_nothing(staging):
+    production = Path("/srv/workbench")
+    assert deployment_root() != production
+    assert not deployment_root().is_relative_to(production)
+    assert service_account() != SERVICE_NAME
+
+
+def test_an_account_name_fits_in_a_username(staging):
+    """32 characters is the Linux limit, and `useradd` fails past it."""
+    assert len(service_account()) <= 32
+
+
+def test_a_developers_checkout_can_say_it_is_not_a_deployment(monkeypatch, tmp_path):
+    """A laptop and both test harnesses run the code from wherever it was
+    cloned. Without this they would all be told to relocate to /srv."""
+    monkeypatch.setenv("WORKBENCH_DEPLOYMENT_ROOT", str(tmp_path))
+
+    assert deployment_root() == tmp_path.resolve()
+
+
+def test_the_agent_home_is_not_inside_the_checkout():
+    """The credential and the session transcripts are the two things here that
+    are on neither GitHub nor the database. A relocation re-copies the
+    checkout; these have to survive that."""
+    assert agent_home() == Path("/home/workbench")
+    assert not agent_home().is_relative_to(deployment_root())
 
 
 # --- PrivateTmp ---------------------------------------------------------------

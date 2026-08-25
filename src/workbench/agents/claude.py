@@ -13,9 +13,14 @@ subprocess comes back as an outcome, because those are ordinary conditions on a
 home server and a traceback out of a detached runner helps nobody.
 """
 
+import json
 import logging
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any
 
+import claude_agent_sdk
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -36,13 +41,19 @@ from claude_agent_sdk import (
 )
 
 from workbench.agents.protocol import (
+    CREDENTIAL_API_KEY,
+    CREDENTIAL_NONE,
+    CREDENTIAL_SUBSCRIPTION,
+    CREDENTIAL_UNKNOWN,
     AgentEvent,
     AgentFailed,
     AgentFinished,
     AgentRequest,
     AgentStream,
     AgentUnavailable,
+    CredentialStatus,
 )
+from workbench.config import agent_environment, bills_subscription
 from workbench.database.models import RunEventKind, RunPhase
 
 logger = logging.getLogger(__name__)
@@ -271,6 +282,117 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
     )
 
 
+#: How long to wait for the credential probe. It is an offline read of a file
+#: in a home directory — measured at well under a second — so anything near
+#: this bound means the CLI is wedged, and a health check must not hang on it.
+AUTH_PROBE_TIMEOUT_SECONDS = 20
+
+
+def _cli_path() -> str | None:
+    """Where the CLI this backend would actually run lives.
+
+    The SDK bundles a binary and prefers it over anything on `PATH`, so asking
+    `PATH` first would happily report a different Claude to the one a run uses
+    — which is the one way this check could be worse than no check. Derived
+    from the package's own location rather than by constructing a transport,
+    because building one needs a live connection's worth of arguments.
+
+    This is the only SDK-internal knowledge in the file, and it is here for the
+    same reason everything else vendor-shaped is: nothing above the seam may
+    know that a bundled binary exists.
+    """
+    bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+    if bundled.is_file():
+        return str(bundled)
+    return shutil.which("claude")
+
+
+def _unknown_credential(detail: str) -> CredentialStatus:
+    """A probe that could not be made. Deliberately not a failure — see the
+    note on `CREDENTIAL_UNKNOWN` in `protocol.py`."""
+    return CredentialStatus(
+        backend=BACKEND_NAME,
+        logged_in=False,
+        method=CREDENTIAL_UNKNOWN,
+        detail=detail,
+    )
+
+
+def _login_command(cli: str | None) -> tuple[str, ...]:
+    """How a person signs this backend in.
+
+    `--claudeai` is spelled out rather than left to the default: the other
+    branch is `--console`, which authenticates perfectly and bills the metered
+    API, and an instruction that lets someone pick it by accident is the same
+    silent failure this whole check exists to catch.
+    """
+    return () if cli is None else (cli, "auth", "login", "--claudeai")
+
+
+def read_credential(payload: dict[str, Any], cli: str | None = None) -> CredentialStatus:
+    """Translate the CLI's `auth status` report into Workbench's vocabulary.
+
+    Split out from the subprocess call so the mapping can be tested against
+    real recorded payloads without a binary, which matters because the
+    interesting cases here are the ones that are awkward to reproduce on
+    demand.
+    """
+    method = str(payload.get("authMethod") or "").strip()
+    account = payload.get("email") or payload.get("orgName") or None
+
+    if method == "claude.ai":
+        who = account or "this account"
+        return CredentialStatus(
+            backend=BACKEND_NAME,
+            logged_in=True,
+            method=CREDENTIAL_SUBSCRIPTION,
+            account=account,
+            detail=f"Signed in as {who}, billing a Claude subscription.",
+            login_command=_login_command(cli),
+        )
+
+    if method == "api_key":
+        source = str(payload.get("apiKeySource") or "an API key")
+        if bills_subscription():
+            # Reachable despite `agent_environment()` having stripped the
+            # variables it knows about: a key can also arrive from a settings
+            # file or an `apiKeyHelper`, which no amount of environment
+            # scrubbing reaches. That is precisely the case worth shouting
+            # about, because nothing visible in Workbench would change.
+            return CredentialStatus(
+                backend=BACKEND_NAME,
+                logged_in=False,
+                method=CREDENTIAL_API_KEY,
+                account=account,
+                detail=(
+                    f"Authenticated by {source}, which bills the metered API rather than "
+                    "the subscription this instance is configured for. Remove it, or set "
+                    "WORKBENCH_BILLING=api to choose metered billing on purpose."
+                ),
+                login_command=_login_command(cli),
+            )
+        return CredentialStatus(
+            backend=BACKEND_NAME,
+            logged_in=True,
+            method=CREDENTIAL_API_KEY,
+            account=account,
+            detail=f"Billing the metered API, authenticated by {source}.",
+        )
+
+    if not payload.get("loggedIn"):
+        return CredentialStatus(
+            backend=BACKEND_NAME,
+            logged_in=False,
+            method=CREDENTIAL_NONE,
+            detail="Not signed in — no agent can run as this account yet.",
+            login_command=_login_command(cli),
+        )
+
+    return _unknown_credential(
+        f"The CLI reported an authentication method Workbench does not know: {method!r}."
+    )
+
+
 class ClaudeBackend:
     """Drives Claude through `claude_agent_sdk`.
 
@@ -281,6 +403,50 @@ class ClaudeBackend:
     @property
     def name(self) -> str:
         return BACKEND_NAME
+
+    def credential_status(self) -> CredentialStatus:
+        """Ask the CLI who it would authenticate as. See the protocol's note.
+
+        Run under `agent_environment()`, which is the whole point: it strips
+        the metered-API variables exactly as the runner does, so this reports
+        what a run would get rather than what happens to be exported in the
+        shell that asked.
+
+        The exit code is ignored on purpose — a logged-out CLI answers 1 and
+        still prints a perfectly good report on stdout, so treating non-zero
+        as unreadable would turn the most important case into `unknown`.
+        """
+        cli = _cli_path()
+        if cli is None:
+            return _unknown_credential(
+                "The Claude CLI could not be found, so the credential was not checked."
+            )
+
+        try:
+            probe = subprocess.run(
+                [cli, "auth", "status", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=AUTH_PROBE_TIMEOUT_SECONDS,
+                env=agent_environment(),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return _unknown_credential(
+                f"The Claude CLI did not answer within {AUTH_PROBE_TIMEOUT_SECONDS}s."
+            )
+        except OSError as exc:
+            return _unknown_credential(f"The Claude CLI could not be run: {exc}.")
+
+        try:
+            payload = json.loads(probe.stdout)
+        except json.JSONDecodeError:
+            logger.warning("Unreadable auth status from %s: %r", cli, probe.stdout[:200])
+            return _unknown_credential("The Claude CLI did not report a readable status.")
+
+        if not isinstance(payload, dict):
+            return _unknown_credential("The Claude CLI did not report a readable status.")
+        return read_credential(payload, cli)
 
     async def run(self, request: AgentRequest) -> AgentStream:
         model: str | None = None

@@ -220,6 +220,51 @@ def service_name() -> str:
     return f"workbench-{suffix}" if suffix else "workbench"
 
 
+def service_account() -> str:
+    """The dedicated unprivileged account this instance's units run as.
+
+    Deliberately the same string as `service_name()`, rather than a name of
+    its own. The unit name, the directory under `/srv`, and the account are
+    one rule with one spelling, so the polkit rule's `subject.user` and the
+    unit's `User=` cannot drift apart — and that pair drifting is not a
+    visible bug, it is every run failing to start with an authorisation error
+    that names neither of them.
+    """
+    return service_name()
+
+
+def deployment_root() -> Path:
+    """Where this instance's checkout lives once it is a deployment.
+
+    Not a human's home, and that is forced rather than chosen. The service
+    account is a different account to whoever installed it, and Ubuntu creates
+    home directories mode 0750 — so a checkout under `/home/someone` is one
+    the service cannot traverse at all, never mind execute a virtualenv out
+    of. `/srv` is the conventional place for data a service serves, it is
+    outside every user's home, and it is on the same volume as everything
+    else here.
+
+    Overridable because a laptop and the test harnesses are not deployments:
+    they run the code from wherever it happens to be checked out.
+    """
+    override = os.environ.get("WORKBENCH_DEPLOYMENT_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path("/srv") / service_name()
+
+
+def agent_home() -> Path:
+    """The service account's home directory, used when creating the account.
+
+    Kept separate from the checkout on purpose. The checkout is deployment
+    state that a deploy rewrites and a relocation re-copies; this holds the
+    backend's credential and its session transcripts, which are the two things
+    on this machine that are on neither GitHub nor the database, and have to
+    survive both.
+    """
+    return Path("/home") / service_account()
+
+
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""
     return f"{service_name()}-deploy"

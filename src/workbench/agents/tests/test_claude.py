@@ -10,6 +10,7 @@ files, cannot commit them, and burns its turn limit retrying.
 """
 
 import json
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -29,8 +30,12 @@ from claude_agent_sdk import (
 )
 
 from workbench.agents import claude as backend_module
-from workbench.agents.claude import ClaudeBackend, translate
+from workbench.agents.claude import ClaudeBackend, read_credential, translate
 from workbench.agents.protocol import (
+    CREDENTIAL_API_KEY,
+    CREDENTIAL_NONE,
+    CREDENTIAL_SUBSCRIPTION,
+    CREDENTIAL_UNKNOWN,
     AgentEvent,
     AgentFailed,
     AgentFinished,
@@ -419,3 +424,207 @@ def test_every_phase_has_a_permission_mode_and_a_turn_limit(phase, monkeypatch):
 
     assert captured["options"].permission_mode
     assert captured["options"].max_turns
+
+
+# --- The credential probe -----------------------------------------------------
+#
+# Every payload below is a real recording of `claude auth status --json` rather
+# than a guess at its shape, because the whole value of this check is that it
+# distinguishes cases nobody would think to invent — notably an API key, which
+# reports itself as a perfectly good login.
+
+SIGNED_IN = {
+    "loggedIn": True,
+    "authMethod": "claude.ai",
+    "apiProvider": "firstParty",
+    "email": "someone@example.com",
+    "orgName": "someone@example.com's Organization",
+    "subscriptionType": "pro",
+}
+SIGNED_OUT = {"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"}
+API_KEY = {
+    "loggedIn": True,
+    "authMethod": "api_key",
+    "apiProvider": "firstParty",
+    "apiKeySource": "ANTHROPIC_API_KEY",
+}
+
+
+def test_a_subscription_login_is_what_workbench_wants():
+    status = read_credential(SIGNED_IN)
+
+    assert status.logged_in
+    assert status.method == CREDENTIAL_SUBSCRIPTION
+    assert status.account == "someone@example.com"
+
+
+def test_being_signed_out_is_reported_rather_than_raised():
+    status = read_credential(SIGNED_OUT)
+
+    assert not status.logged_in
+    assert status.method == CREDENTIAL_NONE
+    assert status.detail
+
+
+def test_an_api_key_under_subscription_billing_is_not_authenticated():
+    """The failure this check exists for.
+
+    `loggedIn` is true and the CLI is perfectly happy; every run would simply
+    bill per token instead of the subscription, and nothing visible in
+    Workbench would change until an invoice arrived.
+    """
+    status = read_credential(API_KEY)
+
+    assert not status.logged_in
+    assert status.method == CREDENTIAL_API_KEY
+    # Naming both the culprit and the way to opt in on purpose, because the
+    # person reading this has no other way to tell which of the two it is.
+    assert "ANTHROPIC_API_KEY" in status.detail
+    assert "WORKBENCH_BILLING=api" in status.detail
+
+
+def test_an_api_key_is_correct_when_metered_billing_was_chosen(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_BILLING", "api")
+
+    status = read_credential(API_KEY)
+
+    assert status.logged_in
+    assert status.method == CREDENTIAL_API_KEY
+
+
+def test_an_unrecognised_method_is_unknown_rather_than_a_verdict():
+    status = read_credential({"loggedIn": True, "authMethod": "bedrock"})
+
+    assert status.method == CREDENTIAL_UNKNOWN
+    assert not status.logged_in
+    assert "bedrock" in status.detail
+
+
+class FakeProbe:
+    """Stands in for the CLI. Records the environment it was handed, which is
+    the only way to assert on the thing that matters most here."""
+
+    def __init__(self, stdout: str = "", returncode: int = 0, raises: Exception | None = None):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.raises = raises
+        self.env: dict[str, str] = {}
+        self.argv: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        self.argv = argv
+        self.env = kwargs.get("env") or {}
+        if self.raises is not None:
+            raise self.raises
+        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, "")
+
+
+@pytest.fixture
+def probe(monkeypatch):
+    """A located CLI whose answer the test chooses."""
+
+    def install(**kwargs) -> FakeProbe:
+        fake = FakeProbe(**kwargs)
+        monkeypatch.setattr(backend_module, "_cli_path", lambda: "/nonexistent/claude")
+        monkeypatch.setattr(backend_module.subprocess, "run", fake)
+        return fake
+
+    return install
+
+
+def test_the_probe_sees_what_the_runner_will_see(probe, monkeypatch):
+    """Run under `agent_environment()`, not the ambient environment.
+
+    A key exported in the shell that asked is stripped before a run starts, so
+    reporting it here would be worse than not checking at all — it would say
+    "authenticated" about a credential the runner removes.
+    """
+    monkeypatch.delenv("WORKBENCH_BILLING", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-really")
+    fake = probe(stdout=json.dumps(SIGNED_IN))
+
+    ClaudeBackend().credential_status()
+
+    assert "ANTHROPIC_API_KEY" not in fake.env
+
+
+def test_a_logged_out_cli_answers_one_and_is_still_read(probe):
+    """`auth status` exits 1 when signed out but still prints a good report.
+
+    Treating a non-zero exit as unreadable would turn the single most important
+    case into `unknown`, which is the one verdict that raises no warning.
+    """
+    probe(stdout=json.dumps(SIGNED_OUT), returncode=1)
+
+    status = ClaudeBackend().credential_status()
+
+    assert status.method == CREDENTIAL_NONE
+
+
+def test_a_missing_cli_is_unknown(monkeypatch):
+    monkeypatch.setattr(backend_module, "_cli_path", lambda: None)
+
+    status = ClaudeBackend().credential_status()
+
+    assert status.method == CREDENTIAL_UNKNOWN
+    assert not status.logged_in
+
+
+def test_a_wedged_cli_is_unknown_rather_than_a_hang(probe):
+    probe(raises=subprocess.TimeoutExpired(cmd="claude", timeout=20))
+
+    status = ClaudeBackend().credential_status()
+
+    assert status.method == CREDENTIAL_UNKNOWN
+
+
+def test_an_unrunnable_cli_is_unknown(probe):
+    probe(raises=OSError("Permission denied"))
+
+    status = ClaudeBackend().credential_status()
+
+    assert status.method == CREDENTIAL_UNKNOWN
+
+
+@pytest.mark.parametrize("output", ["", "not json at all", "[1, 2, 3]", "null"])
+def test_unreadable_output_is_unknown_and_never_raises(probe, output):
+    probe(stdout=output)
+
+    status = ClaudeBackend().credential_status()
+
+    assert status.method == CREDENTIAL_UNKNOWN
+
+
+def test_the_probe_asks_for_json(probe):
+    """--json happens to be the CLI's default. Passing it anyway, because a
+    default that changes turns this into the unreadable-output case above."""
+    fake = probe(stdout=json.dumps(SIGNED_IN))
+
+    ClaudeBackend().credential_status()
+
+    assert fake.argv[1:] == ["auth", "status", "--json"]
+
+
+def test_a_backend_says_how_to_sign_itself_in():
+    """The fix is carried by the backend, not composed by whoever reports it.
+
+    A doctor that spelled out `claude auth login` would be a second place that
+    knows which vendor answered, which is the decay the seam exists to stop.
+    """
+    status = read_credential(SIGNED_OUT, cli="/opt/claude")
+
+    assert status.login_command == ("/opt/claude", "auth", "login", "--claudeai")
+
+
+def test_the_login_command_never_offers_the_metered_branch():
+    """`--console` authenticates perfectly and bills per token. An instruction
+    someone could follow into it is the failure this check exists to catch."""
+    status = read_credential(SIGNED_OUT, cli="/opt/claude")
+
+    assert "--console" not in status.login_command
+
+
+def test_there_is_no_login_command_when_there_is_no_cli():
+    status = read_credential(SIGNED_OUT)
+
+    assert status.login_command == ()
