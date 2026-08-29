@@ -40,10 +40,10 @@ from workbench.config import (
     RUN_TIMEOUT_SECONDS,
     agent_git_identity,
     agent_home,
+    data_dir,
     deploy_branch,
     deploy_unit_name,
     deployment_root,
-    ensure_data_dir,
     host,
     instance,
     port,
@@ -312,8 +312,49 @@ def apply_migrations() -> None:
     `-shm` files beside it: the service would start, read happily, and fail on
     the first write.
     """
-    ensure_data_dir()
     service_run_or_fail([str(_venv_bin("alembic")), "upgrade", "head"], "applying migrations")
+
+
+def ensure_data_directory(account: pwd.struct_passwd) -> None:
+    """Create `data/`, owned by the account that has to write it.
+
+    This is the same trap as everything else in this file, and it caught me:
+    `ensure_data_dir()` is an ordinary in-process mkdir, and this process is
+    root — so a fresh install left `data/` owned by root and the service could
+    not create its own database inside it. Migrations then failed with
+    "unable to open database file", which names neither the directory nor the
+    ownership that caused it.
+
+    A directory that already exists with the wrong owner is repaired rather
+    than left, because that is precisely the state the bug above produced.
+
+    Ownership is set by numeric uid and gid throughout this file rather than by
+    name. `-g <name>` quietly assumes a user-private group, which `useradd
+    --system` does give us — but the account is only ours when we created it,
+    and a checkout owned by a person on a machine whose primary group is
+    something else would fail on a group that does not exist.
+    Deliberately not recursive: `repos/` and `worktrees/` are made by the
+    service itself and are already right, and recursing into a few gigabytes
+    of clones to fix a directory would be a poor trade.
+    """
+    target = data_dir()
+    if not target.is_dir():
+        run(
+            ["install", "-d", "-o", str(account.pw_uid), "-g", str(account.pw_gid), str(target)],
+            privileged=True,
+        )
+        info(f"created {target}")
+        return
+
+    if target.stat().st_uid == account.pw_uid:
+        return
+
+    owned = f"{account.pw_uid}:{account.pw_gid}"
+    run(["chown", owned, str(target)], privileged=True)
+    for entry in sorted(target.iterdir()):
+        if entry.is_file():
+            run(["chown", owned, str(entry)], privileged=True)
+    info(f"{target} now belongs to {account.pw_name}")
 
 
 def _service_passwd() -> pwd.struct_passwd:
@@ -611,9 +652,9 @@ def ensure_uv_for_owner(account: pwd.struct_passwd) -> Path:
                 "install",
                 "-d",
                 "-o",
-                account.pw_name,
+                str(account.pw_uid),
                 "-g",
-                account.pw_name,
+                str(account.pw_gid),
                 "-m",
                 "0755",
                 str(directory),
@@ -624,9 +665,9 @@ def ensure_uv_for_owner(account: pwd.struct_passwd) -> Path:
         [
             "install",
             "-o",
-            account.pw_name,
+            str(account.pw_uid),
             "-g",
-            account.pw_name,
+            str(account.pw_gid),
             "-m",
             "0755",
             uv_binary(),
@@ -678,16 +719,16 @@ def ensure_agent_state_dir(account: pwd.struct_passwd) -> None:
         # docs/deployment-setup.md does exactly that. Tightening someone's own
         # ~/.claude as a side effect of a re-install is not this function's
         # business.
-        run(["chown", f"{account.pw_name}:{account.pw_name}", str(target)], privileged=True)
+        run(["chown", f"{account.pw_uid}:{account.pw_gid}", str(target)], privileged=True)
     else:
         run(
             [
                 "install",
                 "-d",
                 "-o",
-                account.pw_name,
+                str(account.pw_uid),
                 "-g",
-                account.pw_name,
+                str(account.pw_gid),
                 "-m",
                 "0700",
                 str(target),
@@ -728,7 +769,17 @@ def ensure_agent_identity(account: pwd.struct_passwd) -> None:
 
     ssh_dir = Path(account.pw_dir) / ".ssh"
     run(
-        ["install", "-d", "-o", account.pw_name, "-g", account.pw_name, "-m", "0700", str(ssh_dir)],
+        [
+            "install",
+            "-d",
+            "-o",
+            str(account.pw_uid),
+            "-g",
+            str(account.pw_gid),
+            "-m",
+            "0700",
+            str(ssh_dir),
+        ],
         privileged=True,
     )
 
@@ -1060,6 +1111,7 @@ def main() -> int:
         ensure_agent_identity(account)
 
         step("Preparing the database")
+        ensure_data_directory(account)
         apply_migrations()
         info("migrations applied")
 

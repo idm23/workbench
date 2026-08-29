@@ -12,6 +12,7 @@ and this is exactly the kind of leak that would.
 """
 
 import ast
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -105,7 +106,7 @@ def test_the_web_app_does_not_drag_an_sdk_into_its_process():
     )
 
 
-def test_serving_a_page_does_not_drag_an_sdk_into_the_process():
+def test_serving_a_page_does_not_drag_an_sdk_into_the_process(tmp_path):
     """The hole the import-time probe above cannot see.
 
     A lazy import inside a *route* never fires while `workbench.app` is merely
@@ -122,9 +123,22 @@ def test_serving_a_page_does_not_drag_an_sdk_into_the_process():
     """
     probe = (
         "import sys; "
+        # Its own schema, in its own database. Without this the probe inherits
+        # whatever database the machine happens to have — which on a developer's
+        # laptop is a working one and on a fresh runner is nothing at all. The
+        # assertion below then fails for want of a `users` table, having proved
+        # nothing about the seam either way.
+        "from workbench.database.db import get_engine; "
+        "from workbench.database.models import Base; "
+        "Base.metadata.create_all(get_engine()); "
         "from fastapi.testclient import TestClient; "
         "from workbench.app import app; "
-        "TestClient(app).get('/'); "
+        "answer = TestClient(app).get('/'); "
+        # The page must actually render. `_shared` builds the rate-limit
+        # readings before the setup warnings, so a request that dies on the
+        # database never reaches the code this is here to watch — and a probe
+        # that cannot fail is worse than no probe, because it reads as proof.
+        "assert answer.status_code == 200, answer.status_code; "
         f"leaked = {sorted(VENDOR_PACKAGES)!r}; "
         "print(sorted(set(leaked) & sys.modules.keys()))"
     )
@@ -134,6 +148,7 @@ def test_serving_a_page_does_not_drag_an_sdk_into_the_process():
         text=True,
         timeout=180,
         check=False,
+        env={**os.environ, "WORKBENCH_DB": str(tmp_path / "probe.db")},
     )
 
     assert result.returncode == 0, f"The probe failed to run.\n{result.stderr}"
