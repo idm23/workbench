@@ -83,8 +83,14 @@ def test_every_unit_is_rendered(rendered):
 
 @pytest.mark.parametrize("unit", UNIT_NAMES)
 def test_no_placeholder_survives(rendered, unit):
-    """An unsubstituted `__REPO__` would be a path systemd cannot resolve."""
-    leftover = [line for line in rendered[unit].splitlines() if "__" in line]
+    """An unsubstituted `__REPO__` would be a path systemd cannot resolve.
+
+    Directives only. These templates carry comments naming the placeholders
+    they argue against — including one explaining why the schedule is no longer
+    rendered — and prose that mentions a placeholder is not a placeholder that
+    leaked into a setting.
+    """
+    leftover = [line for line in directives(rendered[unit]) if "__" in line]
 
     assert leftover == []
 
@@ -576,3 +582,35 @@ def test_the_install_points_at_the_deployments_own_interpreter(monkeypatch, tmp_
 
     assert f"{tmp_path}/.venv/bin/python -m workbench.doctor" in caplog.text
     assert sys.executable not in caplog.text
+
+
+def test_every_timer_placeholder_is_one_an_older_installer_provides():
+    """A template is read from the new checkout and rendered by the old
+    installer — the deployer imports its own code before it pulls. So a
+    template needing a placeholder the running renderer has never heard of
+    emits it verbatim, and `OnCalendar=__SCHEDULE__` is a bad unit file setting
+    that fails the timer restart and kills the timer.
+
+    Adding a placeholder is safe, because the old renderer simply never
+    encounters it. Requiring a *new* one in an existing template is not. This
+    pins the timer's schedule as literal text for that reason.
+    """
+    template = (Path("deploy") / "workbench-deploy.timer.template").read_text()
+    schedule = [line for line in template.splitlines() if line.startswith("OnCalendar=")]
+
+    assert schedule == ["OnCalendar=*:0/5"]
+    assert "__" not in schedule[0]
+
+
+def test_the_interval_a_person_is_told_matches_the_one_configured():
+    """The schedule moved into the template and the wording stayed behind, so
+    nothing but this keeps them honest. Being told deploys land within five
+    minutes when they land every fifteen is worse than being told nothing."""
+    schedule = next(
+        line.split("=", 1)[1]
+        for line in directives(render_unit("workbench-deploy.timer.template"))
+        if line.startswith("OnCalendar=")
+    )
+
+    minutes = schedule.rsplit("/", 1)[-1]
+    assert f"{minutes}min" == install.DEPLOY_INTERVAL

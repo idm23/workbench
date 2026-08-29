@@ -34,7 +34,20 @@ Documentation=https://github.com/idm23/workbench
 #
 # A calendar schedule has no anchor to lose. Restarting it, reinstalling it, or
 # reloading systemd all leave the next occurrence exactly where it was.
-OnCalendar=__SCHEDULE__
+# Written out rather than rendered, and that is the second half of this fix.
+#
+# A template is read from the *new* checkout and rendered by the *old*
+# installer — the deployer imports its own code before it pulls. So a template
+# that needs a placeholder the running renderer has never heard of comes out
+# with the placeholder still in it. This line said `__SCHEDULE__` for one
+# deploy, which produced `OnCalendar=__SCHEDULE__`, which systemd rejects as a
+# bad unit file setting, which failed the timer restart, which killed the timer
+# a second time in an hour.
+#
+# Adding a placeholder is safe; renaming or requiring a new one is not. The
+# schedule was never configurable anyway — it is baked in at install time by
+# design — so it does not need to be rendered at all.
+OnCalendar=*:0/5
 
 # Only meaningful for a calendar timer, which is the other half of the bug
 # above: this line was already here, already documented as catching up a check
