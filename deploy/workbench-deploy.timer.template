@@ -14,14 +14,44 @@ Description=Check __BRANCH__ for new commits to deploy to __SERVICE__
 Documentation=https://github.com/idm23/workbench
 
 [Timer]
-# First check shortly after boot, then every __INTERVAL__. A merge therefore
-# lands within that window rather than instantly, which is the price of not
-# exposing anything to the internet.
-OnBootSec=2min
-OnUnitActiveSec=__INTERVAL__
+# A wall-clock schedule rather than a monotonic one, and that is a fix rather
+# than a preference.
+#
+# This was a boot offset plus a repeat interval, which chains
+# correctly only while the timer runs untouched from boot: the boot trigger
+# fires once, that activation anchors the interval, and the interval re-anchors
+# itself thereafter. Restart the timer any later and both triggers are dead —
+# the boot moment is in the past and cannot recur, and the interval has nothing
+# to measure from until the service runs, which is the thing the timer was
+# supposed to cause. systemd parks it at `active (elapsed)` with no next
+# trigger and it never fires again until reboot.
+#
+# Which would be a curiosity, except `install_units` restarts this timer on
+# purpose whenever the rendered file changes. The one path meant to update the
+# schedule was the path that silently switched deployment off. Found after a
+# machine sat seventeen days from boot, was reinstalled, and then quietly
+# stopped deploying with both timers reporting themselves enabled and active.
+#
+# A calendar schedule has no anchor to lose. Restarting it, reinstalling it, or
+# reloading systemd all leave the next occurrence exactly where it was.
+# Written out rather than rendered, and that is the second half of this fix.
+#
+# A template is read from the *new* checkout and rendered by the *old*
+# installer — the deployer imports its own code before it pulls. So a template
+# that needs a placeholder the running renderer has never heard of comes out
+# with the placeholder still in it. This line said `__SCHEDULE__` for one
+# deploy, which produced `OnCalendar=__SCHEDULE__`, which systemd rejects as a
+# bad unit file setting, which failed the timer restart, which killed the timer
+# a second time in an hour.
+#
+# Adding a placeholder is safe; renaming or requiring a new one is not. The
+# schedule was never configurable anyway — it is baked in at install time by
+# design — so it does not need to be rendered at all.
+OnCalendar=*:0/5
 
-# Catch up on a check missed while the machine was off, rather than waiting a
-# whole interval after every boot.
+# Only meaningful for a calendar timer, which is the other half of the bug
+# above: this line was already here, already documented as catching up a check
+# missed while the machine was off, and doing nothing whatsoever.
 Persistent=true
 
 # Without this, several timers firing on the same round number wake the disk

@@ -13,10 +13,12 @@ that tool is absent.
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from workbench import install
 from workbench.config import (
     agent_git_identity,
     agent_home,
@@ -55,6 +57,21 @@ def rendered() -> dict[str, str]:
     return {unit: render_unit(template) for unit, template in units()}
 
 
+def directives(unit: str) -> list[str]:
+    """The settings a unit actually declares, without the prose.
+
+    These files carry long comments explaining why they are shaped as they are,
+    and some of that prose necessarily names the directives it is arguing
+    against. An assertion that a directive is absent has to mean absent from
+    the configuration, not unmentioned in the reasoning.
+    """
+    return [
+        line.strip()
+        for line in unit.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
 def test_every_unit_is_rendered(rendered):
     assert set(rendered) == {
         f"{SERVICE_NAME}.service",
@@ -66,8 +83,14 @@ def test_every_unit_is_rendered(rendered):
 
 @pytest.mark.parametrize("unit", UNIT_NAMES)
 def test_no_placeholder_survives(rendered, unit):
-    """An unsubstituted `__REPO__` would be a path systemd cannot resolve."""
-    leftover = [line for line in rendered[unit].splitlines() if "__" in line]
+    """An unsubstituted `__REPO__` would be a path systemd cannot resolve.
+
+    Directives only. These templates carry comments naming the placeholders
+    they argue against — including one explaining why the schedule is no longer
+    rendered — and prose that mentions a placeholder is not a placeholder that
+    leaked into a setting.
+    """
+    leftover = [line for line in directives(rendered[unit]) if "__" in line]
 
     assert leftover == []
 
@@ -149,12 +172,62 @@ def test_the_deployer_is_not_the_app(rendered):
 
 
 def test_the_timer_repeats_and_catches_up(rendered):
-    """OnUnitActiveSec repeats; Persistent covers a check missed while off."""
+    """A calendar schedule, which repeats, and Persistent, which now works.
+
+    `Persistent=` only applies to `OnCalendar=` timers. It was in this file
+    for weeks alongside a monotonic schedule, documented as catching up a
+    check missed while the machine was off, and doing nothing at all.
+    """
     timer = rendered[f"{DEPLOY_NAME}.timer"]
 
-    assert "OnUnitActiveSec=" in timer
+    assert "OnCalendar=" in timer
     assert "Persistent=true" in timer
     assert "WantedBy=timers.target" in timer
+
+
+def test_the_timer_survives_being_restarted(rendered):
+    """The property the old assertion was blind to, having asserted the bug.
+
+    A monotonic timer measures from an anchor — the boot, or the last time the
+    service it triggers ran. Restart it any later than boot and both anchors
+    are gone: the boot moment cannot recur, and the interval has nothing to
+    measure from until the service runs, which is what the timer was meant to
+    cause. systemd parks it at `active (elapsed)`, reporting itself enabled and
+    active, and never fires again until reboot.
+
+    That is not hypothetical: `install_units` restarts this timer on purpose
+    whenever the rendered file changes, so the one path meant to update the
+    schedule was the path that turned deployment off. A calendar schedule has
+    no anchor to lose.
+    """
+    settings = directives(rendered[f"{DEPLOY_NAME}.timer"])
+
+    assert not [line for line in settings if line.startswith(("OnBootSec=", "OnUnitActiveSec="))]
+    assert any(line.startswith("OnCalendar=") for line in settings)
+
+
+def test_the_schedule_is_one_systemd_accepts(rendered):
+    """A calendar expression is a small language, and a typo in it does not
+    fail loudly — it produces a timer that simply never fires."""
+    schedule = next(
+        line.split("=", 1)[1]
+        for line in directives(rendered[f"{DEPLOY_NAME}.timer"])
+        if line.startswith("OnCalendar=")
+    )
+
+    checked = subprocess.run(
+        ["systemd-analyze", "calendar", schedule],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if checked.returncode != 0 and "command not found" in checked.stderr:
+        pytest.skip("systemd-analyze is not available here")
+
+    assert checked.returncode == 0, checked.stderr
+    # It has to actually recur. `systemd-analyze` accepts a one-shot timestamp
+    # perfectly happily, and that would deploy once and never again.
+    assert "Next elapse:" in checked.stdout
 
 
 def test_the_timer_names_the_service_it_triggers():
@@ -491,3 +564,53 @@ def test_a_failure_converging_is_reported(monkeypatch):
     )
 
     assert isinstance(deploy.deploy(), deploy.DeployFailed)
+
+
+def test_the_install_points_at_the_deployments_own_interpreter(monkeypatch, tmp_path, caplog):
+    """Not `sys.executable`, which is a different thing after a relocation.
+
+    The installer is started by `uv run` from whichever checkout someone typed
+    `./install.sh` in, and that interpreter path survives both the escalation
+    and the handoff to /srv. Printing it tells a person to re-check their
+    install using the *abandoned* checkout's virtualenv, which then reports —
+    correctly and uselessly — that it is not the deployment.
+    """
+    monkeypatch.setattr("workbench.install.repo_root", lambda: tmp_path)
+
+    with caplog.at_level("INFO"):
+        install.report_success()
+
+    assert f"{tmp_path}/.venv/bin/python -m workbench.doctor" in caplog.text
+    assert sys.executable not in caplog.text
+
+
+def test_every_timer_placeholder_is_one_an_older_installer_provides():
+    """A template is read from the new checkout and rendered by the old
+    installer — the deployer imports its own code before it pulls. So a
+    template needing a placeholder the running renderer has never heard of
+    emits it verbatim, and `OnCalendar=__SCHEDULE__` is a bad unit file setting
+    that fails the timer restart and kills the timer.
+
+    Adding a placeholder is safe, because the old renderer simply never
+    encounters it. Requiring a *new* one in an existing template is not. This
+    pins the timer's schedule as literal text for that reason.
+    """
+    template = (Path("deploy") / "workbench-deploy.timer.template").read_text()
+    schedule = [line for line in template.splitlines() if line.startswith("OnCalendar=")]
+
+    assert schedule == ["OnCalendar=*:0/5"]
+    assert "__" not in schedule[0]
+
+
+def test_the_interval_a_person_is_told_matches_the_one_configured():
+    """The schedule moved into the template and the wording stayed behind, so
+    nothing but this keeps them honest. Being told deploys land within five
+    minutes when they land every fifteen is worse than being told nothing."""
+    schedule = next(
+        line.split("=", 1)[1]
+        for line in directives(render_unit("workbench-deploy.timer.template"))
+        if line.startswith("OnCalendar=")
+    )
+
+    minutes = schedule.rsplit("/", 1)[-1]
+    assert f"{minutes}min" == install.DEPLOY_INTERVAL
