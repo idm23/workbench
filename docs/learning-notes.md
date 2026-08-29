@@ -285,6 +285,66 @@ repository's default branch would silently retarget it.
 - Valid HTTPS needs **HTTPS Certificates** enabled in the admin console — it is what makes
   "Add to Home Screen" behave like a real app.
 
+## A process that pulls new code must not lazily import it
+
+The deploy that shipped a dedicated service account died like this:
+
+```
+File ".../deploy.py", line 482, in refresh_units
+File ".../install.py", line 39, in <module>
+    from workbench.config import (
+ImportError: cannot import name 'agent_git_identity' from 'workbench.config'
+```
+
+Every one of those names exists. The new `install.py` asks for a symbol the new
+`config.py` defines, and importing both together works perfectly — which is why CI, the
+container harness and a local run all passed.
+
+The deployer is a long-running process that changes the code underneath itself. It
+imported `deploy` and `config` at startup, from the *old* commit. Then it fast-forwarded
+the checkout, so the files on disk became new. Then `refresh_units()` did a lazy `from
+workbench.install import ...` — and Python loaded the **new** `install.py` off disk while
+`workbench.config` was already cached in `sys.modules` from the **old** commit. New
+module, old dependency, one process.
+
+The tell was in the traceback: line numbers pointed at the wrong statements, one of them
+a docstring. Python renders frames by reading the file *now* while executing what it
+loaded *then*, so a mismatch between the two is visible in the trace itself.
+
+**A deferred import is a decision about which version of the code runs, not just when it
+loads.** Anywhere a process outlives a change to its own source, every module it will
+ever need must be imported before the change lands. `deploy.py` now imports
+`workbench.install` at module scope, so both halves are always from the same commit — the
+old one — and the deploy after it converges. That the deployer runs one commit behind is
+already the documented design; the lazy import was quietly opting one module out of it.
+
+The preflight (`import workbench.app` in a throwaway subprocess) could not have caught
+this, and it is worth understanding why: in a *fresh* process the new code imports
+fine. The failure only exists in a process that straddles the pull, so no amount of
+checking the new code in isolation would find it.
+
+## An action that only runs on the tick that changed something will eventually not run
+
+Same deploy, second failure, and the more expensive one. The fast-forward succeeded
+before the crash, so the checkout was left at the new commit. Every tick after that
+returned `AlreadyCurrent` — and acceptance ran only on a tick that had *advanced*. So the
+commit was reported on by nobody: no status, red or green, ever again.
+
+Nothing looked wrong. The service was healthy, serving the new revision, units correct,
+journal clean from the next tick onward. Only GitHub knew, by staying silent, and silence
+is what promotion waits on.
+
+The fix is the same shape as the one that made unit installation convergent: decide from
+*state* rather than from *what just happened*. A local marker file records the revision
+acceptance last reported on, and any tick where that disagrees with `HEAD` runs it. One
+outcome is deliberately not recorded — a verdict that ran but never reached GitHub —
+because that is the single case where retrying is what fixes it.
+
+**Every step conditioned on "something changed this tick" is a step that silently stops
+happening the first time a run dies between the change and the step.** Two have now been
+found in this deployer. There is no third at the time of writing, which is not the same
+as there not being one.
+
 ## Small ones
 
 **`curl -I` sends HEAD**, and FastAPI does not auto-add HEAD to a GET route. A `405` with
