@@ -103,3 +103,85 @@ def test_cycle_detection(same):
     child.parent = parent
 
     assert would_create_cycle(parent, parent if same else child)
+
+
+# --- Deriving a parent's status from its children ---------------------------
+
+
+def test_a_leaf_reports_its_own_status():
+    task = make(1)
+    task.status = TaskStatus.BLOCKED
+
+    assert build_tree([task])[0].effective_status is TaskStatus.BLOCKED
+
+
+def test_a_parent_is_active_once_it_has_children():
+    """The moment a plan decomposes a task, it reads as in-progress — not
+    only once a child is picked up."""
+    tasks = [make(1, title="parent"), make(2, parent=1)]
+    tasks[0].status = TaskStatus.OPEN
+    tasks[1].status = TaskStatus.OPEN
+
+    assert build_tree(tasks)[0].effective_status is TaskStatus.ACTIVE
+
+
+def test_a_parent_is_done_once_every_child_is():
+    tasks = [make(1, title="parent"), make(2, parent=1), make(3, parent=1)]
+    tasks[0].status = TaskStatus.OPEN
+    tasks[1].status = TaskStatus.DONE
+    tasks[2].status = TaskStatus.DONE
+
+    assert build_tree(tasks)[0].effective_status is TaskStatus.DONE
+
+
+def test_a_parent_is_blocked_if_any_child_is_even_when_others_are_done():
+    tasks = [make(1, title="parent"), make(2, parent=1), make(3, parent=1)]
+    tasks[0].status = TaskStatus.OPEN
+    tasks[1].status = TaskStatus.DONE
+    tasks[2].status = TaskStatus.BLOCKED
+
+    assert build_tree(tasks)[0].effective_status is TaskStatus.BLOCKED
+
+
+def test_a_manually_set_terminal_status_overrides_the_children():
+    """A person's own word — done or cancelled — is respected regardless of
+    what the children say, and nothing here writes it back."""
+    tasks = [make(1, title="parent"), make(2, parent=1)]
+    tasks[0].status = TaskStatus.CANCELLED
+    tasks[1].status = TaskStatus.OPEN
+
+    assert build_tree(tasks)[0].effective_status is TaskStatus.CANCELLED
+
+
+def test_effective_status_derives_recursively():
+    """A grandparent's status follows a parent's *derived* status, not its
+    raw stored one."""
+    tasks = [
+        make(1, title="grandparent"),
+        make(2, parent=1, title="parent"),
+        make(3, parent=2, title="child"),
+    ]
+    tasks[0].status = TaskStatus.OPEN
+    tasks[1].status = TaskStatus.OPEN
+    tasks[2].status = TaskStatus.BLOCKED
+
+    grandparent = build_tree(tasks)[0]
+    assert grandparent.children[0].effective_status is TaskStatus.BLOCKED
+    assert grandparent.effective_status is TaskStatus.BLOCKED
+
+
+def test_done_count_uses_effective_status_not_raw_status():
+    """A nested parent counts toward progress once its own children are all
+    done, even though nothing ever set its own stored status to done."""
+    tasks = [
+        make(1, title="parent"),
+        make(2, parent=1, title="child-parent"),
+        make(3, parent=2, title="grandchild"),
+    ]
+    tasks[0].status = TaskStatus.OPEN
+    tasks[1].status = TaskStatus.OPEN  # never marked done directly
+    tasks[2].status = TaskStatus.DONE  # but its own child is
+
+    roots = build_tree(tasks)
+    assert roots[0].children[0].effective_status is TaskStatus.DONE
+    assert roots[0].progress == "1/1"

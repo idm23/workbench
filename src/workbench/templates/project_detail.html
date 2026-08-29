@@ -24,14 +24,15 @@
   <ul class="tree">
     {% for node in nodes %}
       {% set busy = activity.get(node.task.id) %}
+      {% set effective_status = node.effective_status %}
       <li style="padding-left: {{ node.depth * 1.25 }}rem;">
-        <div class="task {{ 'done' if node.task.status == 'done' }} {{ 'busy' if busy }}">
+        <div class="task {{ 'done' if effective_status == 'done' }} {{ 'busy' if busy }}">
           <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
             <input type="hidden" name="new_status"
-                   value="{{ 'open' if node.task.status == 'done' else 'done' }}">
+                   value="{{ 'open' if effective_status == 'done' else 'done' }}">
             <button class="tick" type="submit"
-                    aria-label="{{ 'Reopen' if node.task.status == 'done' else 'Mark done' }}"
-            >{{ '✓' if node.task.status == 'done' else '' }}</button>
+                    aria-label="{{ 'Reopen' if effective_status == 'done' else 'Mark done' }}"
+            >{{ '✓' if effective_status == 'done' else '' }}</button>
           </form>
 
           <div class="task-body">
@@ -50,24 +51,41 @@
                    title="Run {{ busy.run_id }} is {{ busy.status }}"
                 ><span class="pip"></span>{{ busy.label }}</a>&nbsp;
               {% endif %}
-              <span class="status {{ node.task.status }}">{{ node.task.status }}</span>
+              <span class="status {{ effective_status }}">{{ effective_status }}</span>
               {% if node.task.branch %}
                 <span class="mono">&nbsp;{{ node.task.branch }}</span>
               {% endif %}
             </div>
 
             <div class="task-actions">
-              {% if busy %}
+              {% if busy and busy.needs_attention and busy.phase == 'plan' %}
+                {# A plan a person has not yet acted on. What approving does
+                   depends on what the plan decided: decompose, or carry out
+                   directly — the button says which before it is pressed. #}
+                <form method="post" action="/runs/{{ busy.run_id }}/approve">
+                  <button class="slim" type="submit">{% if busy.proposed_subtask_count %}Approve ({{ busy.proposed_subtask_count }} subtask{{ 's' if busy.proposed_subtask_count != 1 }}){% else %}Execute{% endif %}</button>
+                </form>
+                <form method="post" action="/runs/{{ busy.run_id }}/cancel">
+                  <button class="slim secondary" type="submit">Discard</button>
+                </form>
+              {% elif busy and busy.needs_attention %}
+                {# An execute run reported it needs re-planning: resume the
+                   same worktree and conversation, not a fresh choice. #}
+                <form method="post" action="/tasks/{{ node.task.id }}/runs">
+                  <input type="hidden" name="phase" value="plan">
+                  <button class="slim" type="submit">Plan</button>
+                </form>
+              {% elif busy %}
                 <form method="post" action="/runs/{{ busy.run_id }}/cancel">
                   <button class="slim secondary" type="submit">Stop run</button>
                 </form>
-              {% elif node.is_leaf and checkout %}
+              {% elif node.is_leaf and checkout and effective_status not in ('done', 'cancelled') %}
                 {# Only leaves: a task with children describes work rather than
                    being work, so an agent pointed at one has nothing single to
                    do. And nothing can run before there is a checkout. #}
                 <form method="post" action="/tasks/{{ node.task.id }}/runs"
                       style="display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;">
-                  <input type="hidden" name="phase" value="plan">
+                  <input type="hidden" name="phase" value="{{ node.task.entry_phase or 'plan' }}">
                   {% set choices = origin_choices.get(node.task.id) %}
                   {% if choices %}
                     {# Only a task with no worktree yet has anything to
@@ -84,7 +102,7 @@
                       {% endfor %}
                     </select>
                   {% endif %}
-                  <button class="slim" type="submit">Plan</button>
+                  <button class="slim" type="submit">{{ 'Execute' if node.task.entry_phase == 'execute' else 'Plan' }}</button>
                 </form>
               {% endif %}
               <form method="post" action="/tasks/{{ node.task.id }}/delete">

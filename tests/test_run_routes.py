@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from workbench.app import app
 from workbench.database.db import get_db, get_engine, get_session_factory, make_engine
-from workbench.database.models import Base, Project, Run, RunStatus, Task, User
+from workbench.database.models import Base, Project, Run, RunStatus, Task, TaskStatus, User
 from workbench.runs import lifecycle
 from workbench.runs import stream as stream_module
 from workbench.runs.executors import Started, StartRefused
@@ -290,6 +290,105 @@ def test_cancelling_a_run_that_does_not_exist_is_a_404(client, session):
     assert client.post("/runs/999/cancel").status_code == 404
 
 
+# --- Approving a plan --------------------------------------------------------
+
+
+def _plan_awaiting_review(session, task=None, proposed_subtasks=None):
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run, finish_run
+
+    run = create_run(session, task or a_task(session), RunPhase.PLAN, backend="claude")
+    finish_run(
+        session,
+        run,
+        RunStatus.AWAITING_REVIEW,
+        plan="Here is the plan.",
+        proposed_subtasks=proposed_subtasks,
+    )
+    return run
+
+
+def test_approving_a_plan_with_no_subtasks_starts_execute(client, session, executor):
+    from workbench.database.models import RunPhase
+
+    run = _plan_awaiting_review(session)
+
+    response = client.post(f"/runs/{run.id}/approve")
+
+    assert response.status_code == 303
+    assert "execute" in response.headers["location"]
+    assert len(executor.started) == 1
+    new_run = session.get(Run, executor.started[0])
+    assert new_run.phase is RunPhase.EXECUTE
+    assert new_run.task_id == run.task_id
+
+
+def test_approving_a_decomposed_plan_creates_its_subtasks_instead(client, session, executor):
+    task = a_task(session)
+    run = _plan_awaiting_review(
+        session,
+        task=task,
+        proposed_subtasks={
+            "subtasks": [
+                {"title": "Do part A", "body": "details", "ready_to_execute": True},
+                {"title": "Investigate B", "body": None, "ready_to_execute": False},
+            ]
+        },
+    )
+
+    response = client.post(f"/runs/{run.id}/approve")
+
+    assert response.status_code == 303
+    assert "Created+2+subtask" in response.headers["location"]
+    assert executor.started == []  # nothing was run — only tasks were created
+    children = session.query(Task).filter_by(parent_id=task.id).order_by(Task.id).all()
+    assert [c.title for c in children] == ["Do part A", "Investigate B"]
+    from workbench.database.models import RunPhase
+
+    assert children[0].entry_phase is RunPhase.EXECUTE
+    assert children[1].entry_phase is None
+
+
+def test_a_decomposed_subtask_defaults_its_origin_to_the_parent(client, session, executor):
+    task = a_task(session)
+    task.branch = "workbench/task-1-write-the-runner"
+    session.commit()
+    run = _plan_awaiting_review(
+        session, task=task, proposed_subtasks={"subtasks": [{"title": "x", "body": None}]}
+    )
+
+    client.post(f"/runs/{run.id}/approve")
+
+    child = session.query(Task).filter_by(title="x").one()
+    assert child.origin_ref == f"task:{task.id}"
+
+
+def test_approving_a_run_that_is_not_awaiting_review_is_refused(client, session, executor):
+    run = _plan_awaiting_review(session)
+    run.status = RunStatus.SUCCEEDED
+    session.commit()
+
+    response = client.post(f"/runs/{run.id}/approve")
+
+    assert "no+plan+awaiting+approval" in response.headers["location"]
+
+
+def test_approving_a_non_plan_run_is_refused(client, session, executor):
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run, finish_run
+
+    run = create_run(session, a_task(session), RunPhase.EXECUTE, backend="claude")
+    finish_run(session, run, RunStatus.AWAITING_REVIEW)
+
+    response = client.post(f"/runs/{run.id}/approve")
+
+    assert "no+plan+awaiting+approval" in response.headers["location"]
+
+
+def test_approving_a_missing_run_is_a_404(client, session):
+    assert client.post("/runs/999/approve").status_code == 404
+
+
 # --- What the page offers --------------------------------------------------
 
 
@@ -349,6 +448,74 @@ def test_a_running_task_offers_to_stop_instead(client, session, cloned, executor
 
     assert "/runs/1/cancel" in page
     assert "Stop run" in page
+
+
+def test_a_plan_awaiting_review_offers_to_approve(client, session, cloned):
+    task = a_task(session)
+    run = _plan_awaiting_review(session, task=task)
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/runs/{run.id}/approve" in page
+    assert ">Execute<" in page
+    assert "Discard" in page
+
+
+def test_a_decomposing_plan_says_how_many_subtasks(client, session, cloned):
+    task = a_task(session)
+    run = _plan_awaiting_review(
+        session, task=task, proposed_subtasks={"subtasks": [{"title": "a"}, {"title": "b"}]}
+    )
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/runs/{run.id}/approve" in page
+    assert "Approve (2 subtasks)" in page
+
+
+def test_a_needs_replanning_execute_run_offers_to_plan_again(client, session, cloned):
+    from workbench.database.models import RunOutcome, RunPhase, TaskStatus
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    run.agent_outcome = RunOutcome.NEEDS_REPLANNING
+    task.status = TaskStatus.BLOCKED
+    session.commit()
+    finish_run(session, run, RunStatus.AWAITING_REVIEW, summary="stuck")
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/tasks/{task.id}/runs" in page
+    assert ">Plan<" in page
+    # Re-planning resumes the same task, not a fresh origin choice.
+    assert f"/runs/{run.id}/approve" not in page
+
+
+def test_a_done_task_is_not_offered_another_run(client, session, cloned):
+    """The project's other seeded task is still open, so a Plan button
+    remains on the page — just not on this one."""
+    task = a_task(session)
+    task.status = TaskStatus.DONE
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert page.count(">Plan<") == 1
+    assert ">Execute<" not in page
+
+
+def test_an_execute_ready_task_offers_to_execute_first(client, session, cloned):
+    from workbench.database.models import RunPhase
+
+    task = a_task(session)
+    task.entry_phase = RunPhase.EXECUTE
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert page.count(">Execute<") == 1
+    assert page.count(">Plan<") == 1  # the project's other, unplanned task
 
 
 # --- Reading a run back ----------------------------------------------------

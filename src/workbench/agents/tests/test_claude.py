@@ -41,6 +41,7 @@ from workbench.agents.protocol import (
     AgentFinished,
     AgentRequest,
     AgentUnavailable,
+    SubtaskProposal,
 )
 from workbench.agents.tests.helpers import drain
 from workbench.database.models import RunEventKind, RunPhase
@@ -300,6 +301,75 @@ def test_each_phase_gets_its_own_turn_limit(monkeypatch):
     assert plan_turns < captured["options"].max_turns
 
 
+# --- Calling back into Workbench --------------------------------------------
+
+
+def test_the_run_and_task_ids_reach_the_environment(monkeypatch):
+    from workbench.config import port
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(run_id=42, task_id=7)))
+
+    assert captured["options"].env == {
+        "WORKBENCH_RUN_ID": "42",
+        "WORKBENCH_TASK_ID": "7",
+        "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
+    }
+
+
+def test_execute_loads_the_outcome_skill(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.EXECUTE)))
+
+    assert captured["options"].plugins == [
+        {"type": "local", "path": str(backend_module._PLUGIN_DIR)}
+    ]
+    assert captured["options"].skills == ["workbench-outcome"]
+
+
+def test_plan_does_not_load_the_outcome_skill(monkeypatch):
+    """It cannot call it anyway — plan mode runs no tools at all."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))
+
+    assert captured["options"].plugins == []
+
+
+def test_plan_sets_the_structured_output_schema(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))
+
+    assert captured["options"].output_format == backend_module._PLAN_OUTPUT_FORMAT
+
+
+def test_execute_does_not_set_a_structured_output_schema(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.EXECUTE)))
+
+    assert captured["options"].output_format is None
+
+
+def test_the_outcome_skill_files_exist():
+    """A path handed to the SDK that silently does not exist would leave the
+    agent with no skill and no error — nothing would say so."""
+    plugin_json = backend_module._PLUGIN_DIR / ".claude-plugin" / "plugin.json"
+    skill_md = backend_module._PLUGIN_DIR / "skills" / "workbench-outcome" / "SKILL.md"
+
+    assert plugin_json.is_file()
+    assert skill_md.is_file()
+    assert "workbench-outcome" in skill_md.read_text()
+
+
 # --- Outcomes --------------------------------------------------------------
 
 
@@ -321,6 +391,115 @@ def test_a_completed_run_reports_its_text_token_and_usage(monkeypatch):
     assert outcome.resume_token == "session-abc"
     assert outcome.total_cost_usd == 0.42
     assert outcome.num_turns == 4
+
+
+def test_a_plans_structured_plan_text_is_used_over_the_raw_result(monkeypatch):
+    """`result.result` is the schema's JSON as text when output_format is set —
+    showing that to a person would be unreadable."""
+    monkeypatch.setattr(
+        backend_module,
+        "query",
+        stub_query(
+            [
+                a_result(
+                    result='{"plan": "do X", "subtasks": []}',
+                    structured_output={"plan": "do X", "subtasks": []},
+                )
+            ]
+        ),
+    )
+
+    outcome = drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.text == "do X"
+
+
+def test_a_plans_proposed_subtasks_are_parsed(monkeypatch):
+    monkeypatch.setattr(
+        backend_module,
+        "query",
+        stub_query(
+            [
+                a_result(
+                    structured_output={
+                        "plan": "do X",
+                        "subtasks": [
+                            {"title": "a", "body": "b", "ready_to_execute": True},
+                            {"title": "c", "body": "", "ready_to_execute": False},
+                        ],
+                    }
+                )
+            ]
+        ),
+    )
+
+    outcome = drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.proposed_subtasks == [
+        SubtaskProposal(title="a", body="b", ready_to_execute=True),
+        SubtaskProposal(title="c", body="", ready_to_execute=False),
+    ]
+
+
+def test_an_execute_runs_structured_output_is_ignored(monkeypatch):
+    """Execute never sets `output_format`, but stray data should still not
+    leak into what gets shown or acted on."""
+    monkeypatch.setattr(
+        backend_module,
+        "query",
+        stub_query([a_result(result="the real summary", structured_output={"plan": "nope"})]),
+    )
+
+    outcome = drain(ClaudeBackend().run(a_request(phase=RunPhase.EXECUTE)))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.text == "the real summary"
+    assert outcome.proposed_subtasks is None
+
+
+def test_a_result_with_no_structured_output_proposes_nothing(monkeypatch):
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()]))
+
+    outcome = drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.proposed_subtasks is None
+    assert outcome.text == "Here is what I did."  # falls back to result.result
+
+
+def test_a_cut_short_result_is_marked_stopped_early(monkeypatch):
+    monkeypatch.setattr(
+        backend_module, "query", stub_query([a_result(terminal_reason="aborted_tools")])
+    )
+
+    outcome = drain(ClaudeBackend().run(a_request()))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.stopped_early is True
+
+
+def test_a_cleanly_completed_result_is_not_stopped_early(monkeypatch):
+    monkeypatch.setattr(
+        backend_module, "query", stub_query([a_result(terminal_reason="completed")])
+    )
+
+    outcome = drain(ClaudeBackend().run(a_request()))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.stopped_early is False
+
+
+def test_an_older_sdk_with_no_terminal_reason_is_not_stopped_early(monkeypatch):
+    """The field might not exist on an older SDK version — absence must not
+    read as a problem."""
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()]))
+
+    outcome = drain(ClaudeBackend().run(a_request()))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.stopped_early is False
 
 
 def test_the_model_recorded_is_the_one_that_answered(monkeypatch):

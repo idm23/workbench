@@ -34,7 +34,7 @@ class TaskNode:
 
     @property
     def done_count(self) -> int:
-        return sum(1 for child in self.children if child.task.status is TaskStatus.DONE)
+        return sum(1 for child in self.children if child.effective_status is TaskStatus.DONE)
 
     @property
     def progress(self) -> str | None:
@@ -42,6 +42,30 @@ class TaskNode:
         if not self.children:
             return None
         return f"{self.done_count}/{len(self.children)}"
+
+    @property
+    def effective_status(self) -> TaskStatus:
+        """The status to render, deriving from children once there are any.
+
+        A task that decomposed into subtasks is itself "in progress" the
+        moment it has them, not only once a child gets picked up — this is
+        what answers CLAUDE.md's open question of whether a parent's status
+        should derive from its children: yes. A manually-set terminal status
+        (done or cancelled) is a person's own word and is respected regardless
+        of what the children say — nothing here writes to `task.status`, this
+        only changes what a page renders.
+        """
+        if not self.children:
+            return self.task.status
+        if self.task.status in (TaskStatus.DONE, TaskStatus.CANCELLED):
+            return self.task.status
+
+        statuses = [child.effective_status for child in self.children]
+        if any(status is TaskStatus.BLOCKED for status in statuses):
+            return TaskStatus.BLOCKED
+        if all(status is TaskStatus.DONE for status in statuses):
+            return TaskStatus.DONE
+        return TaskStatus.ACTIVE
 
 
 def build_tree(tasks: list[Task]) -> list[TaskNode]:

@@ -11,7 +11,7 @@ checked against the tree as it exists now, not as it existed then.
 from dataclasses import dataclass
 
 from workbench.database.models import Task
-from workbench.tasks.store import branch_choices_for
+from workbench.tasks.store import branch_choices_for, task_id_from_origin_value, task_origin_value
 
 #: The two branches every project is assumed to have, mirroring this
 #: project's own main/staging convention. Neither is looked up on GitHub:
@@ -21,19 +21,12 @@ from workbench.tasks.store import branch_choices_for
 PROD = "main"
 DEV = "staging"
 
-_TASK_PREFIX = "task:"
-
 
 @dataclass(frozen=True)
 class InvalidOrigin:
     """The submitted origin does not name anything this task can branch from."""
 
     message: str
-
-
-def task_origin_value(other: Task) -> str:
-    """The form value that selects another task's branch as the origin."""
-    return f"{_TASK_PREFIX}{other.id}"
 
 
 def origin_choices(task: Task) -> list[tuple[str, str]]:
@@ -59,14 +52,13 @@ def resolve_origin(task: Task, origin_ref: str | None) -> str | InvalidOrigin:
         return task.project.default_branch or "main"
     if choice == DEV:
         return DEV
-    if choice.startswith(_TASK_PREFIX):
-        other_id = choice.removeprefix(_TASK_PREFIX)
-        if other_id.isdigit():
-            other = next((t for t in branch_choices_for(task) if t.id == int(other_id)), None)
-            # `branch_choices_for` only ever returns tasks with a branch, but
-            # that is a runtime invariant a type checker cannot see through.
-            if other is not None and other.branch is not None:
-                return other.branch
+    other_id = task_id_from_origin_value(choice)
+    if other_id is not None:
+        other = next((t for t in branch_choices_for(task) if t.id == other_id), None)
+        # `branch_choices_for` only ever returns tasks with a branch, but
+        # that is a runtime invariant a type checker cannot see through.
+        if other is not None and other.branch is not None:
+            return other.branch
 
     return InvalidOrigin(f"{origin_ref!r} is not a valid origin for this task.")
 

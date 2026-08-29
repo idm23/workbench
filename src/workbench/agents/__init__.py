@@ -18,6 +18,7 @@ from workbench.agents.protocol import (
     AgentStream,
     AgentUnavailable,
     Backend,
+    SubtaskProposal,
 )
 from workbench.agents.registry import UnknownBackend, available_backends, get_backend
 
@@ -30,6 +31,7 @@ __all__ = [
     "AgentStream",
     "AgentUnavailable",
     "Backend",
+    "SubtaskProposal",
     "UnknownBackend",
     "available_backends",
     "execute_prompt",

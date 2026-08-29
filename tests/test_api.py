@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from workbench.app import app
 from workbench.database.db import get_db, make_engine
-from workbench.database.models import Base, Project, User
+from workbench.database.models import Base, Project, Run, RunOutcome, RunPhase, Task, User
+from workbench.runs.store import create_run, mark_running
 
 
 @pytest.fixture
@@ -50,6 +51,10 @@ def client(tmp_path, monkeypatch):
         setup.commit()
 
     with TestClient(app) as client:
+        # Attached rather than exposed as a second fixture: a couple of tests
+        # need to set up a `Run` directly, which has no HTTP route of its own
+        # to create one, and this shares the same engine the app is reading.
+        client.engine = engine
         yield client
 
     app.dependency_overrides.clear()
@@ -174,3 +179,128 @@ def test_the_api_and_the_forms_agree(client):
 
     titles = [task["title"] for task in client.get("/api/projects/1/tasks").json()]
     assert titles == ["via the API", "via the form"]
+
+
+# --- Subtasks: a plan's decomposition, or a live execute-run spin-off ------
+
+
+def test_a_subtask_is_created_under_its_parent(client):
+    parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
+
+    response = client.post(f"/api/tasks/{parent['id']}/subtasks", json={"title": "child"})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["title"] == "child"
+    assert body["parent_id"] == parent["id"]
+
+
+def test_a_ready_subtask_sets_entry_phase_to_execute(client):
+    parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
+
+    client.post(
+        f"/api/tasks/{parent['id']}/subtasks",
+        json={"title": "child", "ready_to_execute": True},
+    )
+
+    with Session(client.engine) as db:
+        child = db.query(Task).filter_by(title="child").one()
+        assert child.entry_phase is RunPhase.EXECUTE
+
+
+def test_a_subtask_defaults_its_origin_to_the_parents_branch(client):
+    parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
+    with Session(client.engine) as db:
+        db.get(Task, parent["id"]).branch = "workbench/task-1-parent"
+        db.commit()
+
+    client.post(f"/api/tasks/{parent['id']}/subtasks", json={"title": "child"})
+
+    with Session(client.engine) as db:
+        child = db.query(Task).filter_by(title="child").one()
+        assert child.origin_ref == f"task:{parent['id']}"
+
+
+def test_a_subtask_under_an_unbranched_parent_has_no_origin_set(client):
+    parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
+
+    client.post(f"/api/tasks/{parent['id']}/subtasks", json={"title": "child"})
+
+    with Session(client.engine) as db:
+        child = db.query(Task).filter_by(title="child").one()
+        assert child.origin_ref is None
+
+
+def test_a_subtask_of_a_missing_task_is_404(client):
+    assert client.post("/api/tasks/9999/subtasks", json={"title": "x"}).status_code == 404
+
+
+# --- Outcomes: what the agent itself reports, live -------------------------
+
+
+def _running_execute_run(client, task_id: int) -> int:
+    """A run this test can report an outcome against.
+
+    Set up directly rather than over HTTP: starting a real run needs an
+    executor, which is out of scope here — these tests are about the
+    outcome endpoint's own validation, not the run lifecycle.
+    """
+    with Session(client.engine) as db:
+        run = create_run(db, db.get(Task, task_id), RunPhase.EXECUTE, backend="fake")
+        mark_running(db, run)
+        return run.id
+
+
+def test_an_outcome_is_recorded_on_the_run(client):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+    run_id = _running_execute_run(client, task["id"])
+
+    response = client.post(
+        f"/api/runs/{run_id}/outcome",
+        json={"outcome": "needs_replanning", "detail": "stuck"},
+    )
+
+    assert response.status_code == 204
+    with Session(client.engine) as db:
+        run = db.get(Run, run_id)
+        assert run.agent_outcome is RunOutcome.NEEDS_REPLANNING
+        assert run.outcome_detail == "stuck"
+
+
+def test_an_invalid_outcome_value_is_rejected(client):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+    run_id = _running_execute_run(client, task["id"])
+
+    response = client.post(f"/api/runs/{run_id}/outcome", json={"outcome": "nonsense"})
+
+    assert response.status_code == 422
+
+
+def test_an_outcome_for_a_non_running_run_is_rejected(client):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+    with Session(client.engine) as db:
+        run = create_run(db, db.get(Task, task["id"]), RunPhase.EXECUTE, backend="fake")
+        run_id = run.id
+
+    response = client.post(f"/api/runs/{run_id}/outcome", json={"outcome": "finished"})
+
+    assert response.status_code == 422
+    assert "not running" in response.json()["detail"]
+
+
+def test_an_outcome_for_a_plan_run_is_rejected(client):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+    with Session(client.engine) as db:
+        run = create_run(db, db.get(Task, task["id"]), RunPhase.PLAN, backend="fake")
+        mark_running(db, run)
+        run_id = run.id
+
+    response = client.post(f"/api/runs/{run_id}/outcome", json={"outcome": "finished"})
+
+    assert response.status_code == 422
+    assert "execute-phase" in response.json()["detail"]
+
+
+def test_an_outcome_for_a_missing_run_is_404(client):
+    response = client.post("/api/runs/9999/outcome", json={"outcome": "finished"})
+    assert response.status_code == 404

@@ -22,9 +22,26 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from workbench.database.db import get_db
-from workbench.database.models import Project, Task, TaskStatus
+from workbench.database.models import (
+    Project,
+    Run,
+    RunOutcome,
+    RunPhase,
+    RunStatus,
+    Task,
+    TaskStatus,
+)
 from workbench.git.worktrees import local_checkout
-from workbench.tasks import TaskNode, WrongProject, build_tree, create_task, delete_task, set_status
+from workbench.runs.store import report_outcome
+from workbench.tasks import (
+    TaskNode,
+    WrongProject,
+    build_tree,
+    create_subtask,
+    create_task,
+    delete_task,
+    set_status,
+)
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -65,6 +82,23 @@ class TaskPatch(BaseModel):
     status: TaskStatus | None = None
 
 
+class SubtaskIn(BaseModel):
+    """A piece of a decomposition — from a plan's approval, or a live
+    execute-run spin-off. `ready_to_execute` is the caller's own judgement
+    that this piece is fully specified, skipping its own planning pass."""
+
+    title: str = Field(min_length=1, max_length=300)
+    body: str | None = None
+    ready_to_execute: bool = False
+
+
+class OutcomeIn(BaseModel):
+    """What an execute run's agent reports happened, via the live outcome API."""
+
+    outcome: RunOutcome
+    detail: str | None = None
+
+
 DbSession = Annotated[Session, Depends(get_db)]
 
 
@@ -91,6 +125,13 @@ def _task_or_404(db: Session, task_id: int) -> Task:
     if task is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No task with id {task_id}.")
     return task
+
+
+def _run_or_404(db: Session, run_id: int) -> Run:
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+    return run
 
 
 @router.get("/projects", response_model=list[ProjectSummary])
@@ -150,6 +191,40 @@ def add_task(db: DbSession, project_id: int, incoming: TaskIn) -> TaskOut:
     )
 
 
+@router.post(
+    "/tasks/{task_id}/subtasks",
+    response_model=TaskOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_subtask(db: DbSession, task_id: int, incoming: SubtaskIn) -> TaskOut:
+    """A child of `task_id`, from a plan's decomposition or a live spin-off.
+
+    The second caller — an execute run deciding mid-task that a piece needs
+    its own investigation — is exactly why this is reachable over HTTP at
+    all rather than only from the approve route: it is called from inside a
+    run, on the same machine, by the `workbench-outcome` skill.
+    """
+    task = _task_or_404(db, task_id)
+    created = create_subtask(
+        db,
+        task,
+        title=incoming.title,
+        body=incoming.body,
+        ready_to_execute=incoming.ready_to_execute,
+    )
+    if isinstance(created, WrongProject):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, created.message)
+
+    return TaskOut(
+        id=created.id,
+        title=created.title,
+        body=created.body,
+        status=created.status,
+        parent_id=created.parent_id,
+        children=[],
+    )
+
+
 @router.patch("/tasks/{task_id}", response_model=TaskOut)
 def update_task(db: DbSession, task_id: int, patch: TaskPatch) -> TaskOut:
     task = _task_or_404(db, task_id)
@@ -169,3 +244,30 @@ def update_task(db: DbSession, task_id: int, patch: TaskPatch) -> TaskOut:
 def remove_task(db: DbSession, task_id: int) -> None:
     """Delete a task and everything under it, worktrees included."""
     delete_task(db, _task_or_404(db, task_id))
+
+
+@router.post("/runs/{run_id}/outcome", status_code=status.HTTP_204_NO_CONTENT)
+def report_run_outcome(db: DbSession, run_id: int, incoming: OutcomeIn) -> None:
+    """The agent itself reporting what happened, called live from inside the run.
+
+    Written immediately rather than deferred to when the run finishes, so the
+    decision survives a crash or a deploy restart that kills the process
+    first — the same reasoning `runs.store.report_outcome` states.
+
+    Only an execute run reports here: the plan phase runs under real
+    read-only plan mode, which cannot call this at all, and decomposes
+    through structured output instead.
+    """
+    run = _run_or_404(db, run_id)
+    if run.status is not RunStatus.RUNNING:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Run {run_id} is {run.status.value}, not running.",
+        )
+    if run.phase is not RunPhase.EXECUTE:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Only an execute-phase run reports an outcome this way.",
+        )
+
+    report_outcome(db, run, incoming.outcome, incoming.detail)

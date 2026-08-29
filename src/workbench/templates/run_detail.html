@@ -21,13 +21,38 @@
     <div><span>Reported cost</span><span title="A token valuation, not an amount charged">${{ '%.4f'|format(run.total_cost_usd) }}</span></div>
   {% endif %}
   {% if task.branch %}<div><span>Branch</span><span class="mono">{{ task.branch }}</span></div>{% endif %}
+  {% if run.agent_outcome %}
+    {# What the agent itself reported, through the live outcome API — distinct
+       from `run.status`, which only says whether the process crashed. #}
+    <div><span>Outcome</span><span class="status {{ run.agent_outcome }}">{{ run.agent_outcome }}</span></div>
+  {% endif %}
 </div>
 
 {% if run.error %}<p class="msg error">{{ run.error }}</p>{% endif %}
+{% if run.outcome_detail and not run.error %}
+  {# needs_replanning is an expected, unalarming outcome, so it renders as a
+     plain notice rather than borrowing the error banner's red styling. #}
+  <p class="msg notice">{{ run.outcome_detail }}</p>
+{% endif %}
 
 {% if run.plan %}
   <h2 class="section">Plan</h2>
   <pre class="block">{{ run.plan }}</pre>
+{% endif %}
+
+{% if run.proposed_subtasks %}
+  <h2 class="section">Proposed subtasks</h2>
+  <ul class="items">
+    {% for subtask in run.proposed_subtasks.subtasks %}
+      <li style="padding: .9rem 0;">
+        <div class="row-title">
+          {{ subtask.title }}
+          <span class="chev">{{ 'execute' if subtask.ready_to_execute else 'plan' }}</span>
+        </div>
+        {% if subtask.body %}<div class="row-meta">{{ subtask.body }}</div>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
 {% endif %}
 
 {% if run.summary %}

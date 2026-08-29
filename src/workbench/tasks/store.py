@@ -16,8 +16,13 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from workbench.database.models import Project, Task, TaskStatus
+from workbench.database.models import Project, RunPhase, Task, TaskStatus
 from workbench.git.worktrees import local_checkout, remove_worktree
+
+#: How a task is named when it is itself the origin something else branches
+#: from. Lives here, not in `tasks.origin`, because `origin` already imports
+#: `branch_choices_for` from this module — the reverse import would cycle.
+_TASK_ORIGIN_PREFIX = "task:"
 
 
 @dataclass(frozen=True)
@@ -124,3 +129,43 @@ def branch_choices_for(task: Task) -> list[Task]:
     while root.parent is not None:
         root = root.parent
     return [other for other in descendants(root) if other.id != task.id and other.branch]
+
+
+def task_origin_value(task: Task) -> str:
+    """The form/API value that selects `task`'s own branch as an origin."""
+    return f"{_TASK_ORIGIN_PREFIX}{task.id}"
+
+
+def task_id_from_origin_value(value: str) -> int | None:
+    """The task id named by `task_origin_value`, or None if `value` is not one."""
+    suffix = value.removeprefix(_TASK_ORIGIN_PREFIX)
+    if suffix == value or not suffix.isdigit():
+        return None
+    return int(suffix)
+
+
+def create_subtask(
+    db: Session,
+    task: Task,
+    title: str,
+    body: str | None = None,
+    ready_to_execute: bool = False,
+) -> Task | WrongProject:
+    """Add a child of `task`, from a plan's decomposition or an execute run's
+    live spin-off — the two callers this exists for.
+
+    Defaults the new task's origin to `task`'s own branch when it has one:
+    a subtask spun off mid-plan or mid-execute is continuing that work, not
+    starting fresh from main. `ready_to_execute` sets `entry_phase` so a
+    fully-specified piece can skip its own planning pass.
+    """
+    created = create_task(db, task.project, title=title, body=body, parent_id=task.id)
+    if isinstance(created, WrongProject):
+        return created
+
+    if ready_to_execute:
+        created.entry_phase = RunPhase.EXECUTE
+    if task.branch:
+        created.origin_ref = task_origin_value(task)
+    db.commit()
+    return created
