@@ -46,5 +46,11 @@ ReadWritePaths=__REPO__/data
 # the manager's home — /root for a system service — regardless of User=.
 ReadWritePaths=-__HOME__/.claude
 
+# And this one, which is a separate file *beside* that directory rather than
+# inside it — so an allowlist naming only .claude leaves it read-only under
+# ProtectSystem=strict. The CLI writes it, and the symptom of missing it is the
+# same late, confusing one described above.
+ReadWritePaths=-__HOME__/.claude.json
+
 [Install]
 WantedBy=multi-user.target

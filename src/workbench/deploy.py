@@ -24,7 +24,6 @@ here are ordinary conditions — a dirty checkout, a diverged branch, no network
 """
 
 import logging
-import os
 import pwd
 import shutil
 import sqlite3
@@ -32,7 +31,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+# Imported as a module, not by name. These are reached through the module
+# attribute at call time so that a test patching `workbench.install.x` is
+# actually patching what this calls — with names bound at import, it would not
+# be, and the first thing to notice would be a unit test shelling out to sudo.
+from workbench import install
 from workbench.config import (
+    data_dir,
     database_path,
     deploy_branch,
     ensure_data_dir,
@@ -92,15 +97,14 @@ def repo_owner() -> pwd.struct_passwd:
 
 
 def _owner_environment() -> dict[str, str]:
-    """The environment a command should see when run as the checkout's owner.
+    """The environment a command sees when run as the checkout's owner.
 
-    Dropping privileges with setuid does not change the environment the way a
-    login would, so HOME would still point at root's. That matters: uv resolves
-    its cache from HOME, and git looks there for user configuration. Setting it
-    explicitly is the part `runuser` used to do for us.
+    The installer owns the implementation, because it needs exactly the same
+    thing and two copies of "become the service account" is two places for it
+    to drift — one of which would then be creating root-owned files in a
+    directory the service has to write.
     """
-    owner = repo_owner()
-    return {**os.environ, "HOME": owner.pw_dir, "USER": owner.pw_name, "LOGNAME": owner.pw_name}
+    return install.owner_environment()
 
 
 def _run(argv: list[str], *, as_owner: bool, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -112,28 +116,13 @@ def _run(argv: list[str], *, as_owner: bool, timeout: int) -> subprocess.Complet
     beside the database — and the service, which runs unprivileged, could then
     no longer write its own data directory.
 
-    Uses subprocess's own user= rather than shelling out to `runuser`. Both
-    end up calling setuid, but runuser opens a PAM session to get there, and
-    PAM logs every one of them — three lines per command, thirty per deploy,
-    into the journal that is the only place a bad deploy explains itself. This
-    also spawns one process instead of two.
+    The drop itself lives in `install.service_run`, because the installer needs
+    exactly the same thing and two copies of "become the service account" is
+    two places for it to drift — one of which would then be creating root-owned
+    files in a directory the service has to write.
     """
-    if as_owner and os.geteuid() == 0:
-        owner = repo_owner()
-        return subprocess.run(
-            argv,
-            cwd=repo_root(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            user=owner.pw_uid,
-            group=owner.pw_gid,
-            # Supplementary groups are not inherited across setuid, and leaving
-            # root's would hand the child more access than the owner has.
-            extra_groups=[],
-            env=_owner_environment(),
-        )
+    if as_owner:
+        return install.service_run(argv, timeout=timeout)
 
     return subprocess.run(
         argv,
@@ -306,7 +295,9 @@ def rebuild_and_restart() -> DeployFailed | None:
     """
     uv = _uv()
     if uv is None:
-        return DeployFailed("syncing dependencies", "uv is not installed for the service user")
+        return DeployFailed(
+            "syncing dependencies", "uv is not installed for the account that owns the checkout"
+        )
     synced = _run(
         [uv, "sync", "--frozen", "--no-dev"],
         as_owner=True,
@@ -366,9 +357,7 @@ def rebuild_and_restart() -> DeployFailed | None:
     # code which dies on startup reports success into the journal while
     # Restart=always thrashes, and the first sign of trouble is the app being
     # unreachable from a phone.
-    from workbench.install import health_check
-
-    unhealthy = health_check()
+    unhealthy = install.health_check()
     if unhealthy is not None:
         return DeployFailed("waiting for the service to come back", unhealthy)
 
@@ -379,6 +368,37 @@ def deploy() -> DeployResult:
     """One deployment attempt. Safe to call when there is nothing to do."""
     advanced = advance_checkout()
     if not isinstance(advanced, Advanced):
+        if isinstance(advanced, AlreadyCurrent):
+            # Converge the units even with nothing to pull.
+            #
+            # A change to the *deployer* only takes effect on the deploy after
+            # the one that delivered it: this process imported its own code
+            # before pulling, so the run that brings in a new install step is
+            # the last run that does not perform it. Without this line the new
+            # step then waits for an unrelated commit to come along, and in the
+            # meantime the machine is running code whose install half never
+            # happened.
+            #
+            # Installing is idempotent and compares rendered content before
+            # writing, so on the overwhelmingly common no-op tick this reads
+            # four templates and does nothing. That also makes it
+            # self-healing: a unit or rule deleted by hand comes back.
+            failure = refresh_units()
+            if failure is not None:
+                return failure
+
+            # And converge acceptance, for the same reason and a sharper one.
+            # Acceptance used to run only on the tick that advanced the
+            # checkout — so a deploy that pulled a commit and then failed
+            # afterwards left that commit reported on by nobody, and every
+            # later tick was AlreadyCurrent and skipped it. The status never
+            # arrives, promotion waits forever, and nothing on the machine
+            # looks wrong: the service is healthy and serving the new code.
+            #
+            # Observed exactly once, which was enough. See docs/learning-notes.
+            if acceptance_is_outstanding():
+                logger.info("Acceptance has not reported on this revision yet")
+                run_acceptance()
         return advanced
 
     failure = rebuild_and_restart()
@@ -387,6 +407,43 @@ def deploy() -> DeployResult:
 
     run_acceptance()
     return Deployed(advanced.revision)
+
+
+def acceptance_marker() -> Path:
+    """Where the revision acceptance last *reported* on is recorded.
+
+    In `data/` because it describes this machine's install rather than the
+    repository — it is per-instance, it is generated, and a clone onto another
+    box must not inherit it.
+    """
+    return data_dir() / "acceptance-reported"
+
+
+def acceptance_is_outstanding() -> bool:
+    """Whether this revision still owes GitHub a verdict.
+
+    Read from a local file rather than by asking GitHub. An outbound GET every
+    five minutes to answer "did I already do this" would be a network round
+    trip on the overwhelmingly common tick where the answer is no, and it would
+    make the deploy depend on GitHub being reachable to decide it has nothing
+    to do.
+    """
+    if restore_from() is None:
+        return False
+
+    try:
+        return acceptance_marker().read_text().strip() != current_revision()
+    except OSError:
+        return True
+
+
+def record_acceptance_reported(revision: str) -> None:
+    try:
+        acceptance_marker().write_text(f"{revision}\n")
+    except OSError as error:
+        # Not fatal. The cost of failing to record is a repeated acceptance
+        # run on the next tick, which is wasteful rather than wrong.
+        logger.warning("Could not record the accepted revision: %s", error)
 
 
 def run_acceptance() -> None:
@@ -434,7 +491,14 @@ def run_acceptance() -> None:
             "WORKBENCH_GITHUB_TOKEN in /etc/workbench/env. Promotion waits on that "
             "status, so it will stall with nothing obviously wrong."
         )
-    elif result.returncode != 0:
+        # Deliberately not recorded, so the next tick tries again. This is the
+        # one outcome that is worth retrying: the verdict exists and simply did
+        # not arrive, which a restored token fixes with no other action.
+        return
+
+    record_acceptance_reported(current_revision())
+
+    if result.returncode != 0:
         logger.warning(
             "Staging acceptance failed. The deploy itself succeeded; the red commit "
             "status is what blocks promotion."
@@ -442,25 +506,31 @@ def run_acceptance() -> None:
 
 
 def refresh_units() -> DeployFailed | None:
-    """Reinstall the systemd units if their templates changed in this pull.
+    """Reinstall the systemd units and the polkit rule, if either changed.
 
     Without this, a change to the unit — a new `ReadWritePaths` entry, say —
     would sit in the repository and never reach systemd, and the failure would
     show up much later as a permission error inside an agent run.
 
-    Safe to run as root because `install.service_user()` reads the checkout's
-    owner rather than the current user.
-    """
-    # Imported here rather than at module scope: install.py pulls in httpx and
-    # alembic, and this function is skipped on the overwhelmingly common
-    # already-up-to-date path.
-    from workbench.install import install_units, systemd_is_running
+    The polkit rule is here for exactly that reason, and it was missed the
+    first time: an install by hand wrote it, but a deploy did not, so a machine
+    updated automatically would grow the ability to *ask* systemd to start a
+    run unit without the authorisation to have it granted. Every run would fail
+    with access denied, and the fix would have been a manual `install.sh` — the
+    kind of remembered step this whole file exists to abolish.
 
-    if not systemd_is_running():
+    Safe to run as root, and now load-bearing rather than incidental:
+    `install.service_user()` reads the *checkout's owner*, which after the move
+    to /srv is the dedicated service account. Reading the effective uid here
+    would re-render every unit with `User=root` on the first automatic deploy
+    and hand an agent a root shell.
+    """
+    if not install.systemd_is_running():
         return None
 
     try:
-        install_units()
+        install.install_units()
+        install.install_polkit_rule()
     except Exception as error:
         # install.py signals failure by raising, so this is the boundary where
         # that becomes a result again. Broad on purpose: a deploy must report

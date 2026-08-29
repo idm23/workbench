@@ -14,10 +14,15 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > as tables with no reader. **The agent seam and the runner now exist**:
 > `workbench/agents/` drives Claude behind a vendor-neutral interface, and
 > `python -m workbench.runs.runner <id>` carries out a run end to end, writing every
-> event to `run_events` as it happens. The task tree marks whichever task a run is
-> working, and every page shows how much of each rate-limit window is left. Nothing
-> spawns a runner yet — that is the runs slice — so no run has been started from the
-> app. See `README.md` for what is actually live.
+> event to `run_events` as it happens. Runs start and stop from the task tree, each as its
+> own systemd unit, and a run's page streams its output live and replays anything a
+> sleeping phone missed. Every page shows how much of each rate-limit window is left.
+> The installer now creates a dedicated `workbench` account, relocates the deployment to
+> `/srv`, and finishes by saying what a person still has to do by hand —
+> `python -m workbench.doctor` answers the same questions any time afterwards.
+> **No agent has yet run on the real server**: the polkit grant that lets the app start a
+> unit is proven against a stub and not against the machine, and nobody has signed the
+> agent in. See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
@@ -43,14 +48,29 @@ The claim is kept honest by `scripts/test_fresh_install.py`, which provisions a 
 Ubuntu container, runs the install, drives the app over HTTP, and re-runs the install to
 prove it repeats. A setup step that creeps outside `install.sh` makes that test fail.
 
-Two things are deliberately *not* automated, and are decisions rather than oversights:
+Two things are deliberately *not* automated, and are decisions rather than oversights.
+Both need a browser login against an account no script can know about:
 
-- **Joining a Tailscale network.** It needs a browser login against an account the
-  script cannot know about. `install.sh` finishes with a working service on localhost
-  and prints the two commands to expose it.
-- **A dedicated `workbench` service user.** The service currently runs as whoever ran
-  the installer. An unprivileged account only starts bounding anything once agents are
-  executing model-authored shell commands, so it belongs to that slice.
+- **Joining a Tailscale network.**
+- **Signing the agent in.** Under a subscription the credential is an OAuth token minted
+  by an interactive login, as the service account.
+
+The rule they bend is narrower than it looks: a step may be un-automatable, but it may
+not be *undiscoverable*. So `install.sh` finishes by running `python -m workbench.doctor`
+and printing each outstanding step with the exact command. `scripts/test_fresh_install.py`
+asserts the login step is named in that output, which is what keeps the promise from
+quietly decaying — the failure it prevents is a machine that installs and deploys
+perfectly and then fails every run at authentication with nothing anywhere saying why.
+Which is exactly what happened here first time.
+
+**The dedicated `workbench` account is no longer deferred.** It is created by the
+installer, and the deployment is relocated to `/srv/<service name>` and chowned to it.
+That location is forced rather than chosen: Ubuntu creates home directories mode 0750,
+so a checkout under a person's home is one a separate account cannot even traverse.
+Keeping the checkout *owned by* the service account is what lets
+`install._service_passwd()` and `deploy.repo_owner()` stay as they are — both already
+read the checkout's owner, so nothing needs a `getpwnam` in the render path and no
+machine lacking the account goes red.
 
 ## Decisions already made
 
@@ -191,9 +211,16 @@ in `docs/server-conventions.md`.
   account bounds the blast radius to files recoverable from GitHub.
 - Secrets in `/etc/workbench/env` (mode 0600, owned by the service user), loaded via
   `EnvironmentFile`. Alternatively authenticate the bundled CLI once as that user to
-  bill against a Claude subscription instead of the API. Either way the credential is
-  readable by model-authored shell commands running as that user — inherent, but worth
-  stating.
+  bill against a Claude subscription instead of the API — which is what this install
+  does: `sudo -iu workbench <venv>/bin/python -m workbench.doctor --login`. Either way
+  the credential is readable by model-authored shell commands running as that user —
+  inherent, but worth stating.
+- **The credential is two paths, not one.** `~/.claude` is a directory; `~/.claude.json`
+  is a separate file beside it. An allowlist naming only the first leaves the second
+  read-only under `ProtectSystem=strict`, and the CLI writes both. That failure arrives
+  late — reads work, so runs succeed until the OAuth token is refreshed and cannot be
+  saved. Both units grant both paths, and the run unit also grants `~/.ssh`, which `ssh`
+  writes on first connection.
 - The service user needs its own SSH deploy key and `user.name`/`user.email`, or
   unattended pushes and agent commits will fail. Prefer per-repo deploy keys or a
   fine-grained PAT over an account-wide key, which would grant push to every repo.
@@ -226,6 +253,13 @@ cannot reach it and neither can a GitHub Actions runner. A self-hosted runner wo
 but means parking a long-lived registration credential on the box and letting workflow
 code execute there. Polling needs no inbound path, no secret, and no new daemon. The cost
 is latency: a merge lands within the timer interval instead of instantly.
+
+**Every step converges rather than firing on a change.** Installing units and running
+staging acceptance both decide from state — is the rendered unit different, has this
+revision been reported on — not from "did this tick pull something". Both were the other
+way once, and both broke the same way: a deploy that changed the checkout and then died
+left work that no later tick would ever pick up, with nothing on the machine looking
+wrong. `docs/learning-notes.md` has both post-mortems.
 
 **It refuses rather than reconciles.** A checkout that is dirty, on another branch, or
 carrying a local commit is reported into the journal and left untouched, so working on the
@@ -282,12 +316,47 @@ that predates this. Worth noting because it is the one place the reproducibility
 bends: a *fresh* clone gets the timer from the first install, and only an existing
 deployment needs the manual step.
 
-**The deployer runs as root, the app does not.** It needs to restart the unit, so it drops
-to the checkout's owner with `runuser` for every command touching git, the virtualenv, or
-the database. Doing that work as root would leave root-owned files that the unprivileged
-service could no longer write. For the same reason `install.service_user()` reads the
-*checkout's owner* rather than the current euid — reading the euid would silently
-re-render the unit with `User=root` on the first automatic deploy.
+**The move to `/srv` bends it the same way, and deliberately.** The deployer re-renders
+units but never relocates, so this code can reach a server and change nothing until
+somebody runs `install.sh` by hand. Relocating a live deployment underneath a running
+service is not a decision a five-minute timer should be making unattended at 3am. The
+cutover is in `docs/deployment-setup.md`; it is reversible, because the relocation copies
+rather than moves.
+
+**The deployer runs as root, the app does not, and the installer now works the same way.**
+Both need root — one to restart the unit, the other to create an account and write to
+/etc — and both drop to the checkout's owner for every command touching git, the
+virtualenv, the database, or that account's home. Doing any of it as root leaves
+root-owned files the unprivileged service can no longer write, which surfaces later as a
+service that starts and then cannot save anything.
+
+That drop lives in `install.service_run` and `deploy._run` delegates to it. One copy on
+purpose: two spellings of "become the service account" is two places for it to drift, and
+the drifting one would be creating root-owned files in a directory the service must
+write. It uses `subprocess`'s own `user=` rather than `runuser`, because runuser opens a
+PAM session and PAM logs every one — three lines per command into the journal that is the
+only place a bad deploy explains itself.
+
+For the same reason `install.service_user()` reads the *checkout's owner* rather than the
+current euid — reading the euid would silently re-render every unit with `User=root` on
+the first automatic deploy, handing an agent a root shell. Now that the checkout is owned
+by the service account, that indirection is load-bearing rather than incidental.
+
+**`install.py` imports nothing but the standard library**, and that is a constraint rather
+than an aesthetic. It runs *before* a virtualenv exists, because one of the first things
+it decides is whether this checkout is where the deployment belongs — and building a few
+hundred megabytes of environment in a directory it is about to abandon is the one cost
+worth restructuring to avoid. `install.sh` therefore starts it with `uv run --no-project`
+and a `PYTHONPATH`, and the environment is built afterwards, at the deployment, by the
+account that will own it.
+
+**Relocation copies rather than moves.** The checkout someone cloned is left exactly as it
+was, so the operation needs no confirmation, breaks nothing if it fails, and leaves the
+old database as a free point-in-time backup; rolling back is re-running the old
+installer with `WORKBENCH_DEPLOYMENT_ROOT` pointing at itself. A deployment already there
+and already owned by the account is handed off to rather than copied over, which is what
+makes re-running the *abandoned* checkout's `install.sh` harmless — and somebody will,
+because that is the directory they remember.
 
 ### Known trap: self-deployment
 
@@ -311,12 +380,24 @@ still killed by a deploy restarting that app — verified in `systemd.kill(5)` r
 assumed. Deploys land every five minutes with nobody watching, so this would be routine,
 not rare.
 
-The options are a transient scope (`systemd-run --scope`, which needs privileges the app
-deliberately lacks), a `workbench-run@.service` template started over D-Bus (needs a
-polkit rule), or accepting it and relying on graceful cancellation plus a retry. The
-runner is written so that all three work: it takes a run id, records its own outcome, and
-assumes nothing about who started it. Whichever is chosen belongs with the code that
-spawns runs.
+**Settled: one systemd unit per run.** `workbench-run@<id>.service`, started over D-Bus by
+the app and therefore in its own control group, so a deploy restarting the web service
+cannot reach it. Chosen over a transient user scope not for the deploy problem — either
+would do — but because a unit is a *job*: addressable, inspectable, stoppable, and
+resource-limited, which is the shape this grows into when work starts being dispatched to
+other machines.
+
+Two things that are easy to get backwards. A unit is not remote dispatch; systemd is an
+init system, not a scheduler, and what makes another machine cheap is `runs.executor` plus
+an opaque `runs.handle` — a third `Executor` implementation, not a different init system.
+And unit-per-run does not *require* polkit: a named unit in the user manager needs no
+privilege, but only gets the controllers that manager was delegated (`memory pids` here —
+no `cpu`, no `io`, and no device policy), which rules it out for the heavy jobs this is
+for.
+
+**`docs/running-agents.md` is the long version** — what a run consists of, why a process
+group is not a control group, and what each option costs. Worth reading before that file,
+because the runner looks over-built until the cgroup behaviour is clear.
 
 ## Open questions
 
@@ -327,20 +408,29 @@ Unresolved. Recorded here so they are not rediscovered later.
   task's worktree orphans the `resume_token` its runs point at. Per-task worktrees narrow
   this but do not close it. Some SDKs expose a pluggable session store, which would let
   those live in our own SQLite instead of on disk.
-- **SSE has no replay yet.** The `run_events` table exists precisely so the stream can be
-  replayed from `Last-Event-ID` before tailing live, but nothing writes to or reads from
-  it — that arrives with the runner. A phone that sleeps mid-run would currently lose
-  everything emitted during the gap.
-- **Nothing caps concurrency.** Three taps starts three agents, each running builds.
-  `config.py` has no `max_concurrent_runs` yet. Since runs bill a subscription, what this
-  wastes is a rate-limit window rather than a few dollars, which makes it more pressing
-  than it first looked — and the window is shared with whatever else uses the account.
+- **Polling is how the stream tails.** There is no in-process signal available: the runner
+  is a different process in a different cgroup, and SQLite has no LISTEN/NOTIFY, so the
+  table is the only thing the two share. Once per second per open page is fine at this
+  scale and would not be on a busy one.
 - **`setup_command` is per project, but the need is per worktree.** A project whose setup
   is "symlink `.env` and the venv from the main checkout" cannot express that as one
   command without knowing the source path.
-- **Nothing bounds an agent's blast radius.** It will run as the service user with
-  whatever permissions the backend is given, and can read both credentials. This is what
-  the dedicated `workbench` user is for.
+- **How much does the dedicated account actually bound?** It now exists — the service
+  runs as `workbench`, which owns `/srv/workbench` and nothing else and has no sudo — so
+  the blast radius is bounded to files recoverable from GitHub, plus the credential in
+  that account's home, which model-authored shell commands can still read. That last part
+  is inherent to running an agent on a subscription and is not fixed by any account
+  boundary. What is genuinely untested is whether the bound holds in practice, because no
+  agent has yet run on the real server.
+- **Does the agent work under `ProtectSystem=strict`?** The credential paths are now
+  granted explicitly (`~/.claude`, `~/.claude.json`, `~/.ssh`), but every one of those was
+  reasoned about rather than observed — no token has been refreshed on this machine. The
+  doctor reports `unknown` rather than crying wolf if the probe cannot run, and the fix
+  for anything missed is one more `ReadWritePaths` line.
+- **Is `tailscale serve status` readable by a non-operator account?** The banner's check
+  runs as the service account, which is not the tailnet operator. If it turns out to need
+  that, the check degrades to `unknown` and the fix is
+  `sudo tailscale set --operator=workbench`.
 - **Is "no commits" a failure?** A run where the agent correctly concludes nothing needs
   changing produced no pull request, but calling that `failed` reads as a malfunction when
   it was judgement. Probably wants a third outcome.
@@ -379,6 +469,14 @@ than no list at all.
 - **Blocking `sqlite3` in async handlers.** Route handlers are sync `def`, which FastAPI
   runs in a threadpool. The one `async def` endpoint will be the event stream, reaching
   the database through `asyncio.to_thread`.
+- **SSE replay.** Done, and it is the reason `run_events` is numbered per run rather than
+  globally. A reader says how far it got — through `Last-Event-ID` on reconnect, or `after`
+  on first load — and gets the rest exactly once. A phone that sleeps through half a run
+  loses nothing, and reading a run back a week later is the same query with a different
+  number in it.
+- **Nothing caps concurrency.** `max_concurrent_runs` defaults to 2, and `start` reaps
+  before checking it — otherwise a run killed mid-flight holds a slot forever and the cap
+  becomes a way to lock yourself out.
 - **Store token and cost per run.** `runs.total_cost_usd` and `runs.num_turns` exist. A
   backend that reports neither leaves them null rather than zero.
 - **`open/active/done` has nowhere for a failed or cancelled run.** Task statuses are

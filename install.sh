@@ -31,10 +31,21 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-# `uv run` builds the virtualenv from uv.lock before running, so the installer
-# starts with its own dependencies already present.
+# --no-project, so this does NOT build a virtualenv first. The installer is
+# written against the standard library alone precisely so it can run before one
+# exists — because one of the first things it decides is whether this checkout
+# is where the deployment belongs, and building a few hundred megabytes of
+# environment in a directory it is about to abandon is worth avoiding.
 #
-# --no-dev matters: the dev group carries pyright, which pulls nodeenv and
-# downloads a Node runtime on first use. A deployed machine has no reason to
-# install a linter, and this project deliberately keeps Node off the server.
-exec uv run --frozen --no-dev python -m workbench.install "$@"
+# The real environment is built later, at the deployment, by the account that
+# will own it. --no-dev applies there: the dev group carries pyright, which
+# pulls nodeenv and downloads a Node runtime on first use, and this project
+# deliberately keeps Node off the server.
+#
+# PYTHONPATH rather than an install, for the same reason: nothing is installed
+# yet, and the installer has to import workbench.config to know where anything
+# goes.
+PYTHONPATH="$(pwd)/src"
+export PYTHONPATH
+
+exec uv run --no-project --python "$(cat .python-version)" python -m workbench.install "$@"

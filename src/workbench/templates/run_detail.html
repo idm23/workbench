@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block title %}Run {{ run.id }} — Workbench{% endblock %}
+
+{% block back %}<a class="back" href="/projects/{{ task.project_id }}">&lsaquo; {{ task.project.owner }}/{{ task.project.repo }}</a>{% endblock %}
+
+{% block content %}
+<h1 style="font-size: clamp(1.3rem, 6vw, 1.8rem);">{{ task.title }}</h1>
+<p class="sub">
+  Run {{ run.id }} · {{ run.phase }} ·
+  <span class="status {{ run.status }}">{{ run.status }}</span>
+</p>
+
+<div class="run-meta">
+  <div><span>Backend</span><span class="mono">{{ run.backend }}{% if run.model %} · {{ run.model }}{% endif %}</span></div>
+  <div><span>Executor</span><span class="mono">{{ run.executor }}{% if run.handle %} · {{ run.handle }}{% endif %}</span></div>
+  {% if run.num_turns %}<div><span>Turns</span><span>{{ run.num_turns }}</span></div>{% endif %}
+  {% if run.total_cost_usd %}
+    {# Not a bill under a subscription — it is the backend's own token
+       valuation. Labelled so nobody reconciles it against a card statement. #}
+    <div><span>Reported cost</span><span title="A token valuation, not an amount charged">${{ '%.4f'|format(run.total_cost_usd) }}</span></div>
+  {% endif %}
+  {% if task.branch %}<div><span>Branch</span><span class="mono">{{ task.branch }}</span></div>{% endif %}
+</div>
+
+{% if run.error %}<p class="msg error">{{ run.error }}</p>{% endif %}
+
+{% if run.plan %}
+  <h2 class="section">Plan</h2>
+  <pre class="block">{{ run.plan }}</pre>
+{% endif %}
+
+{% if run.summary %}
+  <h2 class="section">Summary</h2>
+  <pre class="block">{{ run.summary }}</pre>
+{% endif %}
+
+{% if run.diffstat %}
+  <h2 class="section">Changed</h2>
+  <pre class="block mono">{{ run.diffstat }}</pre>
+{% endif %}
+
+<h2 class="section">
+  Output
+  {# Rendered server-side, streamed only from where the page already got to.
+     A run read back a week later has no stream to open, and a page that is
+     blank until JavaScript connects is blank when JavaScript fails. #}
+  <span id="live" class="live-dot {{ 'on' if live }}" title="Streaming">{% if live %}live{% endif %}</span>
+</h2>
+
+<ul class="events" id="events">
+  {% for event in events %}
+    <li class="ev {{ event.kind }}" data-seq="{{ event.seq }}">
+      <span class="ev-kind">{{ event.kind }}</span>
+      <div class="ev-body">{{ event.payload.get('name') or event.payload.get('text') or event.payload.get('status') or '' }}</div>
+    </li>
+  {% endfor %}
+</ul>
+
+{% if not events %}
+  <p class="empty" id="no-events">Nothing recorded yet.</p>
+{% endif %}
+
+{% if live %}
+<script>
+  // Resume rather than restart: the page already rendered everything up to
+  // `last_seq`, so the stream is asked for what comes after it. On a later
+  // reconnect the browser sends Last-Event-ID by itself and this URL is not
+  // consulted again — which is why the endpoint accepts both.
+  (function () {
+    var list = document.getElementById("events");
+    var dot = document.getElementById("live");
+    var empty = document.getElementById("no-events");
+    var source = new EventSource("/runs/{{ run.id }}/events?after={{ last_seq }}");
+
+    function add(kind, data) {
+      if (empty) { empty.remove(); empty = null; }
+      var item = document.createElement("li");
+      item.className = "ev " + kind;
+      var label = document.createElement("span");
+      label.className = "ev-kind";
+      label.textContent = kind;
+      var body = document.createElement("div");
+      body.className = "ev-body";
+      // textContent, never innerHTML: this is model output and tool results.
+      body.textContent = data.name || data.text || data.status || "";
+      item.appendChild(label);
+      item.appendChild(body);
+      list.appendChild(item);
+    }
+
+    ["text", "thinking", "tool_use", "tool_result", "status", "notice"].forEach(function (kind) {
+      source.addEventListener(kind, function (message) {
+        try { add(kind, JSON.parse(message.data)); } catch (error) { /* skip a bad frame */ }
+      });
+    });
+
+    source.addEventListener("end", function () {
+      source.close();
+      dot.className = "live-dot";
+      dot.textContent = "";
+      // The run is over, so the summary, diffstat, and status above are now
+      // stale. Reloading is cheaper than teaching this page to render them.
+      window.setTimeout(function () { window.location.reload(); }, 400);
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

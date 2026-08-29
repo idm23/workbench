@@ -15,7 +15,7 @@ from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session, selectinload
 from workbench.api import router as api_router
 from workbench.config import instance
 from workbench.database.db import get_db
-from workbench.database.models import Project, Task, TaskStatus, User
+from workbench.database.models import Project, Run, RunPhase, Task, TaskStatus, User
+from workbench.doctor import page_warnings
 from workbench.git.github import (
     InvalidReference,
     RepoMetadata,
@@ -35,7 +36,9 @@ from workbench.git.github import (
 from workbench.git.revision import head_revision
 from workbench.git.worktrees import Cloned, clone_project, local_checkout
 from workbench.runs.activity import activity_by_task
+from workbench.runs.lifecycle import NotCancellable, cancel_run, start_run
 from workbench.runs.rate_limits import latest_readings
+from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.tasks import (
     WrongProject,
     build_tree,
@@ -56,20 +59,31 @@ app = FastAPI(title="Workbench")
 app.include_router(api_router)
 
 
+#: A run with more events than this is read in pages by the stream rather
+#: than rendered in one response. A long agent run is thousands of rows.
+MAX_RENDERED_EVENTS = 500
+
+
 DbSession = Annotated[Session, Depends(get_db)]
 
 
-def _shared(db: Session, *, limits: bool = True) -> dict:
+def _shared(db: Session) -> dict:
     """Context every page gets.
 
     The rate-limit panel is on every page rather than on a run's own because
     the window it describes belongs to the account, not to a run — it is spent
     by whatever else uses the same subscription, and the moment it is worth
     reading is before starting something, which is any page at all.
+
+    Setup warnings are here for a stronger version of the same reason. The
+    install says them once, into a terminal nobody re-reads, and the state they
+    describe changes long afterwards. A tree offering to start an agent that
+    cannot authenticate is misleading on every page it appears on.
+
+    There is deliberately no way for a page to switch either of them off. A
+    warning some page could suppress is one you cannot trust the absence of.
     """
-    if not limits:
-        return {"show_limits": False}
-    return {"show_limits": True, "rate_limits": latest_readings(db)}
+    return {"rate_limits": latest_readings(db), "warnings": page_warnings()}
 
 
 def _redirect(path: str, **messages: str | None) -> RedirectResponse:
@@ -311,6 +325,106 @@ def set_task_status(
 
     set_status(db, task, status)
     return _redirect(target)
+
+
+@app.post("/tasks/{task_id}/runs")
+def start_task_run(
+    db: DbSession, task_id: int, phase: Annotated[str, Form()] = "plan"
+) -> RedirectResponse:
+    """Hand a task to an agent.
+
+    The refusals — the concurrency cap, a task already being worked, an
+    executor that would not start — come back as messages rather than errors,
+    because every one of them is an ordinary answer to a button press and the
+    person reading it is on a phone.
+    """
+    task = _get_task_or_404(db, task_id)
+    target = f"/projects/{task.project_id}"
+
+    try:
+        chosen = RunPhase(phase)
+    except ValueError:
+        return _redirect(target, error=f"{phase!r} is not a run phase.")
+
+    if task.children:
+        # A task with children describes work rather than being work, so an
+        # agent pointed at one has no single thing to do.
+        return _redirect(target, error="Break this into a sub-task and run that instead.")
+
+    result = start_run(db, task, chosen)
+    if isinstance(result, Run):
+        return _redirect(target, notice=f"Run {result.id} started ({chosen.value}).")
+    return _redirect(target, error=result.message)
+
+
+@app.post("/runs/{run_id}/cancel")
+def cancel_task_run(db: DbSession, run_id: int) -> RedirectResponse:
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    target = f"/projects/{run.task.project_id}"
+    result = cancel_run(db, run)
+    if isinstance(result, NotCancellable):
+        return _redirect(target, error=result.message)
+    return _redirect(target, notice=f"Run {run_id} asked to stop.")
+
+
+@app.get("/runs/{run_id}", response_class=HTMLResponse)
+def show_run(request: Request, db: DbSession, run_id: int) -> HTMLResponse:
+    """One run, with everything it has said so far.
+
+    Rendered server-side rather than left to the stream to fill in. A run read
+    back a week later has no stream to open, and a page that is blank until
+    JavaScript connects is a page that is blank when JavaScript fails.
+    """
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    events = fetch_events(db, run_id, after_seq=0, limit=MAX_RENDERED_EVENTS)
+    return templates.TemplateResponse(
+        request,
+        "run_detail.html",
+        {
+            **_shared(db),
+            "run": run,
+            "task": run.task,
+            "events": events,
+            # Where the browser should resume from, so the stream continues the
+            # page rather than repeating it.
+            "last_seq": events[-1].seq if events else 0,
+            "live": not run.status.is_terminal,
+        },
+    )
+
+
+@app.get("/runs/{run_id}/events")
+async def stream_run_events(request: Request, run_id: int) -> StreamingResponse:
+    """The run's event log, as server-sent events.
+
+    The app's one `async def` route, which is why every database read inside it
+    goes through `asyncio.to_thread`: the events being streamed are written by
+    a different process, so there is nothing to await on but the table.
+
+    Resumable by construction. A browser reconnecting sends `Last-Event-ID`,
+    which is the sequence number it last saw, and gets everything after it —
+    so a phone that slept through half a run misses nothing.
+    """
+    resume = request.query_params.get("after") or request.headers.get("last-event-id")
+
+    return StreamingResponse(
+        stream(run_id, parse_last_event_id(resume)),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Tells a buffering reverse proxy not to. Without it the whole
+            # point of streaming is lost to a proxy waiting for a full
+            # response before sending anything.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/tasks/{task_id}/delete")

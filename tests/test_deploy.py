@@ -26,8 +26,10 @@ from workbench.deploy import (
     DeployFailed,
     _owner_environment,
     _run,
+    acceptance_is_outstanding,
     advance_checkout,
     deploy,
+    record_acceptance_reported,
     repo_owner,
     restore_snapshot,
     run_acceptance,
@@ -38,6 +40,18 @@ def git(path, *args) -> str:
     return subprocess.run(
         ["git", *args], cwd=path, check=True, capture_output=True, text=True
     ).stdout.strip()
+
+
+@pytest.fixture(autouse=True)
+def no_privileged_installs(monkeypatch):
+    """Never let these tests touch /etc.
+
+    `deploy()` now converges the units on an idle tick as well as a real one,
+    and `install_units` writes to /etc/systemd/system with sudo. That is
+    covered in `test_units.py` against rendered content; here it would be a
+    test that asks for a password, or worse, gets one.
+    """
+    monkeypatch.setattr("workbench.deploy.refresh_units", lambda: None)
 
 
 @pytest.fixture
@@ -66,6 +80,9 @@ def checkout(tmp_path, monkeypatch):
     (work / "pyproject.toml").write_text('[project]\nname = "workbench"\n')
     monkeypatch.setattr("workbench.deploy.repo_root", lambda: work)
     monkeypatch.setattr("workbench.config.repo_root", lambda: work)
+    # install too, because the deployer's privilege drop lives there now — one
+    # copy shared with the installer rather than two that can drift.
+    monkeypatch.setattr("workbench.install.repo_root", lambda: work)
     return work, origin
 
 
@@ -531,3 +548,133 @@ def test_an_instance_refuses_to_restore_over_itself(checkout, tmp_path, monkeypa
     assert isinstance(result, DeployFailed)
     assert "own database" in result.message
     assert count_users(source) == 3
+
+
+# --- Acceptance converges, rather than firing once and never again ------------
+#
+# The gap these close was observed on the real server, which is the only reason
+# it is written down this precisely. A deploy pulled a commit, crashed after the
+# fast-forward, and left the checkout advanced. Every tick after that was
+# AlreadyCurrent, so acceptance — which only ran on a tick that advanced — never
+# ran for that commit at all. No status ever arrived, promotion waited forever,
+# and nothing on the machine looked wrong: the service was healthy and serving
+# the new code.
+
+
+@pytest.fixture
+def staging(checkout, tmp_path, monkeypatch):
+    """An instance that restores a snapshot, which is what makes it disposable."""
+    work, _ = checkout
+    source = tmp_path / "prod" / "workbench.db"
+    make_database(source)
+    monkeypatch.setenv("WORKBENCH_RESTORE_FROM", str(source))
+    monkeypatch.setenv("WORKBENCH_INSTANCE", "staging")
+    monkeypatch.setenv("WORKBENCH_DB", str(work / "data" / "workbench.db"))
+    (work / "data").mkdir(parents=True, exist_ok=True)
+    (work / "scripts").mkdir(parents=True, exist_ok=True)
+    (work / "scripts" / "staging_acceptance.py").write_text("")
+    return work
+
+
+def test_a_revision_nobody_has_reported_on_is_outstanding(staging):
+    assert acceptance_is_outstanding()
+
+
+def test_a_revision_already_reported_on_is_not(staging, monkeypatch):
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "abc1234")
+    record_acceptance_reported("abc1234")
+
+    assert not acceptance_is_outstanding()
+
+
+def test_a_new_revision_makes_it_outstanding_again(staging, monkeypatch):
+    record_acceptance_reported("abc1234")
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "def5678")
+
+    assert acceptance_is_outstanding()
+
+
+def test_production_is_never_outstanding(checkout, monkeypatch):
+    """Acceptance mutates data as it goes, so it may only ever run where losing
+    that data is fine. Nothing about this marker changes which places those are."""
+    monkeypatch.delenv("WORKBENCH_RESTORE_FROM", raising=False)
+
+    assert not acceptance_is_outstanding()
+
+
+def test_a_verdict_that_never_reached_github_is_retried(staging, monkeypatch):
+    """The one outcome worth retrying: the checks ran and the answer exists, it
+    just did not arrive. A restored token then fixes it with no other action —
+    whereas recording it would strand the commit exactly as the bug did."""
+    monkeypatch.setattr(
+        "workbench.deploy._run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, 3, "", ""),
+    )
+
+    run_acceptance()
+
+    assert acceptance_is_outstanding()
+
+
+@pytest.mark.parametrize("verdict", [0, 1])
+def test_a_verdict_that_arrived_is_not_repeated(staging, monkeypatch, verdict):
+    """Red counts as reported. Re-running a failing acceptance every five
+    minutes would post the same red status forever and burn a rate-limit window
+    doing it — the commit is blocked either way, which is the point."""
+    monkeypatch.setattr(
+        "workbench.deploy._run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, verdict, "", ""),
+    )
+
+    run_acceptance()
+
+    assert not acceptance_is_outstanding()
+
+
+def test_an_unrecordable_marker_does_not_break_the_deploy(staging, monkeypatch):
+    """Failing to record costs a repeated acceptance run, which is wasteful
+    rather than wrong — and a deploy must not die on it."""
+    monkeypatch.setattr(
+        "workbench.deploy.acceptance_marker",
+        lambda: staging / "nonexistent" / "marker",
+    )
+
+    record_acceptance_reported("abc1234")
+
+
+def test_a_tick_after_a_failed_deploy_still_reports(staging, monkeypatch):
+    """The whole bug, end to end.
+
+    The checkout is already at the new revision — a previous deploy pulled it
+    and then died — so this tick is AlreadyCurrent and does not rebuild
+    anything. It must still notice that nobody has reported on this revision.
+    """
+    monkeypatch.setattr(
+        "workbench.deploy.advance_checkout", lambda: AlreadyCurrent(revision="ad68962")
+    )
+    monkeypatch.setattr("workbench.deploy.refresh_units", lambda: None)
+    ran: list[str] = []
+    monkeypatch.setattr("workbench.deploy.run_acceptance", lambda: ran.append("acceptance"))
+
+    result = deploy()
+
+    assert isinstance(result, AlreadyCurrent)
+    assert ran == ["acceptance"]
+
+
+def test_an_idle_tick_does_not_re_run_acceptance(staging, monkeypatch):
+    """The common case is a machine with nothing to do, every five minutes,
+    forever. Acceptance drives the app and rewrites the database — running it
+    on every idle tick would be far worse than the bug it fixes."""
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "ad68962")
+    record_acceptance_reported("ad68962")
+    monkeypatch.setattr(
+        "workbench.deploy.advance_checkout", lambda: AlreadyCurrent(revision="ad68962")
+    )
+    monkeypatch.setattr("workbench.deploy.refresh_units", lambda: None)
+    ran: list[str] = []
+    monkeypatch.setattr("workbench.deploy.run_acceptance", lambda: ran.append("acceptance"))
+
+    deploy()
+
+    assert ran == []

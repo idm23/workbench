@@ -1,0 +1,24 @@
+{#
+  What the install said once, said again until it is fixed.
+
+  Nobody re-reads a terminal, and what these describe changes long after the
+  install — a credential expires, a serve mapping is reset. So they sit above
+  the rate-limit panel on every page: a setup problem outranks a usage gauge,
+  because a window that is 80% spent still lets an agent run and an
+  unauthenticated backend does not.
+
+  Only the two findings that make *every* page misleading appear here. A
+  missing git identity breaks a run, and a run is where it is said.
+#}
+<section class="setup" aria-label="Setup">
+  {% for warning in warnings %}
+    <div class="setup-item {{ 'urgent' if warning.urgent else 'todo' }}">
+      <div class="setup-title">{{ warning.title }}</div>
+      <div class="setup-detail">{{ warning.detail }}</div>
+      {# The command, in a form that can be selected and pasted from a phone.
+         Not a link: the machine this has to be run on is not the one holding
+         the screen. #}
+      {% if warning.fix %}<div class="setup-fix mono">{{ warning.fix }}</div>{% endif %}
+    </div>
+  {% endfor %}
+</section>

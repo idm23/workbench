@@ -4,9 +4,14 @@ Everything defaults to something that works from a fresh clone with no setup, so
 that installing on a new machine needs no configuration step.
 """
 
+import logging
 import os
+import shutil
+import socket
 from collections.abc import Mapping
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def repo_root() -> Path:
@@ -91,6 +96,57 @@ def default_agent_backend() -> str:
     return os.environ.get("WORKBENCH_AGENT_BACKEND", DEFAULT_BACKEND).strip() or DEFAULT_BACKEND
 
 
+#: How a run is started when nothing selects otherwise. A name, not an import:
+#: nothing here knows what implements it. `local-process` is the safe default
+#: because it works anywhere, including the container the fresh-install test
+#: runs in, which has no systemd at all.
+DEFAULT_EXECUTOR = "local-process"
+
+#: The executor used where systemd is available and nothing overrides it. One
+#: transient unit per run: its own cgroup, so a deploy restarting the app does
+#: not take running agents with it, plus journald logs and resource limits per
+#: run. See docs/running-agents.md.
+SYSTEMD_EXECUTOR = "systemd-unit"
+
+
+def default_executor() -> str:
+    """Which executor to start runs with on this machine.
+
+    Detected rather than configured by default, because the right answer is a
+    property of the machine: a server with systemd should get one unit per run,
+    and a container without it must still be able to run something. An explicit
+    `WORKBENCH_EXECUTOR` wins over both.
+    """
+    configured = os.environ.get("WORKBENCH_EXECUTOR", "").strip()
+    if configured:
+        return configured
+    if shutil.which("systemctl") and Path("/run/systemd/system").is_dir():
+        return SYSTEMD_EXECUTOR
+    return DEFAULT_EXECUTOR
+
+
+#: How many runs may be active at once, across every project. Runs bill a
+#: subscription, so what three simultaneous agents waste is a rate-limit window
+#: shared with everything else on the account — not a few dollars.
+DEFAULT_MAX_CONCURRENT_RUNS = 2
+
+
+def max_concurrent_runs() -> int:
+    """The cap on queued-or-running runs. Zero or less means no cap.
+
+    Deliberately small. Three taps on a phone should not start three agents,
+    and the number that matters is not this machine's CPU count.
+    """
+    raw = os.environ.get("WORKBENCH_MAX_CONCURRENT_RUNS", "").strip()
+    if not raw:
+        return DEFAULT_MAX_CONCURRENT_RUNS
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("WORKBENCH_MAX_CONCURRENT_RUNS is not a number: %r", raw)
+        return DEFAULT_MAX_CONCURRENT_RUNS
+
+
 #: Credential variables that switch a backend from a subscription to
 #: metered API billing. Named here rather than inside a backend because the
 #: choice is Workbench's, and the next backend will have its own spelling of
@@ -138,6 +194,25 @@ def agent_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def agent_git_identity() -> tuple[str, str]:
+    """The name and email commits by this instance are authored with.
+
+    The service account is not a person and has no identity of its own, but git
+    refuses to commit without one — and the failure is not a prompt, because
+    nothing here is interactive. It is an agent run dying several minutes in,
+    having done the work.
+
+    The default email is deliberately non-routable rather than a real address:
+    it identifies the machine that made the commit, which is the useful thing,
+    without inventing a mailbox. Override either half when commits should be
+    attributed to a GitHub account instead.
+    """
+    name = os.environ.get("WORKBENCH_GIT_NAME", "").strip() or "Workbench"
+    default_email = f"workbench@{socket.gethostname()}"
+    email = os.environ.get("WORKBENCH_GIT_EMAIL", "").strip() or default_email
+    return name, email
+
+
 def deploy_branch() -> str:
     """The branch the automatic deployer follows.
 
@@ -165,9 +240,77 @@ def service_name() -> str:
     return f"workbench-{suffix}" if suffix else "workbench"
 
 
+def service_account() -> str:
+    """The dedicated unprivileged account this instance's units run as.
+
+    Deliberately the same string as `service_name()`, rather than a name of
+    its own. The unit name, the directory under `/srv`, and the account are
+    one rule with one spelling, so the polkit rule's `subject.user` and the
+    unit's `User=` cannot drift apart — and that pair drifting is not a
+    visible bug, it is every run failing to start with an authorisation error
+    that names neither of them.
+    """
+    return service_name()
+
+
+def deployment_root() -> Path:
+    """Where this instance's checkout lives once it is a deployment.
+
+    Not a human's home, and that is forced rather than chosen. The service
+    account is a different account to whoever installed it, and Ubuntu creates
+    home directories mode 0750 — so a checkout under `/home/someone` is one
+    the service cannot traverse at all, never mind execute a virtualenv out
+    of. `/srv` is the conventional place for data a service serves, it is
+    outside every user's home, and it is on the same volume as everything
+    else here.
+
+    Overridable because a laptop and the test harnesses are not deployments:
+    they run the code from wherever it happens to be checked out.
+    """
+    override = os.environ.get("WORKBENCH_DEPLOYMENT_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path("/srv") / service_name()
+
+
+def agent_home() -> Path:
+    """The service account's home directory, used when creating the account.
+
+    Kept separate from the checkout on purpose. The checkout is deployment
+    state that a deploy rewrites and a relocation re-copies; this holds the
+    backend's credential and its session transcripts, which are the two things
+    on this machine that are on neither GitHub nor the database, and have to
+    survive both.
+    """
+    return Path("/home") / service_account()
+
+
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""
     return f"{service_name()}-deploy"
+
+
+def run_unit_prefix() -> str:
+    """The systemd template unit runs are started from, without `@`.
+
+    Instance-scoped like `service_name()`, and for the same reason: production
+    and staging share a machine, and `workbench-run@42` started by one of them
+    would otherwise be the same unit as the other's run 42 — different rows,
+    different worktrees, one unit name.
+    """
+    suffix = instance()
+    return f"workbench-{suffix}-run" if suffix else "workbench-run"
+
+
+def run_unit_name(run_id: int) -> str:
+    """The unit for one run. This is the handle stored on the row."""
+    return f"{run_unit_prefix()}@{run_id}.service"
+
+
+#: How long a run may take before systemd stops it. A backstop below the
+#: backend's own turn limit rather than a replacement for it: turns bound what
+#: the agent does, this bounds the process regardless of why it is stuck.
+RUN_TIMEOUT_SECONDS = 3600
 
 
 def github_token() -> str | None:

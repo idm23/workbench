@@ -44,9 +44,11 @@
               {% if busy %}
                 {# The dot reads at a glance; the word is what carries the
                    meaning for anyone the colour does not reach. #}
-                <span class="status {{ 'live' if busy.is_live else 'review' if busy.needs_attention else 'pending' }}"
-                      title="Run {{ busy.run_id }} is {{ busy.status }}"
-                ><span class="pip"></span>{{ busy.label }}</span>&nbsp;
+                <a class="status {{ 'live' if busy.is_live else 'review' if busy.needs_attention else 'pending' }}"
+                   href="/runs/{{ busy.run_id }}"
+                   style="text-decoration: none;"
+                   title="Run {{ busy.run_id }} is {{ busy.status }}"
+                ><span class="pip"></span>{{ busy.label }}</a>&nbsp;
               {% endif %}
               <span class="status {{ node.task.status }}">{{ node.task.status }}</span>
               {% if node.task.branch %}
@@ -55,6 +57,19 @@
             </div>
 
             <div class="task-actions">
+              {% if busy %}
+                <form method="post" action="/runs/{{ busy.run_id }}/cancel">
+                  <button class="slim secondary" type="submit">Stop run</button>
+                </form>
+              {% elif node.is_leaf and checkout %}
+                {# Only leaves: a task with children describes work rather than
+                   being work, so an agent pointed at one has nothing single to
+                   do. And nothing can run before there is a checkout. #}
+                <form method="post" action="/tasks/{{ node.task.id }}/runs">
+                  <input type="hidden" name="phase" value="plan">
+                  <button class="slim" type="submit">Plan</button>
+                </form>
+              {% endif %}
               <form method="post" action="/tasks/{{ node.task.id }}/delete">
                 <button class="slim secondary" type="submit">Delete</button>
               </form>

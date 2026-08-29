@@ -22,9 +22,14 @@ Wants=network-online.target
 Type=oneshot
 
 # Runs as root, unlike workbench.service. It needs to restart that unit, and it
-# drops to __USER__ with runuser for every command that touches the checkout,
-# the virtualenv, or the database — so nothing here leaves root-owned files
-# that the unprivileged service could no longer write.
+# drops to __USER__ for every command that touches the checkout, the
+# virtualenv, or the database — so nothing here leaves root-owned files that
+# the unprivileged service could no longer write.
+#
+# Dropped with subprocess's own user=, not runuser: both end up at setuid, but
+# runuser opens a PAM session to get there and PAM logs every one, which is
+# three lines per command into the journal that is the only place a bad deploy
+# explains itself.
 User=root
 WorkingDirectory=__REPO__
 ExecStart=__REPO__/.venv/bin/python -m workbench.deploy

@@ -118,6 +118,25 @@ def worktree_tarball() -> bytes:
     return buffer.getvalue()
 
 
+#: Where the install's own output is kept inside the container, so it can be
+#: both watched live and asserted on afterwards.
+INSTALL_LOG = "/tmp/install.log"
+
+#: Where the install puts the deployment, whatever directory it was started
+#: from. TARGET deliberately stays somewhere else, so every run of this test
+#: exercises the relocation rather than the already-in-place path.
+DEPLOYMENT = "/srv/workbench"
+
+#: The account the deployment ends up owned by, and served as.
+ACCOUNT = "workbench"
+
+
+def _expect(container: str, shell: str, complaint: str) -> None:
+    """Assert a shell condition holds inside the container."""
+    if docker("exec", container, "bash", "-c", shell, check=False) != 0:
+        raise TestFailureError(complaint)
+
+
 def run_test(image: str, from_github: bool, container: str) -> None:
     step(f"Starting a clean {image} container")
     docker_quiet("run", "-d", "--name", container, image, "sleep", "infinity")
@@ -145,17 +164,81 @@ def run_test(image: str, from_github: bool, container: str) -> None:
         )
 
     step("Running install.sh")
-    docker("exec", container, "bash", "-c", f"cd {TARGET} && ./install.sh")
+    # Through `tee` rather than captured, because install.sh's progress is the
+    # most useful thing to watch when this fails — and `pipefail` because
+    # otherwise the pipeline reports tee's exit code and a failed install
+    # sails through as a pass.
+    docker(
+        "exec",
+        container,
+        "bash",
+        "-c",
+        f"set -o pipefail; cd {TARGET} && ./install.sh 2>&1 | tee {INSTALL_LOG}",
+    )
+    install_output = docker_quiet("exec", container, "cat", INSTALL_LOG)
 
-    step("Starting the app (no systemd in a container)")
+    step("Confirming the install named the steps it cannot do for you")
+    # The reproducibility rule does not promise every step is automatable — it
+    # promises none is undiscoverable. Minting the agent's credential needs a
+    # browser login against an account no script can know, so the bar it has to
+    # clear is that the installer says so, out loud, with the command. This
+    # assertion is the whole of that promise: without it the step silently
+    # slips back out of the output and is rediscovered by a failed run, which
+    # is exactly how it was found the first time.
+    if "auth login" not in install_output:
+        raise TestFailureError("the install did not tell anyone how to authenticate the agent")
+
+    step("Confirming the deployment moved, and belongs to its own account")
+    _expect(container, f"id {ACCOUNT}", "the service account was not created")
+    _expect(
+        container,
+        f'test "$(stat -c %U {DEPLOYMENT})" = {ACCOUNT}',
+        f"{DEPLOYMENT} is not owned by {ACCOUNT}",
+    )
+    # The credential directory is the one that fails late when it is wrong: an
+    # OAuth token is refreshed periodically, so a root-owned ~/.claude works
+    # until the first refresh and then stops.
+    _expect(
+        container,
+        f'test "$(stat -c %U:%a /home/{ACCOUNT}/.claude)" = "{ACCOUNT}:700"',
+        f"/home/{ACCOUNT}/.claude is not a private directory owned by {ACCOUNT}",
+    )
+    _expect(
+        container,
+        f"test ! -e {TARGET}/.venv",
+        "a virtualenv was built in the checkout the install was about to leave",
+    )
+
+    step("Confirming the account can author a commit and has a key to push with")
+    # Both are unattended on the server: an agent commits its own work and the
+    # deployer pushes. Neither can answer a prompt, so a missing identity or
+    # key is not a question — it is a run dying several minutes in, having
+    # already done the work.
+    _expect(
+        container,
+        f"su -s /bin/bash {ACCOUNT} -c 'git config --global --get user.email'",
+        f"{ACCOUNT} has no git identity, so an agent could not commit",
+    )
+    _expect(
+        container,
+        f"test -f /home/{ACCOUNT}/.ssh/id_ed25519.pub",
+        f"{ACCOUNT} has no SSH key, so the deployer could not push",
+    )
+    # The half a person has to paste. The install cannot authorise a key, so
+    # naming it is the whole of the obligation — same bargain as the login.
+    if "ssh-ed25519 " not in install_output:
+        raise TestFailureError("the install did not print the public key to add as a deploy key")
+
+    step("Starting the app as the service account (no systemd in a container)")
     docker(
         "exec",
         "-d",
         container,
         "bash",
         "-c",
-        f"cd {TARGET} && .venv/bin/uvicorn workbench.app:app "
-        "--host 127.0.0.1 --port 8787 >/tmp/uvicorn.log 2>&1",
+        f"su -s /bin/bash {ACCOUNT} -c "
+        f"'cd {DEPLOYMENT} && .venv/bin/uvicorn workbench.app:app "
+        "--host 127.0.0.1 --port 8787' >/tmp/uvicorn.log 2>&1",
     )
 
     step("Smoke testing inside the container")
@@ -164,7 +247,7 @@ def run_test(image: str, from_github: bool, container: str) -> None:
         container,
         "bash",
         "-c",
-        f"cd {TARGET} && .venv/bin/python scripts/smoke_test.py",
+        f"cd {DEPLOYMENT} && .venv/bin/python scripts/smoke_test.py",
         check=False,
     )
     if smoke != 0:
@@ -172,8 +255,27 @@ def run_test(image: str, from_github: bool, container: str) -> None:
         docker("exec", container, "cat", "/tmp/uvicorn.log", check=False)
         raise TestFailureError("smoke test failed")
 
-    step("Re-running install.sh (it must be safe to repeat)")
-    docker("exec", container, "bash", "-c", f"cd {TARGET} && ./install.sh")
+    step("Re-running install.sh from the abandoned checkout (must be harmless)")
+    # Somebody will do this: the directory they cloned into is the one they
+    # remember. It must hand off to the deployment rather than copy a stale
+    # tree over it.
+    docker(
+        "exec",
+        container,
+        "bash",
+        "-c",
+        f"set -o pipefail; cd {TARGET} && ./install.sh 2>&1 | tee {INSTALL_LOG}.rerun",
+    )
+    if "deployment already exists" not in docker_quiet(
+        "exec", container, "cat", f"{INSTALL_LOG}.rerun"
+    ):
+        raise TestFailureError(
+            "re-running the abandoned checkout copied over the deployment instead of "
+            "handing off to it"
+        )
+
+    step("Re-running install.sh from the deployment itself")
+    docker("exec", container, "bash", "-c", f"cd {DEPLOYMENT} && ./install.sh")
 
     step("Confirming data survived the second install")
     survived = docker(

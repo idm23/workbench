@@ -156,6 +156,30 @@ before designing around "detached" as though it meant "survives".
 The consolation is that the durable event log makes the difference smaller than it looks:
 a killed run is recoverable reading rather than lost work.
 
+## A self-updating deployer is always one deploy behind itself
+
+The deployer pulls, then acts. But it imported its own code *before* pulling, so the run
+that brings in a change to the deployer is the last run that does not perform it. The new
+behaviour starts on the deploy after.
+
+That is fine for a change to a step that already runs. It is not fine for a *new* step,
+because the deploy that installs the code also reports success — the service restarts into
+the new version, `/healthz` shows the new revision, everything looks landed — while the new
+install step has never executed once. It then waits for an unrelated commit to come along.
+
+Found the hard way: agent runs need a polkit rule, the deployer learned to write one, and
+the deploy that delivered that knowledge did not use it. Every run failed with "interactive
+authentication required" on a machine whose revision said the fix was deployed.
+
+The general answer is to make installing *convergent* rather than event-driven — run it on
+every tick, not only when a commit arrived. It is idempotent and compares before writing,
+so an idle tick costs four template renders and no writes, and a unit deleted by hand comes
+back on its own.
+
+Same family as "it cannot install itself": a machine with no timer never fetches the commit
+that would give it one. Anything that installs the mechanism it depends on needs a manual
+first push or a convergent loop.
+
 ## Run the suite the way CI runs it
 
 `python -m pytest` and `uv run pytest` are not the same command. `-m` puts the working
@@ -260,6 +284,66 @@ repository's default branch would silently retarget it.
   the prompt and the protection with it.
 - Valid HTTPS needs **HTTPS Certificates** enabled in the admin console — it is what makes
   "Add to Home Screen" behave like a real app.
+
+## A process that pulls new code must not lazily import it
+
+The deploy that shipped a dedicated service account died like this:
+
+```
+File ".../deploy.py", line 482, in refresh_units
+File ".../install.py", line 39, in <module>
+    from workbench.config import (
+ImportError: cannot import name 'agent_git_identity' from 'workbench.config'
+```
+
+Every one of those names exists. The new `install.py` asks for a symbol the new
+`config.py` defines, and importing both together works perfectly — which is why CI, the
+container harness and a local run all passed.
+
+The deployer is a long-running process that changes the code underneath itself. It
+imported `deploy` and `config` at startup, from the *old* commit. Then it fast-forwarded
+the checkout, so the files on disk became new. Then `refresh_units()` did a lazy `from
+workbench.install import ...` — and Python loaded the **new** `install.py` off disk while
+`workbench.config` was already cached in `sys.modules` from the **old** commit. New
+module, old dependency, one process.
+
+The tell was in the traceback: line numbers pointed at the wrong statements, one of them
+a docstring. Python renders frames by reading the file *now* while executing what it
+loaded *then*, so a mismatch between the two is visible in the trace itself.
+
+**A deferred import is a decision about which version of the code runs, not just when it
+loads.** Anywhere a process outlives a change to its own source, every module it will
+ever need must be imported before the change lands. `deploy.py` now imports
+`workbench.install` at module scope, so both halves are always from the same commit — the
+old one — and the deploy after it converges. That the deployer runs one commit behind is
+already the documented design; the lazy import was quietly opting one module out of it.
+
+The preflight (`import workbench.app` in a throwaway subprocess) could not have caught
+this, and it is worth understanding why: in a *fresh* process the new code imports
+fine. The failure only exists in a process that straddles the pull, so no amount of
+checking the new code in isolation would find it.
+
+## An action that only runs on the tick that changed something will eventually not run
+
+Same deploy, second failure, and the more expensive one. The fast-forward succeeded
+before the crash, so the checkout was left at the new commit. Every tick after that
+returned `AlreadyCurrent` — and acceptance ran only on a tick that had *advanced*. So the
+commit was reported on by nobody: no status, red or green, ever again.
+
+Nothing looked wrong. The service was healthy, serving the new revision, units correct,
+journal clean from the next tick onward. Only GitHub knew, by staying silent, and silence
+is what promotion waits on.
+
+The fix is the same shape as the one that made unit installation convergent: decide from
+*state* rather than from *what just happened*. A local marker file records the revision
+acceptance last reported on, and any tick where that disagrees with `HEAD` runs it. One
+outcome is deliberately not recorded — a verdict that ran but never reached GitHub —
+because that is the single case where retrying is what fixes it.
+
+**Every step conditioned on "something changed this tick" is a step that silently stops
+happening the first time a run dies between the change and the step.** Two have now been
+found in this deployer. There is no third at the time of writing, which is not the same
+as there not being one.
 
 ## Small ones
 
