@@ -341,9 +341,41 @@ outcome is deliberately not recorded — a verdict that ran but never reached Gi
 because that is the single case where retrying is what fixes it.
 
 **Every step conditioned on "something changed this tick" is a step that silently stops
-happening the first time a run dies between the change and the step.** Two have now been
-found in this deployer. There is no third at the time of writing, which is not the same
-as there not being one.
+happening the first time a run dies between the change and the step.**
+
+That sentence was written with the note that two had been found and "there is no third at
+the time of writing, which is not the same as there not being one." The third turned up
+forty minutes later, on the first production deploy after the same promotion, and it had
+the worst symptom of the three: the restart.
+
+Production pulled the commit, crashed on the same import, and stopped before
+`systemctl restart`. New code on disk, new units on disk, and the old process still
+serving requests — with the checkout already advanced, so every later tick was
+`AlreadyCurrent`, converged the units, and never restarted anything. `/healthz` honestly
+reported a revision five commits behind what the repository said was deployed, and it
+would have stayed that way indefinitely.
+
+So the restart converges too, from a marker recording which revision the running service
+was started into. Two details in that are load-bearing:
+
+- **It is recorded after the health check, not after the restart returns.** A service that
+  was started and never came up is not one that is serving.
+- **A machine with no marker is treated as _not_ stale, and seeded on the next idle tick.**
+  The opposite reading is tempting and worse: a machine where the marker cannot be written
+  would restart the service every five minutes forever, which is a bigger failure than the
+  one being fixed. Seeding happens on a tick where nothing was pulled, so the service is
+  current by definition, and a later failed deploy then has an old revision to disagree
+  with.
+
+The app's own `/healthz` revision looks like it would serve instead of a marker, and it
+does not. That value is cached for the life of the process at its first request, so a
+service that started but had not yet answered anything when a pull landed would report the
+*new* revision while running the old code — leaving exactly the stuck state the check
+exists to clear.
+
+Three for three. The general lesson is not about deploys: **any convergent loop should
+decide from the state it can observe, never from what it happened to do this iteration.**
+The two are equivalent only while nothing ever fails in between.
 
 ## Small ones
 
