@@ -434,6 +434,31 @@ name the directives they argue against, so "absent" has to mean absent from the
 configuration rather than unmentioned in the prose. `directives()` in `test_units.py`
 strips comments for exactly that reason.
 
+### And a coda, twenty minutes later
+
+The fix for the above introduced `OnCalendar=__SCHEDULE__` and a matching entry in the
+installer's replacement table. It deployed as:
+
+```
+OnCalendar=__SCHEDULE__
+Failed to restart workbench-staging-deploy.timer: Unit ... has a bad unit file setting.
+```
+
+The deployer imports its own code before it pulls, so the *template* comes from the new
+checkout while the *renderer* is the old one — which had never heard of `__SCHEDULE__` and
+left it verbatim. Invalid unit, failed restart, timer dead a second time in an hour, by a
+different mechanism, in the commit that fixed the first one.
+
+**Adding a placeholder is backward compatible. Renaming one, or requiring a new one in an
+existing template, is not.** An older renderer silently emits it as literal text, and unit
+files fail late and quietly rather than at parse time.
+
+The schedule was never configurable — it is baked in at install time by design — so it did
+not need to be rendered at all, and is now literal text in the template. That is worth
+generalising: **a value that is not actually variable should not be a placeholder**, because
+every placeholder is a contract between two versions of the code that meet only during a
+deploy.
+
 ## Small ones
 
 **`curl -I` sends HEAD**, and FastAPI does not auto-add HEAD to a GET route. A `405` with

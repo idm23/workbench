@@ -64,12 +64,9 @@ HEALTH_TIMEOUT_SECONDS = 20.0
 #: environment: it is baked into the timer at install time, and changing it
 #: means re-rendering the unit anyway.
 #:
-#: A calendar expression rather than an interval, because a monotonic timer
-#: loses its anchor when restarted and then never fires again — see the long
-#: note in the timer template. `*:0/5` is every five minutes on the wall clock.
-DEPLOY_SCHEDULE = "*:0/5"
-
-#: The same thing in words, for the messages a person reads.
+#: The schedule itself is written directly into the timer template rather than
+#: rendered from here — see the note there. This is only the wording for the
+#: messages a person reads, and the two are kept in step by a test.
 DEPLOY_INTERVAL = "5min"
 
 
@@ -843,7 +840,6 @@ def render_unit(template_name: str) -> str:
         "__HOST__": host(),
         "__PORT__": str(port()),
         "__BRANCH__": deploy_branch(),
-        "__SCHEDULE__": DEPLOY_SCHEDULE,
         "__INSTANCE__": instance(),
         "__SERVICE__": service_name(),
         # A staging install restores production's database before migrating;
