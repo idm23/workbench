@@ -13,10 +13,12 @@ that tool is absent.
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from workbench import install
 from workbench.config import (
     agent_git_identity,
     agent_home,
@@ -491,3 +493,21 @@ def test_a_failure_converging_is_reported(monkeypatch):
     )
 
     assert isinstance(deploy.deploy(), deploy.DeployFailed)
+
+
+def test_the_install_points_at_the_deployments_own_interpreter(monkeypatch, tmp_path, caplog):
+    """Not `sys.executable`, which is a different thing after a relocation.
+
+    The installer is started by `uv run` from whichever checkout someone typed
+    `./install.sh` in, and that interpreter path survives both the escalation
+    and the handoff to /srv. Printing it tells a person to re-check their
+    install using the *abandoned* checkout's virtualenv, which then reports —
+    correctly and uselessly — that it is not the deployment.
+    """
+    monkeypatch.setattr("workbench.install.repo_root", lambda: tmp_path)
+
+    with caplog.at_level("INFO"):
+        install.report_success()
+
+    assert f"{tmp_path}/.venv/bin/python -m workbench.doctor" in caplog.text
+    assert sys.executable not in caplog.text
