@@ -12,6 +12,7 @@ build_tree` without caring which half it came from.
 from workbench.tasks.store import (
     TaskNotFound,
     WrongProject,
+    branch_choices_for,
     create_task,
     delete_task,
     set_status,
@@ -22,6 +23,7 @@ __all__ = [
     "TaskNode",
     "TaskNotFound",
     "WrongProject",
+    "branch_choices_for",
     "build_tree",
     "create_task",
     "delete_task",

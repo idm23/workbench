@@ -12,11 +12,13 @@ import pytest
 
 from workbench.git.worktrees import (
     GitFailed,
+    GitOk,
     WorktreeReady,
     branch_name,
     clone_path_for,
     diffstat,
     ensure_worktree,
+    fetch_checkout,
     has_commits,
     local_checkout,
     slugify,
@@ -144,6 +146,79 @@ def test_worktree_survives_its_directory_being_deleted(repo):
 
     assert isinstance(second, WorktreeReady)
     assert second.branch == first.branch
+
+
+# --- Fetching before branching ----------------------------------------------
+#
+# `ensure_worktree` branches from `origin/<base>`, which is only as fresh as
+# the checkout's last fetch. A clone made once and never fetched again is
+# exactly the trap this fixes: a task started days after the clone would
+# otherwise branch from whatever `origin/main` happened to be back then.
+
+
+@pytest.fixture
+def cloned_repo(tmp_path, monkeypatch):
+    """A checkout with an `origin` it can actually fetch from.
+
+    A second local repository rather than a mock, so `git fetch` and
+    `origin/main` behave exactly as they would against GitHub.
+    """
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+
+    def git(*args: str, cwd=origin) -> None:
+        subprocess.run(("git", *args), cwd=cwd, check=True, capture_output=True)
+
+    git("init", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (origin / "README.md").write_text("hello\n")
+    git("add", ".")
+    git("commit", "-m", "first")
+
+    checkout = tmp_path / "checkout"
+    git("clone", str(origin), str(checkout), cwd=tmp_path)
+    return origin, checkout
+
+
+def _commit_more(origin, name: str) -> None:
+    (origin / name).write_text("later\n")
+    subprocess.run(("git", "add", "."), cwd=origin, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", name),
+        cwd=origin,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_a_worktree_branches_from_a_stale_origin_without_a_fetch(cloned_repo):
+    """Pinning the trap itself, before pinning its fix."""
+    origin, checkout = cloned_repo
+    _commit_more(origin, "new.txt")
+
+    result = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+
+    assert isinstance(result, WorktreeReady)
+    assert not (result.path / "new.txt").exists()
+
+
+def test_fetching_first_picks_up_what_origin_has_now(cloned_repo):
+    origin, checkout = cloned_repo
+    _commit_more(origin, "new.txt")
+
+    assert isinstance(fetch_checkout(checkout), GitOk)
+    result = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+
+    assert isinstance(result, WorktreeReady)
+    assert (result.path / "new.txt").exists()
+
+
+def test_fetch_checkout_is_a_no_op_without_a_remote(repo):
+    """`clone_project` calls this even for a from-scratch repository in tests."""
+    assert isinstance(fetch_checkout(repo), GitOk)
 
 
 # --- Deriving the checkout ---------------------------------------------------

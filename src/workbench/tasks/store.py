@@ -110,3 +110,17 @@ def descendants(task: Task) -> list[Task]:
     for child in task.children:
         collected.extend(descendants(child))
     return collected
+
+
+def branch_choices_for(task: Task) -> list[Task]:
+    """Other tasks in the same tree that already have a branch to build on.
+
+    A task that depends on unmerged sibling work should be able to start from
+    that sibling's branch directly, rather than only from main or staging.
+    Walks up to the root first because the sibling in question need not be
+    directly related to `task` — only in the same tree.
+    """
+    root = task
+    while root.parent is not None:
+        root = root.parent
+    return [other for other in descendants(root) if other.id != task.id and other.branch]

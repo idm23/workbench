@@ -65,8 +65,25 @@
                 {# Only leaves: a task with children describes work rather than
                    being work, so an agent pointed at one has nothing single to
                    do. And nothing can run before there is a checkout. #}
-                <form method="post" action="/tasks/{{ node.task.id }}/runs">
+                <form method="post" action="/tasks/{{ node.task.id }}/runs"
+                      style="display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;">
                   <input type="hidden" name="phase" value="plan">
+                  {% set choices = origin_choices.get(node.task.id) %}
+                  {% if choices %}
+                    {# Only a task with no worktree yet has anything to
+                       choose — once one exists its branch is fixed. #}
+                    <select name="origin" style="width: auto; margin-bottom: 0;"
+                            aria-label="Branch from">
+                      {% for value, label in choices %}
+                        {# Remembers a choice from an earlier attempt the
+                           executor refused — the concurrency cap, say —
+                           rather than silently reverting to main. #}
+                        <option value="{{ value }}"
+                          {{ 'selected' if value == (node.task.origin_ref or 'main') }}
+                        >{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  {% endif %}
                   <button class="slim" type="submit">Plan</button>
                 </form>
               {% endif %}
