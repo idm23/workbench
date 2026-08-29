@@ -345,23 +345,7 @@ def rebuild_and_restart() -> DeployFailed | None:
     if unit_error is not None:
         return unit_error
 
-    restarted = _run(
-        ["systemctl", "restart", service_name()],
-        as_owner=False,
-        timeout=RESTART_TIMEOUT_SECONDS,
-    )
-    if restarted.returncode != 0:
-        return _fail("restarting the service", restarted)
-
-    # The step this used to be missing. Without it a deploy that installs
-    # code which dies on startup reports success into the journal while
-    # Restart=always thrashes, and the first sign of trouble is the app being
-    # unreachable from a phone.
-    unhealthy = install.health_check()
-    if unhealthy is not None:
-        return DeployFailed("waiting for the service to come back", unhealthy)
-
-    return None
+    return restart_service()
 
 
 def deploy() -> DeployResult:
@@ -396,6 +380,16 @@ def deploy() -> DeployResult:
             # looks wrong: the service is healthy and serving the new code.
             #
             # Observed exactly once, which was enough. See docs/learning-notes.
+            #
+            # The restart is the third step with this shape, and the one with
+            # the worst symptom: new code and new units on disk, an old process
+            # still serving, and nothing anywhere looking wrong. Converged the
+            # same way — from what the service *is*, not from what this tick
+            # happened to do.
+            failure = converge_service()
+            if failure is not None:
+                return failure
+
             if acceptance_is_outstanding():
                 logger.info("Acceptance has not reported on this revision yet")
                 run_acceptance()
@@ -409,14 +403,40 @@ def deploy() -> DeployResult:
     return Deployed(advanced.revision)
 
 
-def acceptance_marker() -> Path:
-    """Where the revision acceptance last *reported* on is recorded.
+def _read_marker(name: str) -> str | None:
+    """A revision this machine recorded reaching, or None if it never has.
 
-    In `data/` because it describes this machine's install rather than the
-    repository — it is per-instance, it is generated, and a clone onto another
-    box must not inherit it.
+    In `data/` because these describe this machine's install rather than the
+    repository — per-instance, generated, and a clone onto another box must not
+    inherit one.
     """
-    return data_dir() / "acceptance-reported"
+    try:
+        return (data_dir() / name).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _write_marker(name: str, revision: str) -> None:
+    try:
+        ensure_data_dir()
+        (data_dir() / name).write_text(f"{revision}\n")
+    except OSError as error:
+        # Not fatal, in either direction. Failing to record costs a repeated
+        # restart or acceptance run on the next tick — wasteful rather than
+        # wrong, and a deploy must never die on bookkeeping.
+        logger.warning("Could not record %s: %s", name, error)
+
+
+#: The revision acceptance last reported a verdict on to GitHub.
+ACCEPTANCE_MARKER = "acceptance-reported"
+
+#: The revision the running service was last started into. Not the checkout's
+#: revision, which is what the *files* say — this is what the process is.
+SERVING_MARKER = "serving-revision"
+
+
+def acceptance_marker() -> Path:
+    return data_dir() / ACCEPTANCE_MARKER
 
 
 def acceptance_is_outstanding() -> bool:
@@ -431,19 +451,87 @@ def acceptance_is_outstanding() -> bool:
     if restore_from() is None:
         return False
 
-    try:
-        return acceptance_marker().read_text().strip() != current_revision()
-    except OSError:
-        return True
+    return _read_marker(ACCEPTANCE_MARKER) != current_revision()
 
 
 def record_acceptance_reported(revision: str) -> None:
-    try:
-        acceptance_marker().write_text(f"{revision}\n")
-    except OSError as error:
-        # Not fatal. The cost of failing to record is a repeated acceptance
-        # run on the next tick, which is wasteful rather than wrong.
-        logger.warning("Could not record the accepted revision: %s", error)
+    _write_marker(ACCEPTANCE_MARKER, revision)
+
+
+def service_is_stale() -> bool:
+    """Whether the running service is older than the code on disk.
+
+    The third step found conditioned on "something changed this tick", and the
+    one with the worst symptom. A deploy that pulled a commit and then failed
+    before the restart leaves new code and new units on disk with an old
+    process still serving — and since the checkout has already advanced, every
+    later tick is AlreadyCurrent and never restarts it. Production sat like
+    that until somebody looked.
+
+    Read from a marker rather than from the app's own /healthz revision.
+    That value is cached for the life of the process at its first request, so a
+    service that started but had not yet answered anything when a pull landed
+    would report the *new* revision while running the old code — leaving
+    exactly the stuck state this exists to clear.
+
+    A machine that has never recorded one is *not* treated as stale, and that
+    is a deliberate trade rather than an oversight. Treating it as stale would
+    mean a machine where the marker cannot be written — a full disk, a
+    permission the relocation missed — restarts the service every five minutes
+    forever, which is a worse failure than the one this fixes. The absent case
+    is instead seeded on the next idle tick, where the service is current by
+    definition because nothing was pulled.
+    """
+    serving = _read_marker(SERVING_MARKER)
+    if serving is None:
+        return False
+    return serving != current_revision()
+
+
+def converge_service() -> DeployFailed | None:
+    """Make the running service match the code on disk, and record that it does.
+
+    Seeding matters as much as restarting. The marker only distinguishes stale
+    from current once it exists, and the deploy that would have created it is
+    exactly the one that crashed — so an idle tick writes it while nothing is
+    in doubt, and a later failed deploy then has an old revision to disagree
+    with.
+    """
+    if service_is_stale():
+        logger.info("The running service is older than the checkout")
+        return restart_service()
+
+    if _read_marker(SERVING_MARKER) is None:
+        record_serving(current_revision())
+
+    return None
+
+
+def record_serving(revision: str) -> None:
+    _write_marker(SERVING_MARKER, revision)
+
+
+def restart_service() -> DeployFailed | None:
+    """Restart, and wait until it answers. Records what it is now serving."""
+    restarted = _run(
+        ["systemctl", "restart", service_name()],
+        as_owner=False,
+        timeout=RESTART_TIMEOUT_SECONDS,
+    )
+    if restarted.returncode != 0:
+        return _fail("restarting the service", restarted)
+
+    # Without this a deploy that installs code which dies on startup reports
+    # success into the journal while Restart=always thrashes, and the first
+    # sign of trouble is the app being unreachable from a phone.
+    unhealthy = install.health_check()
+    if unhealthy is not None:
+        return DeployFailed("waiting for the service to come back", unhealthy)
+
+    # After the health check, not before: what is recorded is a revision that
+    # actually came up and answered, not one that was merely started.
+    record_serving(current_revision())
+    return None
 
 
 def run_acceptance() -> None:
