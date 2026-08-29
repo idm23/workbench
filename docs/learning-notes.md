@@ -377,6 +377,63 @@ Three for three. The general lesson is not about deploys: **any convergent loop 
 decide from the state it can observe, never from what it happened to do this iteration.**
 The two are equivalent only while nothing ever fails in between.
 
+## A monotonic systemd timer does not survive being restarted
+
+Both deploy timers reported `enabled` and `active`. Neither had fired for half an hour,
+and neither ever would again:
+
+```
+$ systemctl status workbench-deploy.timer
+     Active: active (elapsed) since Sat 2026-08-29 18:22:10 UTC; 28min ago
+    Trigger: n/a
+```
+
+`active (elapsed)` with `Trigger: n/a` is systemd for "this timer has no future". The
+schedule was:
+
+```ini
+OnBootSec=2min
+OnUnitActiveSec=5min
+```
+
+Both are *monotonic* — each measures from an anchor. `OnBootSec` measures from boot, and
+this machine had been up seventeen days, so that moment is long past and cannot recur.
+`OnUnitActiveSec` measures from the last activation of the service the timer triggers,
+**counting only activations since the timer itself started**. Restart the timer and there
+have been none — and the thing that would produce one is the timer firing. No anchor, no
+next elapse, no deploys.
+
+It chains correctly for as long as the timer runs untouched from boot: the boot trigger
+fires once, that activation anchors the interval, and each firing re-anchors the next. The
+whole arrangement is one unbroken chain from a single event seventeen days earlier, and
+restarting the unit breaks it permanently.
+
+Which would be a curiosity, except `install_units` restarts this timer **on purpose**
+whenever the rendered file changes, with a comment explaining that a changed interval
+would otherwise not take effect until reboot. The one code path written to update the
+schedule was the path that silently switched deployment off.
+
+`Persistent=true` was already in the file, already documented as catching up a check
+missed while the machine was off, and doing nothing whatsoever: it only applies to
+`OnCalendar=` timers. Two bugs, one of them decorative, sitting next to each other for
+weeks.
+
+`OnCalendar=*:0/5` has no anchor to lose. Restarting it, reinstalling it, or reloading
+systemd all leave the next occurrence where it was, and `Persistent=true` starts meaning
+what its comment always claimed.
+
+**The test asserted the bug.** It checked `"OnUnitActiveSec=" in timer`, which is true of
+exactly the configuration that breaks. A unit-file test that asserts a directive is
+*present* pins the spelling; what was needed was a property — *this timer still fires
+after it is restarted* — which is expressible as the absence of any anchor-dependent
+trigger. Worth asking of any assertion over configuration: does this describe a behaviour,
+or transcribe the file?
+
+One practical note for writing those assertions: these templates carry long comments that
+name the directives they argue against, so "absent" has to mean absent from the
+configuration rather than unmentioned in the prose. `directives()` in `test_units.py`
+strips comments for exactly that reason.
+
 ## Small ones
 
 **`curl -I` sends HEAD**, and FastAPI does not auto-add HEAD to a GET route. A `405` with

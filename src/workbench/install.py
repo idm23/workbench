@@ -63,6 +63,13 @@ HEALTH_TIMEOUT_SECONDS = 20.0
 #: How often the deployer checks for new commits. Not configurable through the
 #: environment: it is baked into the timer at install time, and changing it
 #: means re-rendering the unit anyway.
+#:
+#: A calendar expression rather than an interval, because a monotonic timer
+#: loses its anchor when restarted and then never fires again — see the long
+#: note in the timer template. `*:0/5` is every five minutes on the wall clock.
+DEPLOY_SCHEDULE = "*:0/5"
+
+#: The same thing in words, for the messages a person reads.
 DEPLOY_INTERVAL = "5min"
 
 
@@ -836,7 +843,7 @@ def render_unit(template_name: str) -> str:
         "__HOST__": host(),
         "__PORT__": str(port()),
         "__BRANCH__": deploy_branch(),
-        "__INTERVAL__": DEPLOY_INTERVAL,
+        "__SCHEDULE__": DEPLOY_SCHEDULE,
         "__INSTANCE__": instance(),
         "__SERVICE__": service_name(),
         # A staging install restores production's database before migrating;
