@@ -37,6 +37,7 @@ from pathlib import Path
 # be, and the first thing to notice would be a unit test shelling out to sudo.
 from workbench import install
 from workbench.config import (
+    data_dir,
     database_path,
     deploy_branch,
     ensure_data_dir,
@@ -385,6 +386,19 @@ def deploy() -> DeployResult:
             failure = refresh_units()
             if failure is not None:
                 return failure
+
+            # And converge acceptance, for the same reason and a sharper one.
+            # Acceptance used to run only on the tick that advanced the
+            # checkout — so a deploy that pulled a commit and then failed
+            # afterwards left that commit reported on by nobody, and every
+            # later tick was AlreadyCurrent and skipped it. The status never
+            # arrives, promotion waits forever, and nothing on the machine
+            # looks wrong: the service is healthy and serving the new code.
+            #
+            # Observed exactly once, which was enough. See docs/learning-notes.
+            if acceptance_is_outstanding():
+                logger.info("Acceptance has not reported on this revision yet")
+                run_acceptance()
         return advanced
 
     failure = rebuild_and_restart()
@@ -393,6 +407,43 @@ def deploy() -> DeployResult:
 
     run_acceptance()
     return Deployed(advanced.revision)
+
+
+def acceptance_marker() -> Path:
+    """Where the revision acceptance last *reported* on is recorded.
+
+    In `data/` because it describes this machine's install rather than the
+    repository — it is per-instance, it is generated, and a clone onto another
+    box must not inherit it.
+    """
+    return data_dir() / "acceptance-reported"
+
+
+def acceptance_is_outstanding() -> bool:
+    """Whether this revision still owes GitHub a verdict.
+
+    Read from a local file rather than by asking GitHub. An outbound GET every
+    five minutes to answer "did I already do this" would be a network round
+    trip on the overwhelmingly common tick where the answer is no, and it would
+    make the deploy depend on GitHub being reachable to decide it has nothing
+    to do.
+    """
+    if restore_from() is None:
+        return False
+
+    try:
+        return acceptance_marker().read_text().strip() != current_revision()
+    except OSError:
+        return True
+
+
+def record_acceptance_reported(revision: str) -> None:
+    try:
+        acceptance_marker().write_text(f"{revision}\n")
+    except OSError as error:
+        # Not fatal. The cost of failing to record is a repeated acceptance
+        # run on the next tick, which is wasteful rather than wrong.
+        logger.warning("Could not record the accepted revision: %s", error)
 
 
 def run_acceptance() -> None:
@@ -440,7 +491,14 @@ def run_acceptance() -> None:
             "WORKBENCH_GITHUB_TOKEN in /etc/workbench/env. Promotion waits on that "
             "status, so it will stall with nothing obviously wrong."
         )
-    elif result.returncode != 0:
+        # Deliberately not recorded, so the next tick tries again. This is the
+        # one outcome that is worth retrying: the verdict exists and simply did
+        # not arrive, which a restored token fixes with no other action.
+        return
+
+    record_acceptance_reported(current_revision())
+
+    if result.returncode != 0:
         logger.warning(
             "Staging acceptance failed. The deploy itself succeeded; the red commit "
             "status is what blocks promotion."
