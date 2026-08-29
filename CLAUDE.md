@@ -254,12 +254,14 @@ but means parking a long-lived registration credential on the box and letting wo
 code execute there. Polling needs no inbound path, no secret, and no new daemon. The cost
 is latency: a merge lands within the timer interval instead of instantly.
 
-**Every step converges rather than firing on a change.** Installing units and running
-staging acceptance both decide from state — is the rendered unit different, has this
-revision been reported on — not from "did this tick pull something". Both were the other
-way once, and both broke the same way: a deploy that changed the checkout and then died
-left work that no later tick would ever pick up, with nothing on the machine looking
-wrong. `docs/learning-notes.md` has both post-mortems.
+**Every step converges rather than firing on a change.** Installing units, restarting the
+service, and running staging acceptance all decide from state — is the rendered unit
+different, is the running process older than the checkout, has this revision been reported
+on — not from "did this tick pull something". All three were the other way once, and all
+three broke identically: a deploy that changed the checkout and then died left work no
+later tick would ever pick up, with nothing on the machine looking wrong. The third was
+the worst, because it left production serving code five commits behind what the repository
+said was deployed. `docs/learning-notes.md` has the post-mortems.
 
 **It refuses rather than reconciles.** A checkout that is dirty, on another branch, or
 carrying a local commit is reported into the journal and left untouched, so working on the

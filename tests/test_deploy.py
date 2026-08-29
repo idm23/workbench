@@ -28,11 +28,15 @@ from workbench.deploy import (
     _run,
     acceptance_is_outstanding,
     advance_checkout,
+    converge_service,
     deploy,
     record_acceptance_reported,
+    record_serving,
     repo_owner,
+    restart_service,
     restore_snapshot,
     run_acceptance,
+    service_is_stale,
 )
 
 
@@ -52,6 +56,11 @@ def no_privileged_installs(monkeypatch):
     test that asks for a password, or worse, gets one.
     """
     monkeypatch.setattr("workbench.deploy.refresh_units", lambda: None)
+    # Same argument for the restart, which an idle tick now performs when the
+    # running service is older than the checkout: here it would be a real
+    # `systemctl restart` against whatever this machine happens to have
+    # installed. Tests that mean to exercise it patch it back themselves.
+    monkeypatch.setattr("workbench.deploy.restart_service", lambda: None)
 
 
 @pytest.fixture
@@ -678,3 +687,99 @@ def test_an_idle_tick_does_not_re_run_acceptance(staging, monkeypatch):
     deploy()
 
     assert ran == []
+
+
+# --- The service converges too ------------------------------------------------
+#
+# The third step found conditioned on "something changed this tick", and the one
+# with the worst symptom. A deploy pulled a commit and died before the restart,
+# so the checkout was new, the units were new, and an old process went on
+# serving requests — with every later tick AlreadyCurrent and never restarting
+# it. Production sat like that until somebody went and looked.
+
+
+@pytest.fixture
+def deployable(checkout, monkeypatch):
+    work, _ = checkout
+    monkeypatch.setenv("WORKBENCH_DB", str(work / "data" / "workbench.db"))
+    (work / "data").mkdir(parents=True, exist_ok=True)
+    return work
+
+
+def test_a_service_started_into_an_older_revision_is_stale(deployable, monkeypatch):
+    record_serving("aaaaaaa")
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "bbbbbbb")
+
+    assert service_is_stale()
+
+
+def test_a_service_on_the_current_revision_is_not(deployable, monkeypatch):
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "bbbbbbb")
+    record_serving("bbbbbbb")
+
+    assert not service_is_stale()
+
+
+def test_a_machine_that_has_never_recorded_is_not_stale(deployable):
+    """Deliberate, and the opposite choice is worse. Treating an absent marker
+    as stale would restart the service every five minutes forever on a machine
+    where the marker cannot be written — a worse failure than the one this
+    fixes."""
+    assert not service_is_stale()
+
+
+def test_an_idle_tick_seeds_the_marker(deployable, monkeypatch):
+    """Seeding matters as much as restarting: the marker only tells stale from
+    current once it exists, and the deploy that would have created it is
+    exactly the one that crashed."""
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "bbbbbbb")
+
+    converge_service()
+
+    assert (deployable / "data" / "serving-revision").read_text().strip() == "bbbbbbb"
+
+
+def test_a_stale_service_is_restarted_on_an_idle_tick(deployable, monkeypatch):
+    """The bug, end to end. Nothing was pulled this tick — the previous deploy
+    pulled it and then died — so only the marker can reveal it."""
+    record_serving("aaaaaaa")
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "bbbbbbb")
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        "workbench.deploy.restart_service", lambda: restarts.append("restart") and None
+    )
+
+    converge_service()
+
+    assert restarts == ["restart"]
+
+
+def test_a_current_service_is_left_alone(deployable, monkeypatch):
+    """Every five minutes, forever. Restarting a healthy service on an idle
+    tick would be a far worse bug than the one being fixed."""
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "bbbbbbb")
+    record_serving("bbbbbbb")
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        "workbench.deploy.restart_service", lambda: restarts.append("restart") and None
+    )
+
+    converge_service()
+
+    assert restarts == []
+
+
+def test_what_is_recorded_is_a_revision_that_answered(deployable, monkeypatch):
+    """Recorded after the health check, not after the restart command returns.
+    A service that was started and never came up is not one that is serving."""
+    monkeypatch.setattr("workbench.deploy.current_revision", lambda: "bbbbbbb")
+    monkeypatch.setattr(
+        "workbench.deploy._run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    monkeypatch.setattr("workbench.install.health_check", lambda: "it never answered")
+
+    failure = restart_service()
+
+    assert isinstance(failure, DeployFailed)
+    assert not (deployable / "data" / "serving-revision").exists()
