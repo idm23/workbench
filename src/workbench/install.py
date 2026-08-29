@@ -1041,6 +1041,17 @@ def report_outstanding() -> bool:
 
 
 def report_success() -> None:
+    """What is now true, and what to type next.
+
+    The interpreter named here is the *deployment's*, not `sys.executable`.
+    They differ, and the difference is not cosmetic: this process was started
+    by `uv run` from whichever checkout someone typed `./install.sh` in, and
+    that path survives both the escalation and the handoff to /srv. Printing it
+    would tell a person to re-check their install using the abandoned
+    checkout's virtualenv — which resolves `repo_root()` to the abandoned
+    checkout and then reports, correctly and uselessly, that it is not the
+    deployment.
+    """
     logger.info("\n%s", paint(BOLD, f"Workbench is running at http://{host()}:{port()}"))
     logger.info(
         "%s",
@@ -1061,7 +1072,7 @@ it needs a browser login to your own tailnet):
 
 Useful commands:
 
-    {sys.executable} -m workbench.doctor   # re-check the steps below
+    {_venv_bin("python")} -m workbench.doctor   # re-check the steps below
 
     systemctl status {service_name()}
     journalctl -u {service_name()} -f
