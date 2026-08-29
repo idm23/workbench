@@ -135,6 +135,21 @@ class Cloned:
 type CloneResult = Cloned | GitFailed
 
 
+def fetch_checkout(repo: Path) -> GitResult:
+    """Bring a clone's remote-tracking branches up to date.
+
+    `ensure_worktree` branches from `origin/<base>` when that ref exists, but
+    that ref is only as fresh as the last fetch. A clone's first fetch happens
+    here or in `clone_project`; nothing after that did, which meant a task
+    started days after the initial clone silently branched from whatever
+    `origin/main` happened to be at clone time — a repository that is present
+    on disk is not the same thing as one whose remote-tracking branches are
+    current. Safe to call on a repository with no remote at all: git treats
+    `fetch --all` with nothing configured as a no-op rather than an error.
+    """
+    return _run_git(["fetch", "--all", "--prune"], cwd=repo, timeout=NETWORK_TIMEOUT_SECONDS)
+
+
 def clone_project(clone_url: str, owner: str, repo: str) -> CloneResult:
     """Clone a project repository, or adopt the clone that is already there.
 
@@ -144,9 +159,7 @@ def clone_project(clone_url: str, owner: str, repo: str) -> CloneResult:
     target = clone_path_for(owner, repo)
     if (target / ".git").exists():
         logger.info("Repository already cloned at %s; fetching.", target)
-        fetched = _run_git(
-            ["fetch", "--all", "--prune"], cwd=target, timeout=NETWORK_TIMEOUT_SECONDS
-        )
+        fetched = fetch_checkout(target)
         if isinstance(fetched, GitFailed):
             return fetched
         return Cloned(target)

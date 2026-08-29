@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from workbench.database.db import make_engine
 from workbench.database.models import Base, Project, Task, TaskStatus, User
 from workbench.tasks import WrongProject, create_task, delete_task, set_status
-from workbench.tasks.store import descendants
+from workbench.tasks.store import branch_choices_for, descendants
 
 
 @pytest.fixture
@@ -140,3 +140,51 @@ def test_descendants_is_depth_first_and_includes_the_task(session, project):
     session.refresh(parent)
 
     assert [task.title for task in descendants(parent)] == ["parent", "child", "grandchild"]
+
+
+# --- Branch choices for the origin picker -----------------------------------
+
+
+def test_branch_choices_finds_a_branched_sibling(session, project):
+    parent = create_task(session, project, title="parent")
+    assert isinstance(parent, Task)
+    sibling = create_task(session, project, title="sibling", parent_id=parent.id)
+    other = create_task(session, project, title="other", parent_id=parent.id)
+    assert isinstance(sibling, Task) and isinstance(other, Task)
+    other.branch = "workbench/task-2-other"
+    session.commit()
+
+    assert branch_choices_for(sibling) == [other]
+
+
+def test_branch_choices_excludes_the_task_itself(session, project):
+    task = create_task(session, project, title="solo")
+    assert isinstance(task, Task)
+    task.branch = "workbench/task-1-solo"
+    session.commit()
+
+    assert branch_choices_for(task) == []
+
+
+def test_branch_choices_excludes_unbranched_tasks(session, project):
+    parent = create_task(session, project, title="parent")
+    assert isinstance(parent, Task)
+    sibling = create_task(session, project, title="sibling", parent_id=parent.id)
+    create_task(session, project, title="never run", parent_id=parent.id)
+    assert isinstance(sibling, Task)
+
+    assert branch_choices_for(sibling) == []
+
+
+def test_branch_choices_ignores_a_different_tree(session, project):
+    tree_a = create_task(session, project, title="tree a")
+    assert isinstance(tree_a, Task)
+    task = create_task(session, project, title="task in tree a", parent_id=tree_a.id)
+    tree_b = create_task(session, project, title="tree b")
+    assert isinstance(tree_b, Task)
+    other_tree_task = create_task(session, project, title="task in tree b", parent_id=tree_b.id)
+    assert isinstance(task, Task) and isinstance(other_tree_task, Task)
+    other_tree_task.branch = "workbench/task-4-task-in-tree-b"
+    session.commit()
+
+    assert branch_choices_for(task) == []
