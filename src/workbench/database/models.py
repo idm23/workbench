@@ -243,6 +243,15 @@ class Task(Base):
     branch: Mapped[str | None] = mapped_column(String(300), default=None)
     worktree_path: Mapped[str | None] = mapped_column(String(1000), default=None)
 
+    # What the task's branch should be created from: "main", "staging", or
+    # another task's own branch (see workbench.tasks.origin). Unset until
+    # someone chooses one when starting the first run — there is no sane
+    # default to assume on a task's behalf, because the whole point is that
+    # the choice is explicit rather than whatever a stale clone happens to
+    # have on hand. Once the worktree exists this is historical: the branch
+    # it names is already fixed and nothing re-reads this to change it.
+    origin_ref: Mapped[str | None] = mapped_column(String(300), default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

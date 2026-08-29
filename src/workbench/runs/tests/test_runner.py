@@ -363,6 +363,62 @@ def test_prepare_notes_each_slow_step_in_the_log(db, run, checkout, backend):
     assert any("worktree" in text for text in notices)
 
 
+# --- Choosing what to branch from -------------------------------------------
+
+
+def test_prepare_rejects_an_origin_that_no_longer_resolves(db, run, checkout):
+    """Defense in depth: the web route already validates this at request time."""
+    run.task.origin_ref = "task:9999"
+    db.commit()
+
+    result = prepare(db, run)
+
+    assert isinstance(result, NotPrepared)
+    assert "not a valid origin" in result.message
+
+
+def test_prepare_branches_from_the_chosen_origin(db, run, checkout):
+    run.task.origin_ref = "staging"
+    db.commit()
+
+    prepare(db, run)
+
+    notices = [e.payload["text"] for e in events_for(db, run) if e.kind is RunEventKind.NOTICE]
+    assert any("from staging" in text for text in notices)
+
+
+def test_prepare_fetches_before_creating_a_new_worktree(db, run, checkout, monkeypatch):
+    """The fix for the actual trap: a clone that is never fetched again."""
+    real_fetch = runner_module.fetch_checkout
+    calls = []
+    monkeypatch.setattr(
+        runner_module,
+        "fetch_checkout",
+        lambda repo: calls.append(repo) or real_fetch(repo),
+    )
+
+    prepare(db, run)
+
+    assert calls == [checkout]
+
+
+def test_prepare_does_not_refetch_once_a_worktree_already_exists(
+    db, run, checkout, backend, monkeypatch
+):
+    """Re-fetching a large repository on every execute run would cost time
+    for no benefit — the branch is already fixed by then."""
+    execute(db, run)
+    assert run.task.worktree_path is not None
+
+    calls = []
+    monkeypatch.setattr(runner_module, "fetch_checkout", lambda repo: calls.append(repo))
+    second = create_run(db, run.task, RunPhase.EXECUTE, backend="fake")
+
+    prepare(db, second)
+
+    assert calls == []
+
+
 # --- The entry point -------------------------------------------------------
 
 

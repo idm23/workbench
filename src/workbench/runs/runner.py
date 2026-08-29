@@ -46,11 +46,13 @@ from workbench.git.worktrees import (
     GitFailed,
     diffstat,
     ensure_worktree,
+    fetch_checkout,
     local_checkout,
     run_setup_command,
     uncommitted_diffstat,
 )
 from workbench.runs.store import append_event, finish_run, mark_running
+from workbench.tasks.origin import InvalidOrigin, origin_branch_for, resolve_origin
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +131,29 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
             f"{project.owner}/{project.repo} has not been cloned onto this machine yet."
         )
 
-    base_branch = project.default_branch or "main"
-    notice = {"text": f"Preparing worktree from {base_branch}."}
+    if task.worktree_path is None:
+        # Only resolved and only fetched here: once a worktree exists its
+        # branch is fixed, `ensure_worktree` below returns it without even
+        # looking at `base_branch`, and re-fetching a large repository on
+        # every subsequent execute run would cost time for no benefit.
+        resolved = resolve_origin(task, task.origin_ref)
+        if isinstance(resolved, InvalidOrigin):
+            return NotPrepared(resolved.message)
+        base_branch = resolved
+
+        fetched = fetch_checkout(checkout)
+        if isinstance(fetched, GitFailed):
+            return NotPrepared(f"{fetched.message} {fetched.stderr}".strip())
+
+        notice = {"text": f"Preparing worktree from {base_branch}."}
+    else:
+        # `ensure_worktree` returns the existing worktree without consulting
+        # `base_branch` at all once its path is already there, so this is a
+        # placeholder rather than a real choice — the branch was fixed the
+        # first time this task was prepared.
+        base_branch = task.branch or (project.default_branch or "main")
+        notice = {"text": "Reusing the existing worktree."}
+
     append_event(db, run.id, RunEventKind.NOTICE, notice)
 
     worktree = ensure_worktree(checkout, task.id, task.title, base_branch)
@@ -232,7 +255,7 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
     person decides which.
     """
     task = run.task
-    base_branch = task.project.default_branch or "main"
+    base_branch = origin_branch_for(task)
     worktree = Path(task.worktree_path) if task.worktree_path else None
 
     match ending:

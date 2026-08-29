@@ -199,6 +199,73 @@ def test_an_unknown_phase_is_rejected_readably(client, session, executor):
     assert "not+a+run+phase" in response.headers["location"]
 
 
+# --- Choosing where to branch from ------------------------------------------
+
+
+def test_the_default_origin_is_recorded_as_prod(client, session, executor):
+    task = a_task(session)
+
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "plan"})
+
+    session.refresh(task)
+    assert task.origin_ref is None
+
+
+def test_choosing_staging_is_recorded_on_the_task(client, session, executor):
+    task = a_task(session)
+
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "plan", "origin": "staging"})
+
+    session.refresh(task)
+    assert task.origin_ref == "staging"
+
+
+def test_an_invalid_origin_is_rejected_before_a_run_is_queued(client, session, executor):
+    task = a_task(session)
+
+    response = client.post(
+        f"/tasks/{task.id}/runs", data={"phase": "plan", "origin": "not-a-real-choice"}
+    )
+
+    assert "not+a+valid+origin" in response.headers["location"]
+    assert session.query(Run).count() == 0
+
+
+def test_a_branched_sibling_is_a_valid_origin(client, session, executor):
+    parent = a_task(session)
+    sibling = Task(project_id=parent.project_id, parent_id=parent.id, title="sibling")
+    task = Task(project_id=parent.project_id, parent_id=parent.id, title="task", branch=None)
+    session.add_all([sibling, task])
+    session.commit()
+    sibling.branch = "workbench/task-3-sibling"
+    session.commit()
+
+    response = client.post(
+        f"/tasks/{task.id}/runs", data={"phase": "plan", "origin": f"task:{sibling.id}"}
+    )
+
+    assert response.status_code == 303
+    session.refresh(task)
+    assert task.origin_ref == f"task:{sibling.id}"
+
+
+def test_the_origin_is_not_re_asked_once_a_worktree_exists(client, session, executor):
+    """Its branch is already fixed, so a later run has nothing to choose."""
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    task.branch = "workbench/task-1-write-the-runner"
+    task.origin_ref = "staging"
+    session.commit()
+
+    response = client.post(
+        f"/tasks/{task.id}/runs", data={"phase": "plan", "origin": "not-a-real-choice"}
+    )
+
+    assert response.status_code == 303
+    session.refresh(task)
+    assert task.origin_ref == "staging"
+
+
 def test_cancelling_asks_the_executor_to_stop(client, session, executor):
     client.post(f"/tasks/{a_task(session).id}/runs", data={"phase": "plan"})
 
@@ -248,6 +315,30 @@ def test_a_parent_task_is_not_offered_a_run(client, session, cloned):
     page = client.get(f"/projects/{parent.project_id}").text
 
     assert page.count(">Plan<") == 2
+
+
+def test_a_runnable_task_offers_an_origin_picker(client, session, cloned):
+    page = client.get(f"/projects/{a_task(session).project_id}").text
+
+    assert 'name="origin"' in page
+    assert "main (prod)" in page
+    assert "staging (dev)" in page
+
+
+def test_a_task_with_an_existing_worktree_is_not_offered_a_picker(client, session, cloned):
+    """Its branch is already fixed, so there is nothing left to choose.
+
+    The project's other seeded task has no worktree, so the picker still
+    appears once on the page — just not for this one.
+    """
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    task.branch = "workbench/task-1-write-the-runner"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert page.count('name="origin"') == 1
 
 
 def test_a_running_task_offers_to_stop_instead(client, session, cloned, executor):

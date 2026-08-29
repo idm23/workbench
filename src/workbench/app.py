@@ -49,6 +49,7 @@ from workbench.tasks import (
 from workbench.tasks import (
     delete_task as delete_task_and_children,
 )
+from workbench.tasks.origin import InvalidOrigin, origin_choices, resolve_origin
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -258,6 +259,13 @@ def show_project(
             # staging restores production's snapshot on every deploy — so a
             # stored path would arrive pointing at the other machine's disk.
             "checkout": local_checkout(project.owner, project.repo),
+            # Only worth computing for a task that would actually show the
+            # picker: one with no worktree yet has nothing to choose between.
+            "origin_choices": {
+                task.id: origin_choices(task)
+                for task in tasks
+                if not task.children and task.worktree_path is None
+            },
             "error": error,
             "notice": notice,
         },
@@ -329,7 +337,10 @@ def set_task_status(
 
 @app.post("/tasks/{task_id}/runs")
 def start_task_run(
-    db: DbSession, task_id: int, phase: Annotated[str, Form()] = "plan"
+    db: DbSession,
+    task_id: int,
+    phase: Annotated[str, Form()] = "plan",
+    origin: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
     """Hand a task to an agent.
 
@@ -350,6 +361,15 @@ def start_task_run(
         # A task with children describes work rather than being work, so an
         # agent pointed at one has no single thing to do.
         return _redirect(target, error="Break this into a sub-task and run that instead.")
+
+    if task.worktree_path is None:
+        # Nothing to choose once a worktree already exists — its branch is
+        # fixed, and every run after the first only ever resumes it.
+        resolved = resolve_origin(task, origin or None)
+        if isinstance(resolved, InvalidOrigin):
+            return _redirect(target, error=resolved.message)
+        task.origin_ref = origin or None
+        db.commit()
 
     result = start_run(db, task, chosen)
     if isinstance(result, Run):
