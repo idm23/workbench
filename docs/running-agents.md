@@ -241,6 +241,14 @@ polkit.addRule(function (action, subject) {
 });
 ```
 
+That `"workbench"` is now literally what gets rendered. It was written here before the
+account existed, against a machine whose service ran as whoever installed it — so the
+document described the intended grant and the code granted it to a person. The installer
+creates the account, and `tests/test_units.py` asserts that the rule's `subject.user` and
+the unit's `User=` name the same one: they are read by two programs that never see each
+other, and a disagreement is not a broken path but every run failing at start with an
+error naming neither file.
+
 One action, one user, and a unit pattern anchored at both ends with a digits-only
 instance. Everything else falls through to polkit's normal rules, which is a
 refusal. The rule file is named per instance for the same reason the units are —

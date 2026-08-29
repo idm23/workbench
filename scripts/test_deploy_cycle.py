@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTANCE = "citest"
 SERVICE = f"workbench-{INSTANCE}"
 DEPLOYER = f"{SERVICE}-deploy"
+RUN_PREFIX = f"{SERVICE}-run"
 PORT = 8799
 
 # Under home, deliberately not /tmp. The service unit sets PrivateTmp=yes,
@@ -129,12 +130,26 @@ def systemctl(*args: str, check: bool = True) -> str:
 
 
 def deploy_env() -> dict[str, str]:
-    """The environment that makes install.sh build the test instance."""
+    """The environment that makes install.sh build the test instance.
+
+    WORKBENCH_DEPLOYMENT_ROOT pins the deployment to this scratch checkout, so
+    the install does not relocate to /srv and does not create an account. That
+    is scope, not avoidance: relocation and the service account are covered end
+    to end by `test_fresh_install.py`, in a container that can be thrown away.
+    What only this test can exercise is the deploy cycle against real systemd,
+    and pointing it at a scratch checkout keeps it exercising exactly that.
+
+    The consequence worth knowing: with the checkout owned by whoever runs
+    this, `service_user()` resolves to them — so the units and the polkit rule
+    below name the runner rather than `workbench-citest`. The mechanism is
+    identical either way, which is what makes the polkit assertion meaningful.
+    """
     return {
         **os.environ,
         "WORKBENCH_INSTANCE": INSTANCE,
         "WORKBENCH_PORT": str(PORT),
         "WORKBENCH_DEPLOY_BRANCH": "main",
+        "WORKBENCH_DEPLOYMENT_ROOT": str(CHECKOUT),
     }
 
 
@@ -294,6 +309,43 @@ def test_acceptance_does_not_run_where_data_matters() -> None:
     expect(seeded_data_present(), "seeded data is still untouched")
 
 
+def test_the_polkit_rule_lets_the_service_account_start_a_run() -> None:
+    """The grant, against a real system manager rather than a stub.
+
+    Every other test of this asserts on the *text* of a rendered rule. Whether
+    polkit then honours it is a different question, decided by a daemon, a rule
+    directory, a JavaScript evaluation, and a D-Bus call — and until now it was
+    only ever going to be answered by the first agent run on the real server.
+
+    An unprivileged process cannot ask systemd to start a unit without this,
+    and the two refusals it gets instead are distinctive: "Access denied" when
+    no rule matches, "Interactive authentication required" when polkit falls
+    through to asking a human that a service has no way to answer.
+
+    Started as the account the units name — not with sudo, which would prove
+    nothing at all. The run id is one no row will ever have; the unit is
+    expected to fail immediately, because there is nothing to run. That it was
+    *authorised* to fail is the whole assertion.
+    """
+    step("Starting a run unit as the service account")
+    unit = f"{RUN_PREFIX}@999999.service"
+    result = subprocess.run(
+        ["systemctl", "start", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    refusal = f"{result.stdout}{result.stderr}"
+
+    expect("Access denied" not in refusal, "polkit did not deny the request")
+    expect(
+        "Interactive authentication required" not in refusal,
+        "polkit did not fall through to asking a human",
+    )
+    systemctl("stop", unit, check=False)
+    systemctl("reset-failed", unit, check=False)
+
+
 def test_unit_changes_reach_systemd() -> None:
     step("A changed unit template reaches /etc/systemd/system")
     template = (CHECKOUT / "deploy" / "workbench.service.template").read_text()
@@ -376,8 +428,17 @@ def teardown() -> None:
     systemctl("disable", "--now", f"{DEPLOYER}.timer", check=False)
     systemctl("disable", "--now", SERVICE, check=False)
     systemctl("stop", DEPLOYER, check=False)
-    for unit in (f"{SERVICE}.service", f"{DEPLOYER}.service", f"{DEPLOYER}.timer"):
+    # The run template unit and the polkit rule are installed too, and used to
+    # be left behind — a stale authorisation rule outliving the instance it
+    # grants is the sort of leftover that is invisible until it matters.
+    for unit in (
+        f"{SERVICE}.service",
+        f"{DEPLOYER}.service",
+        f"{DEPLOYER}.timer",
+        f"{RUN_PREFIX}@.service",
+    ):
         run(["sudo", "rm", "-f", f"/etc/systemd/system/{unit}"], check=False)
+    run(["sudo", "rm", "-f", f"/etc/polkit-1/rules.d/50-{RUN_PREFIX}.rules"], check=False)
     systemctl("daemon-reload", check=False)
     shutil.rmtree(WORKSPACE, ignore_errors=True)
 
@@ -411,6 +472,7 @@ def main() -> int:
         install()
         test_deploys_a_new_commit()
         test_acceptance_does_not_run_where_data_matters()
+        test_the_polkit_rule_lets_the_service_account_start_a_run()
         test_unit_changes_reach_systemd()
         test_refuses_a_dirty_checkout()
         test_crash_on_boot_is_caught_before_the_restart()

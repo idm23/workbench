@@ -71,6 +71,13 @@ Ask whether the service needs to see or change things outside its own data:
   scoping what it may touch. systemd 259 supports `ProtectSystem=strict` alongside an explicit
   `ReadWritePaths=` allowlist, which is a better middle ground than disabling hardening wholesale.
 
+Workbench is the worked example, and one detail generalises: **the deployment lives under
+`/srv`, not in a person's home.** Ubuntu creates home directories mode 0750, so a service
+account cannot traverse into a checkout under `/home/someone` — not to read a virtualenv, not
+to reach a working directory. Anything running as its own user needs its files somewhere that
+user can actually get to, and putting the checkout there *owned by that account* is what keeps
+"who owns this" and "who runs this" the same answer.
+
 Docker is not installed yet. It gets installed when the first service that needs it arrives, not
 before.
 

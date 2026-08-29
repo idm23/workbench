@@ -25,6 +25,7 @@ from workbench.api import router as api_router
 from workbench.config import instance
 from workbench.database.db import get_db
 from workbench.database.models import Project, Run, RunPhase, Task, TaskStatus, User
+from workbench.doctor import page_warnings
 from workbench.git.github import (
     InvalidReference,
     RepoMetadata,
@@ -66,17 +67,23 @@ MAX_RENDERED_EVENTS = 500
 DbSession = Annotated[Session, Depends(get_db)]
 
 
-def _shared(db: Session, *, limits: bool = True) -> dict:
+def _shared(db: Session) -> dict:
     """Context every page gets.
 
     The rate-limit panel is on every page rather than on a run's own because
     the window it describes belongs to the account, not to a run — it is spent
     by whatever else uses the same subscription, and the moment it is worth
     reading is before starting something, which is any page at all.
+
+    Setup warnings are here for a stronger version of the same reason. The
+    install says them once, into a terminal nobody re-reads, and the state they
+    describe changes long afterwards. A tree offering to start an agent that
+    cannot authenticate is misleading on every page it appears on.
+
+    There is deliberately no way for a page to switch either of them off. A
+    warning some page could suppress is one you cannot trust the absence of.
     """
-    if not limits:
-        return {"show_limits": False}
-    return {"show_limits": True, "rate_limits": latest_readings(db)}
+    return {"rate_limits": latest_readings(db), "warnings": page_warnings()}
 
 
 def _redirect(path: str, **messages: str | None) -> RedirectResponse:

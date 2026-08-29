@@ -114,6 +114,63 @@ type AgentOutcome = AgentFinished | AgentFailed | AgentUnavailable
 type AgentStream = AsyncIterator[AgentEvent | AgentOutcome]
 
 
+#: The vocabulary for `CredentialStatus.method`. Workbench's own words, not a
+#: passthrough of whatever a vendor calls its login: a second backend spelling
+#: the same two states differently is what makes a shared reader impossible.
+#:
+#: `unknown` is distinct from `none` deliberately. "Nobody has logged in" is a
+#: problem to report loudly; "the probe could not run" is not, because a
+#: warning that fires when the checker itself breaks is one people learn to
+#: ignore, and then miss the real one.
+CREDENTIAL_SUBSCRIPTION = "subscription"
+CREDENTIAL_API_KEY = "api_key"
+CREDENTIAL_NONE = "none"
+CREDENTIAL_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class CredentialStatus:
+    """What credential this backend would use, and whose account pays.
+
+    Deliberately not an outcome type. An outcome describes an attempt that was
+    made; the entire point of this is to answer the question without making
+    one — before a run exists, from an installer, and from a health check that
+    must cost nothing.
+
+    `method` is the load-bearing field, and `logged_in` on its own is not an
+    assertion worth making. A stray `ANTHROPIC_API_KEY` anywhere in the
+    environment makes a backend report itself perfectly authenticated while
+    moving every run onto metered billing — the exact silent failure
+    `config.billing_mode` exists to prevent. So a backend that finds one while
+    Workbench is billing a subscription reports `logged_in=False` and says so
+    in `detail`.
+    """
+
+    backend: str
+
+    #: Whether a run started right now would authenticate the way Workbench
+    #: intends. Not "is there a credential" — see the note above.
+    logged_in: bool
+
+    #: One of the `CREDENTIAL_*` constants above.
+    method: str
+
+    #: Whatever names the payer: an email, an organisation, an account id.
+    #: None when nothing is authenticated, or when the probe could not say.
+    account: str | None = None
+
+    #: One line for a person. Read by the doctor and by the web banner, so it
+    #: must be legible on its own, without the surrounding check's title.
+    detail: str = ""
+
+    #: The exact argv that would authenticate this backend, or empty if there
+    #: is nothing a person could run. Carried here rather than composed by the
+    #: caller because it is the one piece of the fix that is vendor-shaped: a
+    #: doctor that spelled out `claude auth login` would be a second place
+    #: that knows which vendor answered.
+    login_command: tuple[str, ...] = ()
+
+
 @runtime_checkable
 class Backend(Protocol):
     """An agent Workbench can drive.
@@ -136,5 +193,30 @@ class Backend(Protocol):
         credential, a crashed subprocess — and must not touch the database.
         Persistence belongs to the runner, so that a backend can be exercised
         in a test with neither a schema nor a model behind it.
+        """
+        ...
+
+    def credential_status(self) -> CredentialStatus:
+        """Whether this backend could run right now, and on whose account.
+
+        Must not raise, for the same reason `run` must not: an absent or
+        unusable credential is an ordinary condition to report, not an error
+        to handle. A probe that cannot be made at all answers
+        `CREDENTIAL_UNKNOWN` rather than guessing.
+
+        Evaluated against `config.agent_environment()` rather than the raw
+        environment, so it sees what the runner will see. Reading `os.environ`
+        directly would report a credential the runner strips, which is worse
+        than not checking: it would say "authenticated" about a variable that
+        is removed before the agent ever starts.
+
+        Asked about *the account running this process* — there is no argument
+        for whose credential to check, because the answer lives in a home
+        directory and the only honest way to ask about another account is to
+        run as it. That is what the installer does.
+
+        Reached from `python -m workbench.doctor`. The web process learns the
+        answer over a process boundary and never by constructing a backend;
+        `tests/test_seam.py` asserts that in both directions.
         """
         ...

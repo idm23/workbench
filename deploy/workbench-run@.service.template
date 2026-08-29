@@ -52,3 +52,14 @@ ReadWritePaths=__REPO__/data
 # The backend's credential and session transcripts. Writable, not merely
 # readable — the subscription's OAuth token is refreshed periodically.
 ReadWritePaths=-__HOME__/.claude
+
+# A separate file beside that directory, not inside it. An allowlist naming
+# only .claude leaves this read-only, and ProtectSystem=strict makes that
+# stick — so the CLI cannot persist a refreshed token and runs work until the
+# old one expires.
+ReadWritePaths=-__HOME__/.claude.json
+
+# ssh writes known_hosts on first connection, and an agent that commits is an
+# agent that eventually pushes. Without this the first push fails on a
+# read-only home rather than on anything to do with the key.
+ReadWritePaths=-__HOME__/.ssh

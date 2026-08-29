@@ -10,11 +10,13 @@ claim the seam is making.
 from collections.abc import Sequence
 
 from workbench.agents.protocol import (
+    CREDENTIAL_SUBSCRIPTION,
     AgentEvent,
     AgentFinished,
     AgentOutcome,
     AgentRequest,
     AgentStream,
+    CredentialStatus,
 )
 
 
@@ -31,15 +33,29 @@ class FakeBackend:
         events: Sequence[AgentEvent] = (),
         outcome: AgentOutcome | None = None,
         name: str = "fake",
+        credential: CredentialStatus | None = None,
     ) -> None:
         self._events = list(events)
         self._outcome = outcome or AgentFinished(text="done", resume_token="fake-session")
         self._name = name
+        #: Settable, because the interesting cases for anything reading this
+        #: are the unhappy ones, and a fake that could only be authenticated
+        #: would be useless to exactly the tests that need it.
+        self.credential = credential or CredentialStatus(
+            backend=name,
+            logged_in=True,
+            method=CREDENTIAL_SUBSCRIPTION,
+            account="fake@example.com",
+            detail="Signed in as fake@example.com, billing a Claude subscription.",
+        )
         self.requests: list[AgentRequest] = []
 
     @property
     def name(self) -> str:
         return self._name
+
+    def credential_status(self) -> CredentialStatus:
+        return self.credential
 
     async def run(self, request: AgentRequest) -> AgentStream:
         self.requests.append(request)

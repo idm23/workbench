@@ -7,6 +7,7 @@ that installing on a new machine needs no configuration step.
 import logging
 import os
 import shutil
+import socket
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -193,6 +194,25 @@ def agent_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def agent_git_identity() -> tuple[str, str]:
+    """The name and email commits by this instance are authored with.
+
+    The service account is not a person and has no identity of its own, but git
+    refuses to commit without one — and the failure is not a prompt, because
+    nothing here is interactive. It is an agent run dying several minutes in,
+    having done the work.
+
+    The default email is deliberately non-routable rather than a real address:
+    it identifies the machine that made the commit, which is the useful thing,
+    without inventing a mailbox. Override either half when commits should be
+    attributed to a GitHub account instead.
+    """
+    name = os.environ.get("WORKBENCH_GIT_NAME", "").strip() or "Workbench"
+    default_email = f"workbench@{socket.gethostname()}"
+    email = os.environ.get("WORKBENCH_GIT_EMAIL", "").strip() or default_email
+    return name, email
+
+
 def deploy_branch() -> str:
     """The branch the automatic deployer follows.
 
@@ -218,6 +238,51 @@ def service_name() -> str:
     """The systemd unit name for this instance, without the `.service`."""
     suffix = instance()
     return f"workbench-{suffix}" if suffix else "workbench"
+
+
+def service_account() -> str:
+    """The dedicated unprivileged account this instance's units run as.
+
+    Deliberately the same string as `service_name()`, rather than a name of
+    its own. The unit name, the directory under `/srv`, and the account are
+    one rule with one spelling, so the polkit rule's `subject.user` and the
+    unit's `User=` cannot drift apart — and that pair drifting is not a
+    visible bug, it is every run failing to start with an authorisation error
+    that names neither of them.
+    """
+    return service_name()
+
+
+def deployment_root() -> Path:
+    """Where this instance's checkout lives once it is a deployment.
+
+    Not a human's home, and that is forced rather than chosen. The service
+    account is a different account to whoever installed it, and Ubuntu creates
+    home directories mode 0750 — so a checkout under `/home/someone` is one
+    the service cannot traverse at all, never mind execute a virtualenv out
+    of. `/srv` is the conventional place for data a service serves, it is
+    outside every user's home, and it is on the same volume as everything
+    else here.
+
+    Overridable because a laptop and the test harnesses are not deployments:
+    they run the code from wherever it happens to be checked out.
+    """
+    override = os.environ.get("WORKBENCH_DEPLOYMENT_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path("/srv") / service_name()
+
+
+def agent_home() -> Path:
+    """The service account's home directory, used when creating the account.
+
+    Kept separate from the checkout on purpose. The checkout is deployment
+    state that a deploy rewrites and a relocation re-copies; this holds the
+    backend's credential and its session transcripts, which are the two things
+    on this machine that are on neither GitHub nor the database, and have to
+    survive both.
+    """
+    return Path("/home") / service_account()
 
 
 def deploy_unit_name() -> str:

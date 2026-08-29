@@ -10,13 +10,21 @@ These run wherever pytest does; the `systemd-analyze` check skips itself when
 that tool is absent.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from workbench.config import deploy_unit_name, service_name
+from workbench.config import (
+    agent_git_identity,
+    agent_home,
+    deploy_unit_name,
+    deployment_root,
+    service_account,
+    service_name,
+)
 from workbench.install import InstallError, check_not_under_private_tmp, render_unit, units
 
 UNIT_NAMES = [
@@ -62,6 +70,49 @@ def test_no_placeholder_survives(rendered, unit):
     leftover = [line for line in rendered[unit].splitlines() if "__" in line]
 
     assert leftover == []
+
+
+def test_no_placeholder_survives_in_the_polkit_rule():
+    """The rule is rendered by the same function but is not one of `units()`,
+    so it sat outside the check above — which is a bad place for it. An
+    unsubstituted `__USER__` there is not a broken path, it is a rule granting
+    nothing to nobody, and every run failing at start with an authorisation
+    error that names neither the unit nor the account."""
+    leftover = [
+        line for line in render_unit("workbench-run.rules.template").splitlines() if "__" in line
+    ]
+
+    assert leftover == []
+
+
+@pytest.mark.parametrize("as_instance", ["", "staging"])
+def test_the_polkit_rule_grants_the_account_the_unit_runs_as(monkeypatch, as_instance):
+    """The agreement three files have to reach without ever seeing each other.
+
+    systemd reads `User=` from the unit; polkit matches `subject.user` against
+    the uid that asks. If those two names diverge the service starts perfectly
+    and every run dies at the moment it is started, with an error that mentions
+    neither file. Nothing else in the suite would catch it.
+    """
+    monkeypatch.setenv("WORKBENCH_INSTANCE", as_instance)
+
+    rule = render_unit("workbench-run.rules.template")
+    service = render_unit("workbench-run@.service.template")
+
+    granted = re.search(r'subject\.user !== "([^"]+)"', rule)
+    runs_as = re.search(r"^User=(.+)$", service, re.MULTILINE)
+
+    assert granted is not None and runs_as is not None
+    assert granted.group(1) == runs_as.group(1)
+
+
+def test_the_polkit_rule_grants_only_this_instances_units(staging):
+    """Production and staging grant different unit patterns. A rule that
+    matched the other instance's would let staging start production's runs."""
+    monkeypatch_free_rule = render_unit("workbench-run.rules.template")
+
+    assert "workbench-staging-run" in monkeypatch_free_rule
+    assert "workbench-run@" not in monkeypatch_free_rule
 
 
 def test_the_app_runs_unprivileged(rendered):
@@ -215,6 +266,87 @@ def test_instance_names_are_derived_consistently(monkeypatch):
 
     assert service_name() == "workbench-staging"
     assert deploy_unit_name() == "workbench-staging-deploy"
+
+
+# --- Where a deployment lives, and who owns it --------------------------------
+#
+# The unit name, the directory under /srv, and the account are deliberately one
+# rule with one spelling. They are read by three things that never see each
+# other — the unit's `User=`, the polkit rule's `subject.user`, and the
+# filesystem — and a disagreement between any two of them is not a visible bug.
+# It is every run failing to start with an authorisation error naming neither.
+
+
+def test_the_deployment_lives_outside_anybodys_home():
+    """A checkout under /home cannot be reached by the account that serves it.
+
+    Ubuntu creates home directories mode 0750, so this is not a preference:
+    the service could not traverse into a checkout under one.
+    """
+    assert deployment_root() == Path("/srv/workbench")
+    assert not deployment_root().is_relative_to(Path("/home"))
+
+
+def test_the_account_is_the_service_name():
+    """The invariant the whole scheme rests on. If this can drift, so can the
+    unit and the polkit rule that are rendered from it."""
+    assert service_account() == service_name() == "workbench"
+
+
+def test_staging_gets_its_own_account_and_directory(staging):
+    """Staging restores production's database every deploy and runs the same
+    agent code. Sharing an account would leave a staging agent holding write
+    access to production's checkout, worktrees, and database."""
+    assert service_account() == "workbench-staging"
+    assert deployment_root() == Path("/srv/workbench-staging")
+    assert agent_home() == Path("/home/workbench-staging")
+
+
+def test_the_instances_share_nothing(staging):
+    production = Path("/srv/workbench")
+    assert deployment_root() != production
+    assert not deployment_root().is_relative_to(production)
+    assert service_account() != SERVICE_NAME
+
+
+def test_an_account_name_fits_in_a_username(staging):
+    """32 characters is the Linux limit, and `useradd` fails past it."""
+    assert len(service_account()) <= 32
+
+
+def test_a_developers_checkout_can_say_it_is_not_a_deployment(monkeypatch, tmp_path):
+    """A laptop and both test harnesses run the code from wherever it was
+    cloned. Without this they would all be told to relocate to /srv."""
+    monkeypatch.setenv("WORKBENCH_DEPLOYMENT_ROOT", str(tmp_path))
+
+    assert deployment_root() == tmp_path.resolve()
+
+
+def test_the_agent_home_is_not_inside_the_checkout():
+    """The credential and the session transcripts are the two things here that
+    are on neither GitHub nor the database. A relocation re-copies the
+    checkout; these have to survive that."""
+    assert agent_home() == Path("/home/workbench")
+    assert not agent_home().is_relative_to(deployment_root())
+
+
+def test_the_account_commits_under_a_name_that_identifies_the_machine():
+    """git refuses to commit without an identity, and nothing here can answer a
+    prompt — so the failure is an agent run dying several minutes in, having
+    already done the work. The default email is non-routable on purpose: it
+    says which machine made the commit without inventing a mailbox."""
+    name, email = agent_git_identity()
+
+    assert name == "Workbench"
+    assert email.startswith("workbench@")
+
+
+def test_the_identity_can_be_pointed_at_a_real_account(monkeypatch):
+    """For when commits should be attributed to a GitHub user instead."""
+    monkeypatch.setenv("WORKBENCH_GIT_NAME", "Ian's Robot")
+    monkeypatch.setenv("WORKBENCH_GIT_EMAIL", "robot@example.com")
+
+    assert agent_git_identity() == ("Ian's Robot", "robot@example.com")
 
 
 # --- PrivateTmp ---------------------------------------------------------------
