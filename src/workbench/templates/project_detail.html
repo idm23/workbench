@@ -18,6 +18,19 @@
   <form method="post" action="/projects/{{ project.id }}/clone" style="border: none; padding: 0; margin-bottom: 1.75rem;">
     <button type="submit">Clone repository</button>
   </form>
+{% else %}
+  {% if conversation %}
+    {# The project's own standing conversation — not scoped to any task —
+       reuses the same live/pip styling a task's own activity marker uses. #}
+    <a class="status live" href="/runs/{{ conversation.id }}"
+       style="text-decoration: none; display: inline-block; margin-bottom: 1.75rem;"
+       title="Run {{ conversation.id }} is {{ conversation.status.value }}"
+    ><span class="pip"></span>Continue conversation</a>
+  {% else %}
+    <form method="post" action="/projects/{{ project.id }}/conversation" style="border: none; padding: 0; margin-bottom: 1.75rem;">
+      <button type="submit">Talk to this project</button>
+    </form>
+  {% endif %}
 {% endif %}
 
 {% if nodes %}

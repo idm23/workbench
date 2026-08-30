@@ -66,12 +66,19 @@ BACKEND_NAME = "claude"
 #: bound matters more than usual because nobody is watching it spend money.
 MAX_TURNS_PLAN = 60
 MAX_TURNS_EXECUTE = 200
+#: A conversation is meant to run for a while, on and off, as someone keeps
+#: typing into it — the idle timeout in `runs/runner.py` is what actually
+#: ends it in the ordinary case, so this only needs to guard against one
+#: that is somehow still being fed input turn after turn with nothing to
+#: show for it.
+MAX_TURNS_CONVERSATION = 500
 
-#: Where the agent-facing skill lives, and the only skill this backend
-#: enables. Ships inside the repo rather than being installed anywhere —
-#: `plugins` takes a plain path, so there is nothing for `install.py` to do.
+#: Where the agent-facing skills live. Ships inside the repo rather than
+#: being installed anywhere — `plugins` takes a plain path, so there is
+#: nothing for `install.py` to do.
 _PLUGIN_DIR = Path(__file__).parent / "plugin"
 _OUTCOME_SKILL = "workbench-outcome"
+_TASKS_SKILL = "workbench-tasks"
 
 #: What a plan run's structured response must contain. Enforced by the SDK,
 #: not parsed out of prose — `output_format` works under real plan mode
@@ -137,7 +144,11 @@ def _permission_mode(phase: RunPhase) -> PermissionMode:
 
 
 def _max_turns(phase: RunPhase) -> int:
-    return MAX_TURNS_PLAN if phase is RunPhase.PLAN else MAX_TURNS_EXECUTE
+    if phase is RunPhase.PLAN:
+        return MAX_TURNS_PLAN
+    if phase is RunPhase.CONVERSATION:
+        return MAX_TURNS_CONVERSATION
+    return MAX_TURNS_EXECUTE
 
 
 def _clip(text: str) -> str:
@@ -306,12 +317,14 @@ def translate(message: Any) -> list[AgentEvent]:
 def _env_for(request: AgentRequest) -> dict[str, str]:
     """How a run finds its way back to Workbench's own API.
 
-    Meaningful only for execute — the plan phase is held read-only and
-    cannot call anything — but harmless to hand over either way.
+    Meaningful only for execute and conversation — the plan phase is held
+    read-only and cannot call anything — but harmless to hand over either
+    way.
     """
     return {
         "WORKBENCH_RUN_ID": str(request.run_id),
         "WORKBENCH_TASK_ID": str(request.task_id),
+        "WORKBENCH_PROJECT_ID": str(request.project_id),
         "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
     }
 
@@ -333,6 +346,11 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
         # Structured output, not a tool call — the one decomposition
         # mechanism that works under real plan mode. See _PLAN_OUTPUT_FORMAT.
         options["output_format"] = _PLAN_OUTPUT_FORMAT
+    elif request.phase is RunPhase.CONVERSATION:
+        # Task management, not outcome reporting — a conversation has no
+        # single task to call finished or failed.
+        options["plugins"] = [{"type": "local", "path": str(_PLUGIN_DIR)}]
+        options["skills"] = [_TASKS_SKILL]
     else:
         # The outcome-reporting skill only makes sense once tools can
         # actually run, which plan mode does not allow.

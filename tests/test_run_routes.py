@@ -821,3 +821,100 @@ def test_the_after_parameter_resumes_too(client, session):
     body = client.get(f"/runs/{run.id}/events?after=2").text
 
     assert "Looking at the code." not in body
+
+
+# --- Talking directly to a project ------------------------------------------
+
+
+def a_project(session) -> Project:
+    return session.query(Project).one()
+
+
+def test_talking_to_a_project_starts_a_conversation(client, session, executor):
+    project = a_project(session)
+
+    response = client.post(f"/projects/{project.id}/conversation")
+
+    assert response.status_code == 303
+    run = session.query(Run).one()
+    assert response.headers["location"] == f"/runs/{run.id}"
+    assert run.project_id == project.id
+    assert run.task_id is None
+    assert run.phase is RunPhase.CONVERSATION
+    assert executor.started == [run.id]
+
+
+def test_a_second_click_resumes_the_first_conversation_rather_than_duplicating(
+    client, session, executor
+):
+    project = a_project(session)
+    client.post(f"/projects/{project.id}/conversation")
+
+    response = client.post(f"/projects/{project.id}/conversation")
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/runs/1"
+    assert session.query(Run).count() == 1
+
+
+def test_a_conversation_and_a_task_run_share_the_concurrency_cap(
+    client, session, executor, monkeypatch
+):
+    monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "1")
+    project = a_project(session)
+    client.post(f"/tasks/{a_task(session).id}/runs", data={"phase": "plan"})
+
+    response = client.post(f"/projects/{project.id}/conversation")
+
+    assert "error=" in response.headers["location"]
+    assert "limit+is+1" in response.headers["location"]
+
+
+def test_talking_to_a_missing_project_is_a_404(client, session):
+    assert client.post("/projects/9999/conversation").status_code == 404
+
+
+def test_nothing_offers_to_talk_before_the_project_is_cloned(client, session):
+    """There is nowhere for the conversation to run yet."""
+    project = a_project(session)
+
+    page = client.get(f"/projects/{project.id}").text
+
+    assert "Talk to this project" not in page
+
+
+def test_a_cloned_project_offers_to_talk(client, session, cloned):
+    project = a_project(session)
+
+    page = client.get(f"/projects/{project.id}").text
+
+    assert f'action="/projects/{project.id}/conversation"' in page
+    assert "Talk to this project" in page
+
+
+def test_a_project_page_offers_to_continue_an_active_conversation(
+    client, session, cloned, executor
+):
+    project = a_project(session)
+    client.post(f"/projects/{project.id}/conversation")
+
+    page = client.get(f"/projects/{project.id}").text
+
+    assert "Continue conversation" in page
+    assert "/runs/1" in page
+    assert "Talk to this project" not in page
+
+
+def test_a_project_scoped_run_page_renders_without_a_task(client, session, executor):
+    from workbench.runs.store import mark_running
+
+    project = a_project(session)
+    client.post(f"/projects/{project.id}/conversation")
+    run = session.query(Run).one()
+    mark_running(session, run)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert f"{project.owner}/{project.repo}" in page
+    assert f"/projects/{project.id}" in page
+    assert ">Send<" in page

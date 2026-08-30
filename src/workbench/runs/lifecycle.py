@@ -18,9 +18,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from workbench.config import default_agent_backend, max_concurrent_runs
-from workbench.database.models import Run, RunEventKind, RunPhase, RunStatus, Task
+from workbench.database.models import Project, Run, RunEventKind, RunPhase, RunStatus, Task
 from workbench.runs.executors import Started, UnknownExecutor, get_executor
-from workbench.runs.store import append_event, create_run, finish_run, record_launch
+from workbench.runs.store import (
+    append_event,
+    create_conversation,
+    create_run,
+    finish_run,
+    record_launch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +105,54 @@ def active_run_for_task(db: Session, task_id: int) -> Run | None:
     ).first()
 
 
+def active_run_for_project(db: Session, project_id: int) -> Run | None:
+    """The project's own in-flight conversation, if it has one.
+
+    Mirrors `active_run_for_task` exactly — a project's conversation is a
+    run like any other, just scoped to `project_id` instead of `task_id`.
+    """
+    return db.scalars(
+        select(Run)
+        .where(Run.project_id == project_id, Run.status.in_([RunStatus.QUEUED, RunStatus.RUNNING]))
+        .order_by(Run.id.desc())
+        .limit(1)
+    ).first()
+
+
+def _launch(db: Session, run: Run, executor: str | None) -> StartResult:
+    """Hand an already-created run to an executor, or explain why not.
+
+    The part of starting a run that is identical whichever kind it is —
+    task-scoped or a project's own conversation — once the row itself
+    exists and has passed the concurrency check.
+    """
+    implementation = get_executor(executor)
+    if isinstance(implementation, UnknownExecutor):
+        finish_run(db, run, RunStatus.FAILED, error=implementation.message)
+        return NotStarted(run.id, implementation.message)
+
+    # Recorded before the job exists, so there is never a moment where
+    # something is running and nothing knows how to stop it.
+    record_launch(db, run, implementation.name, _handle_for(implementation, run.id))
+    append_event(
+        db,
+        run.id,
+        RunEventKind.STATUS,
+        {"status": RunStatus.QUEUED.value, "executor": implementation.name},
+    )
+
+    outcome = implementation.start(run.id)
+    if not isinstance(outcome, Started):
+        finish_run(db, run, RunStatus.FAILED, error=outcome.message)
+        return NotStarted(run.id, outcome.message)
+
+    # The executor is the authority on its own handle; the pre-recorded one is
+    # a prediction so that a crash between here and there is still reachable.
+    if outcome.handle != run.handle:
+        record_launch(db, run, implementation.name, outcome.handle)
+    return run
+
+
 def start_run(
     db: Session,
     task: Task,
@@ -126,32 +180,37 @@ def start_run(
 
     chosen = backend or task.project.agent_backend or default_agent_backend()
     run = create_run(db, task, phase, backend=chosen)
+    return _launch(db, run, executor)
 
-    implementation = get_executor(executor)
-    if isinstance(implementation, UnknownExecutor):
-        finish_run(db, run, RunStatus.FAILED, error=implementation.message)
-        return NotStarted(run.id, implementation.message)
 
-    # Recorded before the job exists, so there is never a moment where
-    # something is running and nothing knows how to stop it.
-    record_launch(db, run, implementation.name, _handle_for(implementation, run.id))
-    append_event(
-        db,
-        run.id,
-        RunEventKind.STATUS,
-        {"status": RunStatus.QUEUED.value, "executor": implementation.name},
-    )
+def start_conversation(
+    db: Session,
+    project: Project,
+    *,
+    backend: str | None = None,
+    executor: str | None = None,
+) -> StartResult:
+    """Begin (or report) the project's own conversation.
 
-    outcome = implementation.start(run.id)
-    if not isinstance(outcome, Started):
-        finish_run(db, run, RunStatus.FAILED, error=outcome.message)
-        return NotStarted(run.id, outcome.message)
+    Shares `active_runs`/`max_concurrent_runs` with task runs rather than a
+    cap of its own — a conversation held open bills the same subscription
+    window a task run does, so it is not free to leave open, and does not
+    get an exemption from what protects that window.
+    """
+    reap(db)
 
-    # The executor is the authority on its own handle; the pre-recorded one is
-    # a prediction so that a crash between here and there is still reachable.
-    if outcome.handle != run.handle:
-        record_launch(db, run, implementation.name, outcome.handle)
-    return run
+    existing = active_run_for_project(db, project.id)
+    if existing is not None:
+        return AlreadyRunning(existing.id)
+
+    limit = max_concurrent_runs()
+    running = active_runs(db)
+    if limit > 0 and len(running) >= limit:
+        return TooManyRuns(len(running), limit)
+
+    chosen = backend or project.agent_backend or default_agent_backend()
+    run = create_conversation(db, project, backend=chosen)
+    return _launch(db, run, executor)
 
 
 def _handle_for(implementation, run_id: int) -> str:
