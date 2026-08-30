@@ -1,18 +1,21 @@
 """The Claude backend, exercised without a model.
 
-Two things are worth pinning here. The translation from SDK messages into
+Three things are worth pinning here. The translation from SDK messages into
 `RunEventKind`, because that mapping is what makes an event log outlive the SDK
 that wrote it — a regression would be invisible until someone read an old run.
-And the permission mode, because getting it wrong produces a run that edits
-files, cannot commit them, and burns its turn limit retrying.
+The permission mode, because getting it wrong produces a run that edits files,
+cannot commit them, and burns its turn limit retrying. And the multi-turn
+shape itself — `ClaudeSDKClient`, one connection carrying a `query()` /
+`receive_response()` pair per turn — because that is what replaced `query()`
+after a real conversation on the production server got exactly one reply and
+then ended, `succeeded`, with nobody able to type a second thing. See the
+docstring on `ClaudeBackend.run`.
 
-`query` is stubbed throughout: no subprocess, no credential, no cost.
+`ClaudeSDKClient` is stubbed throughout: no subprocess, no credential, no cost.
 """
 
-import asyncio
 import json
 import subprocess
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -73,17 +76,62 @@ def a_request(**overrides: Any) -> AgentRequest:
     return AgentRequest(**(fields | overrides))
 
 
-def stub_query(messages: list[Any], captured: dict[str, Any] | None = None):
-    """Replace the SDK's `query` with a fixed sequence of messages."""
+def stub_client(turns: list[list[Any]], captured: dict[str, Any] | None = None):
+    """Replace `ClaudeSDKClient` with a fake that stays connected across
+    turns, answering each `query()` with the next canned list of messages —
+    the shape the real backend now drives, one connection for the whole
+    run rather than one `query()` call per attempt."""
+    remaining = list(turns)
 
-    async def fake_query(*, prompt: str, options: Any = None, **_: Any) -> AsyncIterator[Any]:
-        if captured is not None:
-            captured["prompt"] = prompt
-            captured["options"] = options
-        for message in messages:
-            yield message
+    class FakeClient:
+        def __init__(self, options: Any = None) -> None:
+            if captured is not None:
+                captured["options"] = options
 
-    return fake_query
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            if captured is not None:
+                captured.setdefault("prompts", []).append(prompt)
+
+        async def receive_response(self):
+            messages = remaining.pop(0) if remaining else []
+            for message in messages:
+                yield message
+
+    return FakeClient
+
+
+def stub_client_raising(error: Exception, *, on: str):
+    """A fake that raises at a chosen point in the connection's lifecycle —
+    `"enter"` for a transport that never spawns (a missing CLI), `"receive"`
+    for one that dies mid-stream (a crashed subprocess)."""
+
+    class FakeClient:
+        def __init__(self, options: Any = None) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            if on == "enter":
+                raise error
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            pass
+
+        async def receive_response(self):
+            if on == "receive":
+                raise error
+                yield  # pragma: no cover - makes this an async generator
+
+    return FakeClient
 
 
 # --- Translation -----------------------------------------------------------
@@ -255,7 +303,7 @@ def test_the_execute_phase_can_actually_commit(monkeypatch):
     Found by burning 33 turns watching a run retry `git commit` and fail.
     """
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.EXECUTE)))
 
@@ -265,7 +313,7 @@ def test_the_execute_phase_can_actually_commit(monkeypatch):
 def test_the_plan_phase_is_held_read_only(monkeypatch):
     """Read-only is the product of a plan run, so enforcement and intent agree."""
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))
 
@@ -274,7 +322,7 @@ def test_the_plan_phase_is_held_read_only(monkeypatch):
 
 def test_the_agent_runs_in_the_tasks_worktree(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(worktree=Path("/srv/worktrees/task-7"))))
 
@@ -283,7 +331,7 @@ def test_the_agent_runs_in_the_tasks_worktree(monkeypatch):
 
 def test_a_resume_token_is_passed_through_unparsed(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(resume_token="session-abc")))
 
@@ -293,7 +341,7 @@ def test_a_resume_token_is_passed_through_unparsed(monkeypatch):
 def test_each_phase_gets_its_own_turn_limit(monkeypatch):
     """Nobody is watching a detached run spend money."""
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))
     plan_turns = captured["options"].max_turns
@@ -309,7 +357,7 @@ def test_the_run_and_task_ids_reach_the_environment(monkeypatch):
     from workbench.config import port
 
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(run_id=42, task_id=7)))
 
@@ -323,62 +371,137 @@ def test_the_run_and_task_ids_reach_the_environment(monkeypatch):
 
 def test_the_project_id_reaches_the_environment_too(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(project_id=9)))
 
     assert captured["options"].env["WORKBENCH_PROJECT_ID"] == "9"
 
 
-async def _drain_prompt(prompt) -> list[dict[str, Any]]:
-    return [item async for item in prompt]
-
-
-def test_no_input_channel_leaves_the_prompt_a_plain_string(monkeypatch):
-    """Unchanged from before typed input existed at all — nothing wired up
-    means byte-for-byte the same behaviour."""
+def test_no_input_channel_sends_only_the_initial_prompt(monkeypatch):
+    """Nothing wired up means one turn on the connection, exactly as before
+    typed input existed at all."""
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(prompt="Do the thing")))
 
-    assert captured["prompt"] == "Do the thing"
+    assert captured["prompts"] == ["Do the thing"]
 
 
-def test_typed_input_wraps_the_prompt_as_a_lazy_stream(monkeypatch):
+def test_typed_input_becomes_a_second_turn_on_the_same_connection(monkeypatch):
+    """The regression this whole rewrite exists for: a message typed in
+    after the first reply must reach the backend as a second `query()` on
+    the connection `query()` (the old implementation) could not keep open,
+    rather than being silently dropped once the first turn's result arrives."""
+
     async def one_more_message():
         yield "a follow-up"
 
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client([[a_result()], [a_result(session_id="session-2")]], captured),
+    )
 
     drain(ClaudeBackend().run(a_request(prompt="Do the thing", inputs=one_more_message())))
 
-    assert not isinstance(captured["prompt"], str)
-    sent = asyncio.run(_drain_prompt(captured["prompt"]))
-    assert sent == [
-        {"type": "user", "message": {"role": "user", "content": "Do the thing"}},
-        {"type": "user", "message": {"role": "user", "content": "a follow-up"}},
-    ]
+    assert captured["prompts"] == ["Do the thing", "a follow-up"]
 
 
-def test_an_input_channel_with_nothing_new_still_sends_the_initial_prompt(monkeypatch):
+def test_an_input_channel_with_nothing_new_still_sends_only_the_initial_prompt(monkeypatch):
     async def nothing_more():
         return
         yield  # pragma: no cover - makes this an async generator
 
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(prompt="Do the thing", inputs=nothing_more())))
 
-    sent = asyncio.run(_drain_prompt(captured["prompt"]))
-    assert sent == [{"type": "user", "message": {"role": "user", "content": "Do the thing"}}]
+    assert captured["prompts"] == ["Do the thing"]
+
+
+def test_a_second_turns_events_are_translated_too(monkeypatch):
+    async def one_more_message():
+        yield "and one more thing"
+
+    monkeypatch.setattr(
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client(
+            [
+                [AssistantMessage(content=[TextBlock(text="first reply")], model="m"), a_result()],
+                [
+                    AssistantMessage(content=[TextBlock(text="second reply")], model="m"),
+                    a_result(session_id="session-2"),
+                ],
+            ]
+        ),
+    )
+
+    yielded = drain(
+        ClaudeBackend().run(a_request(prompt="Do the thing", inputs=one_more_message()))
+    )
+
+    texts = [e.payload["text"] for e in yielded if isinstance(e, AgentEvent)]
+    assert texts == ["first reply", "second reply"]
+
+
+def test_the_outcome_reflects_the_last_turn_not_the_first(monkeypatch):
+    """A conversation's resume token has to be the *latest* one — resuming
+    from the first turn's session would silently drop everything said after
+    it."""
+
+    async def one_more_message():
+        yield "a follow-up"
+
+    monkeypatch.setattr(
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client(
+            [
+                [a_result(session_id="session-1", result="first answer")],
+                [a_result(session_id="session-2", result="second answer")],
+            ]
+        ),
+    )
+
+    outcome = drain(
+        ClaudeBackend().run(a_request(prompt="Do the thing", inputs=one_more_message()))
+    )[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.resume_token == "session-2"
+    assert outcome.text == "second answer"
+
+
+def test_a_failed_turn_is_not_followed_by_another(monkeypatch):
+    """Once a turn comes back an error, the conversation is over — nothing
+    above expects a second reply after a failure."""
+
+    async def one_more_message():
+        yield "are you still there"
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client([[a_result(is_error=True, result="ran out of turns")]], captured),
+    )
+
+    outcome = drain(
+        ClaudeBackend().run(a_request(prompt="Do the thing", inputs=one_more_message()))
+    )[-1]
+
+    assert isinstance(outcome, AgentFailed)
+    assert captured["prompts"] == ["Do the thing"]
 
 
 def test_execute_loads_the_outcome_skill(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.EXECUTE)))
 
@@ -391,7 +514,7 @@ def test_execute_loads_the_outcome_skill(monkeypatch):
 def test_plan_does_not_load_the_outcome_skill(monkeypatch):
     """It cannot call it anyway — plan mode runs no tools at all."""
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))
 
@@ -400,7 +523,7 @@ def test_plan_does_not_load_the_outcome_skill(monkeypatch):
 
 def test_plan_sets_the_structured_output_schema(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))
 
@@ -409,7 +532,7 @@ def test_plan_sets_the_structured_output_schema(monkeypatch):
 
 def test_execute_does_not_set_a_structured_output_schema(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.EXECUTE)))
 
@@ -430,7 +553,7 @@ def test_the_outcome_skill_files_exist():
 def test_a_conversation_loads_the_tasks_skill_not_the_outcome_one(monkeypatch):
     """It has no single task to call finished or failed."""
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
 
@@ -442,7 +565,7 @@ def test_a_conversation_loads_the_tasks_skill_not_the_outcome_one(monkeypatch):
 
 def test_a_conversation_does_not_set_a_structured_output_schema(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
 
@@ -451,7 +574,7 @@ def test_a_conversation_does_not_set_a_structured_output_schema(monkeypatch):
 
 def test_a_conversation_gets_its_own_generous_turn_limit(monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
 
@@ -462,7 +585,7 @@ def test_a_conversation_gets_its_own_generous_turn_limit(monkeypatch):
 def test_a_conversation_runs_with_permissions_bypassed(monkeypatch):
     """The same reasoning as execute: managing the task list needs Bash."""
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
 
@@ -482,9 +605,9 @@ def test_the_tasks_skill_files_exist():
 def test_a_completed_run_reports_its_text_token_and_usage(monkeypatch):
     monkeypatch.setattr(
         backend_module,
-        "query",
-        stub_query(
-            [AssistantMessage(content=[TextBlock(text="hi")], model="claude-x"), a_result()]
+        "ClaudeSDKClient",
+        stub_client(
+            [[AssistantMessage(content=[TextBlock(text="hi")], model="claude-x"), a_result()]]
         ),
     )
 
@@ -504,13 +627,15 @@ def test_a_plans_structured_plan_text_is_used_over_the_raw_result(monkeypatch):
     showing that to a person would be unreadable."""
     monkeypatch.setattr(
         backend_module,
-        "query",
-        stub_query(
+        "ClaudeSDKClient",
+        stub_client(
             [
-                a_result(
-                    result='{"plan": "do X", "subtasks": []}',
-                    structured_output={"plan": "do X", "subtasks": []},
-                )
+                [
+                    a_result(
+                        result='{"plan": "do X", "subtasks": []}',
+                        structured_output={"plan": "do X", "subtasks": []},
+                    )
+                ]
             ]
         ),
     )
@@ -524,18 +649,20 @@ def test_a_plans_structured_plan_text_is_used_over_the_raw_result(monkeypatch):
 def test_a_plans_proposed_subtasks_are_parsed(monkeypatch):
     monkeypatch.setattr(
         backend_module,
-        "query",
-        stub_query(
+        "ClaudeSDKClient",
+        stub_client(
             [
-                a_result(
-                    structured_output={
-                        "plan": "do X",
-                        "subtasks": [
-                            {"title": "a", "body": "b", "ready_to_execute": True},
-                            {"title": "c", "body": "", "ready_to_execute": False},
-                        ],
-                    }
-                )
+                [
+                    a_result(
+                        structured_output={
+                            "plan": "do X",
+                            "subtasks": [
+                                {"title": "a", "body": "b", "ready_to_execute": True},
+                                {"title": "c", "body": "", "ready_to_execute": False},
+                            ],
+                        }
+                    )
+                ]
             ]
         ),
     )
@@ -554,8 +681,8 @@ def test_an_execute_runs_structured_output_is_ignored(monkeypatch):
     leak into what gets shown or acted on."""
     monkeypatch.setattr(
         backend_module,
-        "query",
-        stub_query([a_result(result="the real summary", structured_output={"plan": "nope"})]),
+        "ClaudeSDKClient",
+        stub_client([[a_result(result="the real summary", structured_output={"plan": "nope"})]]),
     )
 
     outcome = drain(ClaudeBackend().run(a_request(phase=RunPhase.EXECUTE)))[-1]
@@ -566,7 +693,7 @@ def test_an_execute_runs_structured_output_is_ignored(monkeypatch):
 
 
 def test_a_result_with_no_structured_output_proposes_nothing(monkeypatch):
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()]))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]]))
 
     outcome = drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))[-1]
 
@@ -577,7 +704,9 @@ def test_a_result_with_no_structured_output_proposes_nothing(monkeypatch):
 
 def test_a_cut_short_result_is_marked_stopped_early(monkeypatch):
     monkeypatch.setattr(
-        backend_module, "query", stub_query([a_result(terminal_reason="aborted_tools")])
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client([[a_result(terminal_reason="aborted_tools")]]),
     )
 
     outcome = drain(ClaudeBackend().run(a_request()))[-1]
@@ -588,7 +717,7 @@ def test_a_cut_short_result_is_marked_stopped_early(monkeypatch):
 
 def test_a_cleanly_completed_result_is_not_stopped_early(monkeypatch):
     monkeypatch.setattr(
-        backend_module, "query", stub_query([a_result(terminal_reason="completed")])
+        backend_module, "ClaudeSDKClient", stub_client([[a_result(terminal_reason="completed")]])
     )
 
     outcome = drain(ClaudeBackend().run(a_request()))[-1]
@@ -600,7 +729,7 @@ def test_a_cleanly_completed_result_is_not_stopped_early(monkeypatch):
 def test_an_older_sdk_with_no_terminal_reason_is_not_stopped_early(monkeypatch):
     """The field might not exist on an older SDK version — absence must not
     read as a problem."""
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()]))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]]))
 
     outcome = drain(ClaudeBackend().run(a_request()))[-1]
 
@@ -612,9 +741,9 @@ def test_the_model_recorded_is_the_one_that_answered(monkeypatch):
     """`request.model` is a preference; the run records what actually ran."""
     monkeypatch.setattr(
         backend_module,
-        "query",
-        stub_query(
-            [AssistantMessage(content=[TextBlock(text="hi")], model="claude-actual"), a_result()]
+        "ClaudeSDKClient",
+        stub_client(
+            [[AssistantMessage(content=[TextBlock(text="hi")], model="claude-actual"), a_result()]]
         ),
     )
 
@@ -627,8 +756,8 @@ def test_the_model_recorded_is_the_one_that_answered(monkeypatch):
 def test_the_outcome_is_always_last(monkeypatch):
     monkeypatch.setattr(
         backend_module,
-        "query",
-        stub_query([AssistantMessage(content=[TextBlock(text="a")], model="m"), a_result()]),
+        "ClaudeSDKClient",
+        stub_client([[AssistantMessage(content=[TextBlock(text="a")], model="m"), a_result()]]),
     )
 
     yielded = drain(ClaudeBackend().run(a_request()))
@@ -640,7 +769,9 @@ def test_the_outcome_is_always_last(monkeypatch):
 def test_an_error_result_is_a_failure_that_keeps_its_usage(monkeypatch):
     """Work may already be committed, so the cost still has to be recorded."""
     monkeypatch.setattr(
-        backend_module, "query", stub_query([a_result(is_error=True, result="ran out of turns")])
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client([[a_result(is_error=True, result="ran out of turns")]]),
     )
 
     outcome = drain(ClaudeBackend().run(a_request()))[-1]
@@ -652,10 +783,11 @@ def test_an_error_result_is_a_failure_that_keeps_its_usage(monkeypatch):
 
 
 def test_a_missing_cli_means_nothing_was_attempted(monkeypatch):
-    def raising_query(**_: Any):
-        raise CLINotFoundError("no binary")
-
-    monkeypatch.setattr(backend_module, "query", raising_query)
+    monkeypatch.setattr(
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client_raising(CLINotFoundError("no binary"), on="enter"),
+    )
 
     outcome = drain(ClaudeBackend().run(a_request()))[-1]
 
@@ -664,12 +796,11 @@ def test_a_missing_cli_means_nothing_was_attempted(monkeypatch):
 
 def test_a_crashed_subprocess_is_a_failure_not_unavailability(monkeypatch):
     """It may have committed before dying, so the worktree is not untouched."""
-
-    async def raising_query(**_: Any):
-        raise ProcessError("died")
-        yield  # pragma: no cover - makes this an async generator
-
-    monkeypatch.setattr(backend_module, "query", raising_query)
+    monkeypatch.setattr(
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client_raising(ProcessError("died"), on="receive"),
+    )
 
     outcome = drain(ClaudeBackend().run(a_request()))[-1]
 
@@ -679,8 +810,8 @@ def test_a_crashed_subprocess_is_a_failure_not_unavailability(monkeypatch):
 def test_a_stream_that_ends_without_a_result_is_a_failure(monkeypatch):
     monkeypatch.setattr(
         backend_module,
-        "query",
-        stub_query([AssistantMessage(content=[TextBlock(text="hi")], model="m")]),
+        "ClaudeSDKClient",
+        stub_client([[AssistantMessage(content=[TextBlock(text="hi")], model="m")]]),
     )
 
     outcome = drain(ClaudeBackend().run(a_request()))[-1]
@@ -691,11 +822,11 @@ def test_a_stream_that_ends_without_a_result_is_a_failure(monkeypatch):
 
 def test_the_backend_never_raises_for_an_ordinary_failure(monkeypatch):
     """A traceback out of a detached runner helps nobody."""
-
-    def raising_query(**_: Any):
-        raise CLINotFoundError("no binary")
-
-    monkeypatch.setattr(backend_module, "query", raising_query)
+    monkeypatch.setattr(
+        backend_module,
+        "ClaudeSDKClient",
+        stub_client_raising(CLINotFoundError("no binary"), on="enter"),
+    )
 
     drain(ClaudeBackend().run(a_request()))
 
@@ -703,7 +834,7 @@ def test_the_backend_never_raises_for_an_ordinary_failure(monkeypatch):
 @pytest.mark.parametrize("phase", list(RunPhase))
 def test_every_phase_has_a_permission_mode_and_a_turn_limit(phase, monkeypatch):
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
     drain(ClaudeBackend().run(a_request(phase=phase)))
 
