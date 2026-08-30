@@ -24,7 +24,16 @@ from sqlalchemy.orm import Session, selectinload
 from workbench.api import router as api_router
 from workbench.config import instance
 from workbench.database.db import get_db
-from workbench.database.models import Project, Run, RunPhase, RunStatus, Task, TaskStatus, User
+from workbench.database.models import (
+    Project,
+    Run,
+    RunEventKind,
+    RunPhase,
+    RunStatus,
+    Task,
+    TaskStatus,
+    User,
+)
 from workbench.doctor import page_warnings
 from workbench.git.github import (
     InvalidReference,
@@ -45,6 +54,7 @@ from workbench.git.worktrees import (
 from workbench.runs.activity import activity_by_task
 from workbench.runs.lifecycle import NotCancellable, active_run_for_task, cancel_run, start_run
 from workbench.runs.rate_limits import latest_readings
+from workbench.runs.store import append_event, append_input
 from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.tasks import (
     WrongProject,
@@ -471,8 +481,40 @@ def cancel_task_run(db: DbSession, run_id: int) -> RedirectResponse:
     return _redirect(target, notice=f"Run {run_id} asked to stop.")
 
 
+@app.post("/runs/{run_id}/message")
+def send_run_message(db: DbSession, run_id: int, body: Annotated[str, Form()]) -> RedirectResponse:
+    """Type something into a run that is still going.
+
+    Written to two places: `run_inputs`, which is all the runner itself ever
+    reads (polled the same way `stream.py` already polls `run_events`), and
+    immediately as a `run_events` row too, so it shows up on this page and in
+    the live stream the instant it's sent rather than only once the runner
+    notices it.
+    """
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    target = f"/runs/{run_id}"
+    cleaned = body.strip()
+    if not cleaned:
+        return _redirect(target, error="Type something first.")
+    if run.status is not RunStatus.RUNNING:
+        return _redirect(target, error="This run is not active.")
+
+    append_input(db, run.id, cleaned)
+    append_event(db, run.id, RunEventKind.INPUT, {"text": cleaned})
+    return _redirect(target)
+
+
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
-def show_run(request: Request, db: DbSession, run_id: int) -> HTMLResponse:
+def show_run(
+    request: Request,
+    db: DbSession,
+    run_id: int,
+    error: str | None = None,
+    notice: str | None = None,
+) -> HTMLResponse:
     """One run, with everything it has said so far.
 
     Rendered server-side rather than left to the stream to fill in. A run read
@@ -496,6 +538,8 @@ def show_run(request: Request, db: DbSession, run_id: int) -> HTMLResponse:
             # page rather than repeating it.
             "last_seq": events[-1].seq if events else 0,
             "live": not run.status.is_terminal,
+            "error": error,
+            "notice": notice,
         },
     )
 

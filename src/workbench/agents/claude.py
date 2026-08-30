@@ -17,6 +17,7 @@ import json
 import logging
 import shutil
 import subprocess
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -340,6 +341,29 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(**options)
 
 
+async def _prompt_stream(initial: str, inputs: AsyncIterator[str]) -> AsyncIterator[dict[str, Any]]:
+    """The initial prompt, followed by whatever gets typed in later.
+
+    `query()` accepts this shape lazily — confirmed live against the
+    installed SDK, not just its docstring: fed one message up front, it sits
+    waiting; a second one pushed onto the underlying queue minutes later is
+    answered under the same session, and the loop only ends once this
+    generator does. Closing `inputs` (the runner's idle timeout) is what
+    lets a conversation actually finish rather than run forever.
+    """
+    yield {"type": "user", "message": {"role": "user", "content": initial}}
+    async for text in inputs:
+        yield {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _prompt_for(request: AgentRequest) -> str | AsyncIterator[dict[str, Any]]:
+    """A plain string when nothing can type into this run, exactly as
+    before; the lazy shape only once something actually might."""
+    if request.inputs is None:
+        return request.prompt
+    return _prompt_stream(request.prompt, request.inputs)
+
+
 def _stopped_early(result: ResultMessage) -> bool:
     """Whether the CLI cut the turn short itself, rather than the agent
     choosing to stop. Distinct from an outright error: this is still a
@@ -556,7 +580,7 @@ class ClaudeBackend:
         result: ResultMessage | None = None
 
         try:
-            async for message in query(prompt=request.prompt, options=_options(request)):
+            async for message in query(prompt=_prompt_for(request), options=_options(request)):
                 if isinstance(message, AssistantMessage) and message.model:
                     # What actually answered, which is what gets recorded —
                     # `request.model` is only ever a preference.

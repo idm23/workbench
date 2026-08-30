@@ -86,6 +86,17 @@
   <p class="empty" id="no-events">Nothing recorded yet.</p>
 {% endif %}
 
+{% if run.status == 'running' %}
+  {# Only while running: a queued run has nothing listening yet, and a
+     finished one has nothing left to say it to. #}
+  <form method="post" action="/runs/{{ run.id }}/message" style="margin-top: 1.25rem;">
+    <label for="body">Say something</label>
+    <textarea id="body" name="body" rows="2"
+              placeholder="Type a message to send into this run…"></textarea>
+    <button type="submit">Send</button>
+  </form>
+{% endif %}
+
 {% if live %}
 <script>
   // Resume rather than restart: the page already rendered everything up to
@@ -114,7 +125,7 @@
       list.appendChild(item);
     }
 
-    ["text", "thinking", "tool_use", "tool_result", "status", "notice"].forEach(function (kind) {
+    ["text", "thinking", "tool_use", "tool_result", "status", "notice", "input"].forEach(function (kind) {
       source.addEventListener(kind, function (message) {
         try { add(kind, JSON.parse(message.data)); } catch (error) { /* skip a bad frame */ }
       });
