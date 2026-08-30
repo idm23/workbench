@@ -29,6 +29,7 @@ from workbench.runs.lifecycle import (
     TooManyRuns,
     cancel_run,
     reap,
+    start_conversation,
     start_run,
 )
 from workbench.runs.store import create_run, finish_run, record_launch
@@ -129,6 +130,54 @@ def test_the_queue_transition_is_in_the_log(db, task, executor):
     assert isinstance(run, Run)
     events = db.query(RunEvent).filter_by(run_id=run.id).all()
     assert events[0].payload["executor"] == "fake"
+
+
+# --- Starting a conversation -------------------------------------------------
+
+
+def test_starting_a_conversation_records_how_it_was_started(db, task, executor):
+    run = start_conversation(db, task.project)
+
+    assert isinstance(run, Run)
+    assert run.phase is RunPhase.CONVERSATION
+    assert run.task_id is None
+    assert run.project_id == task.project.id
+    assert run.executor == "fake"
+    assert executor.started == [run.id]
+
+
+def test_a_second_conversation_reports_the_first_rather_than_duplicating(db, task, executor):
+    """Clicking the project again should resume it, not start a rival one."""
+    first = start_conversation(db, task.project)
+    assert isinstance(first, Run)
+
+    second = start_conversation(db, task.project)
+
+    assert isinstance(second, AlreadyRunning)
+    assert second.run_id == first.id
+    assert executor.started == [first.id]
+
+
+def test_a_conversation_takes_the_projects_backend(db, task, executor):
+    task.project.agent_backend = "something-else"
+    db.commit()
+
+    run = start_conversation(db, task.project)
+
+    assert isinstance(run, Run)
+    assert run.backend == "something-else"
+
+
+def test_a_conversation_and_a_task_run_share_the_same_cap(db, task, executor, monkeypatch):
+    """A standing conversation bills the same subscription window a task run
+    does, so it gets no exemption from what protects that window."""
+    monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "1")
+    conversation = start_conversation(db, task.project)
+    assert isinstance(conversation, Run)
+
+    result = start_run(db, task, RunPhase.PLAN)
+
+    assert isinstance(result, TooManyRuns)
 
 
 # --- The concurrency cap ---------------------------------------------------

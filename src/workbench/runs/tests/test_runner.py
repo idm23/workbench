@@ -31,8 +31,16 @@ from workbench.database.models import (
     TaskStatus,
 )
 from workbench.runs import runner as runner_module
-from workbench.runs.runner import Interrupted, NotPrepared, execute, main, prepare, resume_token_for
-from workbench.runs.store import create_run, finish_run
+from workbench.runs.runner import (
+    Interrupted,
+    NotPrepared,
+    execute,
+    main,
+    prepare,
+    resume_token_for,
+    resume_token_for_project,
+)
+from workbench.runs.store import create_conversation, create_run, finish_run
 
 
 @pytest.fixture
@@ -655,6 +663,105 @@ def test_a_typed_message_reaches_the_backend_through_a_real_run(db, run, checkou
 
     assert fake.received == ["actually, also check the tests"]
     assert run.status is RunStatus.SUCCEEDED
+
+
+# --- A project's own conversation -------------------------------------------
+
+
+def test_a_conversation_runs_with_no_task_at_all(db, task, checkout, backend):
+    """The whole point: it belongs to the project directly."""
+    run = create_conversation(db, task.project, backend="fake")
+
+    execute(db, run)
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.task_id is None
+    assert run.project_id == task.project.id
+
+
+def test_a_conversation_skips_worktree_setup_entirely(db, task, checkout, backend):
+    """No fetch, no branch, no setup command — nothing task-scoped to
+    isolate, which is also what makes its first message faster."""
+    run = create_conversation(db, task.project, backend="fake")
+
+    execute(db, run)
+
+    assert backend.requests[0].worktree == checkout
+
+
+def test_a_conversation_reports_the_same_missing_clone_message(db, task):
+    """Not cloned is not cloned, whichever kind of run asks."""
+    run = create_conversation(db, task.project, backend="fake")
+
+    execute(db, run)
+
+    assert run.status is RunStatus.FAILED
+    assert "cloned" in (run.error or "")
+
+
+def test_a_conversation_resumes_its_own_earlier_session(db, task, checkout, backend):
+    first = create_conversation(db, task.project, backend="fake")
+    finish_run(db, first, RunStatus.SUCCEEDED, resume_token="session-from-last-time")
+    second = create_conversation(db, task.project, backend="fake")
+
+    execute(db, second)
+
+    assert backend.requests[0].resume_token == "session-from-last-time"
+
+
+def test_a_conversations_resume_token_is_not_a_tasks(db, task, checkout, backend):
+    """Scoped to the project, not shared with — or by — any one task's runs."""
+    task_run = create_run(db, task, RunPhase.EXECUTE, backend="fake")
+    finish_run(db, task_run, RunStatus.SUCCEEDED, resume_token="belongs-to-the-task")
+
+    assert resume_token_for_project(db, task.project.id, "fake") is None
+
+
+def test_the_most_recent_conversation_token_wins(db, task):
+    first = create_conversation(db, task.project, backend="fake")
+    finish_run(db, first, RunStatus.FAILED, resume_token="older")
+    second = create_conversation(db, task.project, backend="fake")
+    finish_run(db, second, RunStatus.SUCCEEDED, resume_token="newer")
+
+    assert resume_token_for_project(db, task.project.id, "fake") == "newer"
+
+
+def test_a_conversation_leaves_no_task_touched_on_failure(db, task, checkout, monkeypatch):
+    from workbench.agents.protocol import AgentFailed
+
+    monkeypatch.setattr(
+        runner_module, "get_backend", lambda _n: FakeBackend(outcome=AgentFailed("boom"))
+    )
+    run = create_conversation(db, task.project, backend="fake")
+
+    execute(db, run)
+
+    assert run.status is RunStatus.FAILED
+
+
+def test_a_second_message_reaches_a_running_conversation_without_a_second_process(
+    db, task, checkout, monkeypatch
+):
+    """The whole point of task 26's snappiness requirement, proven rather
+    than assumed to carry over from the task case: once a conversation's
+    process is up, a message typed in mid-stream reaches that same backend
+    call through the input queue — nothing here starts a second run."""
+    from workbench.runs.store import append_input
+
+    fake = InputCapturingBackend(AgentFinished(text="done"))
+    monkeypatch.setattr(runner_module, "get_backend", lambda _n: fake)
+    monkeypatch.setattr(runner_module, "input_idle_seconds", lambda: 0.3)
+    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.02)
+    run = create_conversation(db, task.project, backend="fake")
+    append_input(db, run.id, "and also close out the stale ones")
+
+    execute(db, run)
+
+    assert fake.received == ["and also close out the stale ones"]
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.task_id is None
+    assert run.project_id == task.project.id
+    assert task.status is TaskStatus.OPEN
 
 
 # --- The entry point -------------------------------------------------------

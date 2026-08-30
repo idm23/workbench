@@ -2,10 +2,12 @@
 
 {% block title %}Run {{ run.id }} — Workbench{% endblock %}
 
-{% block back %}<a class="back" href="/projects/{{ task.project_id }}">&lsaquo; {{ task.project.owner }}/{{ task.project.repo }}</a>{% endblock %}
+{% block back %}<a class="back" href="/projects/{{ project.id }}">&lsaquo; {{ project.owner }}/{{ project.repo }}</a>{% endblock %}
 
 {% block content %}
-<h1 style="font-size: clamp(1.3rem, 6vw, 1.8rem);">{{ task.title }}</h1>
+<h1 style="font-size: clamp(1.3rem, 6vw, 1.8rem);">
+  {% if task %}{{ task.title }}{% else %}{{ project.owner }}/{{ project.repo }}{% endif %}
+</h1>
 <p class="sub">
   Run {{ run.id }} · {{ run.phase }} ·
   <span class="status {{ run.status }}">{{ run.status }}</span>
@@ -20,7 +22,7 @@
        valuation. Labelled so nobody reconciles it against a card statement. #}
     <div><span>Reported cost</span><span title="A token valuation, not an amount charged">${{ '%.4f'|format(run.total_cost_usd) }}</span></div>
   {% endif %}
-  {% if task.branch %}<div><span>Branch</span><span class="mono">{{ task.branch }}</span></div>{% endif %}
+  {% if task and task.branch %}<div><span>Branch</span><span class="mono">{{ task.branch }}</span></div>{% endif %}
   {% if run.agent_outcome %}
     {# What the agent itself reported, through the live outcome API — distinct
        from `run.status`, which only says whether the process crashed. #}

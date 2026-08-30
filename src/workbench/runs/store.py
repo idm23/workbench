@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from workbench.database.models import (
+    Project,
     Run,
     RunEvent,
     RunEventKind,
@@ -41,6 +42,18 @@ def create_run(db: Session, task: Task, phase: RunPhase, backend: str) -> Run:
     than lost.
     """
     run = Run(task_id=task.id, phase=phase, backend=backend, status=RunStatus.QUEUED)
+    db.add(run)
+    db.commit()
+    return run
+
+
+def create_conversation(db: Session, project: Project, backend: str) -> Run:
+    """Record the intent to talk to a project directly — the conversation
+    counterpart to `create_run`, with a project instead of a task and no
+    phase to choose (`RunPhase.CONVERSATION` is the only one there is)."""
+    run = Run(
+        project_id=project.id, phase=RunPhase.CONVERSATION, backend=backend, status=RunStatus.QUEUED
+    )
     db.add(run)
     db.commit()
     return run
