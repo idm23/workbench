@@ -214,7 +214,7 @@ def test_foreign_keys_survive_the_batch_rewrites(alembic_config):
 
     assert keys["projects"] == ["users"]
     assert sorted(keys["tasks"]) == ["projects", "tasks"]
-    assert keys["runs"] == ["tasks"]
+    assert sorted(keys["runs"]) == ["projects", "tasks"]
     assert keys["run_events"] == ["runs"]
 
 
@@ -246,3 +246,30 @@ def test_cascade_still_bites_after_migrating(alembic_config):
         for table in ("projects", "tasks", "runs", "run_events"):
             remaining = session.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
             assert remaining == 0, table
+
+
+def test_a_projects_own_conversation_cascades_too(alembic_config):
+    """The other shape a run can be: no task, `project_id` instead. A batch
+    rewrite that only remembered `runs.task_id`'s foreign key would leave
+    this one silently unenforced."""
+    command.upgrade(alembic_config, "head")
+
+    engine = make_engine(f"sqlite+pysqlite:///{database_of(alembic_config)}")
+    with Session(engine) as session:
+        project = Project(
+            user=User(name="ian"),
+            owner="idm23",
+            repo="workbench",
+            github_url="https://github.com/idm23/workbench",
+        )
+        session.add(project)
+        session.commit()
+        run = Run(project_id=project.id, phase=RunPhase.CONVERSATION)
+        session.add(run)
+        session.commit()
+
+        session.delete(project)
+        session.commit()
+
+        remaining = session.execute(text("SELECT count(*) FROM runs")).scalar_one()
+        assert remaining == 0

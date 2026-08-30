@@ -52,7 +52,14 @@ from workbench.git.worktrees import (
     sync_worktree,
 )
 from workbench.runs.activity import activity_by_task
-from workbench.runs.lifecycle import NotCancellable, active_run_for_task, cancel_run, start_run
+from workbench.runs.lifecycle import (
+    NotCancellable,
+    active_run_for_project,
+    active_run_for_task,
+    cancel_run,
+    start_conversation,
+    start_run,
+)
 from workbench.runs.rate_limits import latest_readings
 from workbench.runs.store import append_event, append_input
 from workbench.runs.stream import fetch_events, parse_last_event_id, stream
@@ -273,6 +280,10 @@ def show_project(
             # One query for the whole tree. Asking per node is how a page that
             # felt instant stops being one.
             "activity": activity_by_task(db, project.id),
+            # The project's own standing conversation, if one is in flight —
+            # what lets the page offer "Continue" instead of "Talk to this
+            # project" without a second click to find out.
+            "conversation": active_run_for_project(db, project.id),
             # Derived, not stored. This database is copied between instances —
             # staging restores production's snapshot on every deploy — so a
             # stored path would arrive pointing at the other machine's disk.
@@ -288,6 +299,26 @@ def show_project(
             "notice": notice,
         },
     )
+
+
+@app.post("/projects/{project_id}/conversation")
+def start_project_conversation(db: DbSession, project_id: int) -> RedirectResponse:
+    """Talk directly to a project, not any one task within it.
+
+    Redirects into an already-running conversation rather than starting a
+    second one — this is what makes clicking the project resume the standing
+    conversation instead of duplicating it.
+    """
+    project = _get_project_or_404(db, project_id)
+
+    existing = active_run_for_project(db, project.id)
+    if existing is not None:
+        return _redirect(f"/runs/{existing.id}")
+
+    result = start_conversation(db, project)
+    if isinstance(result, Run):
+        return _redirect(f"/runs/{result.id}")
+    return _redirect(f"/projects/{project.id}", error=result.message)
 
 
 @app.post("/projects/{project_id}/clone")
@@ -411,6 +442,13 @@ def approve_plan(db: DbSession, run_id: int) -> RedirectResponse:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
 
     task = run.task
+    if task is None:
+        # A plan run always belongs to a task — only a conversation does
+        # not, and a conversation is never phase PLAN — but this is the
+        # data this route needs, so ask for it explicitly rather than
+        # crash on the assumption.
+        target = f"/projects/{run.project_id}" if run.project_id else "/"
+        return _redirect(target, error=f"Run {run_id} has no plan awaiting approval.")
     target = f"/projects/{task.project_id}"
 
     if run.phase is not RunPhase.PLAN or run.status is not RunStatus.AWAITING_REVIEW:
@@ -474,7 +512,7 @@ def cancel_task_run(db: DbSession, run_id: int) -> RedirectResponse:
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
 
-    target = f"/projects/{run.task.project_id}"
+    target = f"/projects/{run.task.project_id if run.task else run.project_id}"
     result = cancel_run(db, run)
     if isinstance(result, NotCancellable):
         return _redirect(target, error=result.message)
@@ -533,6 +571,7 @@ def show_run(
             **_shared(db),
             "run": run,
             "task": run.task,
+            "project": run.task.project if run.task else run.project,
             "events": events,
             # Where the browser should resume from, so the stream continues the
             # page rather than repeating it.

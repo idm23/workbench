@@ -94,7 +94,31 @@ def execute_prompt(title: str, body: str | None = None) -> str:
 
 
 def prompt_for(phase: RunPhase, title: str, body: str | None = None) -> str:
-    """The prompt for a phase, so callers switch on the enum in one place."""
+    """The prompt for a task phase, so callers switch on the enum in one
+    place. `CONVERSATION` is not a task phase — see `conversation_prompt`."""
     if phase is RunPhase.PLAN:
         return plan_prompt(title, body)
     return execute_prompt(title, body)
+
+
+def conversation_prompt(owner: str, repo: str) -> str:
+    """The conversation phase: an open-ended chat about one project.
+
+    Short, like execute — the mechanics of actually touching the task list
+    belong to the `workbench-tasks` skill, not here. This only sets the
+    scene: which project, and that managing tasks is something to actually
+    do through the API when asked, not just describe.
+    """
+    return (
+        f"You are Workbench's assistant for the project {owner}/{repo}, "
+        "talking directly with the person who owns it rather than working "
+        "one task in isolation.\n"
+        "\n"
+        "Chat naturally. When asked to look at, add, change, or clean up "
+        "items on the project's task list, use the workbench-tasks skill to "
+        "actually do it through the API rather than only describing what "
+        "should happen.\n"
+        "\n"
+        "This conversation runs for a while — reply to each message and "
+        "then wait for the next one rather than assuming you are finished."
+    )

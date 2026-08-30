@@ -316,8 +316,18 @@ def test_the_run_and_task_ids_reach_the_environment(monkeypatch):
     assert captured["options"].env == {
         "WORKBENCH_RUN_ID": "42",
         "WORKBENCH_TASK_ID": "7",
+        "WORKBENCH_PROJECT_ID": "0",
         "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
     }
+
+
+def test_the_project_id_reaches_the_environment_too(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(project_id=9)))
+
+    assert captured["options"].env["WORKBENCH_PROJECT_ID"] == "9"
 
 
 async def _drain_prompt(prompt) -> list[dict[str, Any]]:
@@ -415,6 +425,55 @@ def test_the_outcome_skill_files_exist():
     assert plugin_json.is_file()
     assert skill_md.is_file()
     assert "workbench-outcome" in skill_md.read_text()
+
+
+def test_a_conversation_loads_the_tasks_skill_not_the_outcome_one(monkeypatch):
+    """It has no single task to call finished or failed."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
+
+    assert captured["options"].plugins == [
+        {"type": "local", "path": str(backend_module._PLUGIN_DIR)}
+    ]
+    assert captured["options"].skills == ["workbench-tasks"]
+
+
+def test_a_conversation_does_not_set_a_structured_output_schema(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
+
+    assert captured["options"].output_format is None
+
+
+def test_a_conversation_gets_its_own_generous_turn_limit(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
+
+    assert captured["options"].max_turns == backend_module.MAX_TURNS_CONVERSATION
+    assert backend_module.MAX_TURNS_CONVERSATION > backend_module.MAX_TURNS_EXECUTE
+
+
+def test_a_conversation_runs_with_permissions_bypassed(monkeypatch):
+    """The same reasoning as execute: managing the task list needs Bash."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.CONVERSATION)))
+
+    assert captured["options"].permission_mode == "bypassPermissions"
+
+
+def test_the_tasks_skill_files_exist():
+    skill_md = backend_module._PLUGIN_DIR / "skills" / "workbench-tasks" / "SKILL.md"
+
+    assert skill_md.is_file()
+    assert "workbench-tasks" in skill_md.read_text()
 
 
 # --- Outcomes --------------------------------------------------------------

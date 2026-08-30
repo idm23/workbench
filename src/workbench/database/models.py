@@ -62,7 +62,8 @@ class TaskStatus(StrEnum):
 
 
 class RunPhase(StrEnum):
-    """Workbench's own two-step workflow, not a property of any backend.
+    """Workbench's own vocabulary for what kind of attempt a run is, not a
+    property of any backend.
 
     A backend with no read-only mode of its own can honour the plan phase by
     instruction rather than enforcement; the phases are what Workbench asks
@@ -71,6 +72,11 @@ class RunPhase(StrEnum):
 
     PLAN = "plan"
     EXECUTE = "execute"
+    #: Belongs to a project directly, not a task — see `Run.project_id`.
+    #: Open-ended rather than a two-step attempt at one piece of work, which
+    #: is why it gets its own turn limit and its own prompt rather than
+    #: fitting into the plan/execute split.
+    CONVERSATION = "conversation"
 
 
 class RunEventKind(StrEnum):
@@ -212,6 +218,13 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    #: Runs that belong to the project directly rather than to one of its
+    #: tasks — see `Run.project_id`.
+    conversations: Mapped[list[Run]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="Run.id",
+    )
 
     def __repr__(self) -> str:
         return f"<Project id={self.id} {self.owner}/{self.repo}>"
@@ -310,12 +323,28 @@ class Task(Base):
 
 
 class Run(Base):
-    """One attempt at a task: either planning it or carrying the plan out."""
+    """One attempt at a task — planning it, carrying the plan out — or an
+    open-ended conversation with a project directly.
+
+    Exactly one of `task_id`/`project_id` is set, never both and never
+    neither: a task-scoped run reads `task.project` for the project it
+    belongs to, and a project-scoped conversation has no task at all. Kept
+    as two nullable columns rather than a polymorphic parent table because
+    the two cases share every other column and every other table that reads
+    a run (`run_events`, `run_inputs`, the SSE stream) — only the small
+    handful of places that need to know which one they have (`runner.py`'s
+    `prepare`/`record`, the templates) ever branch on it.
+    """
 
     __tablename__ = "runs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True, default=None
+    )
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, default=None
+    )
 
     phase: Mapped[RunPhase] = mapped_column(
         Enum(
@@ -424,7 +453,8 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
-    task: Mapped[Task] = relationship(back_populates="runs")
+    task: Mapped[Task | None] = relationship(back_populates="runs")
+    project: Mapped[Project | None] = relationship(back_populates="conversations")
     events: Mapped[list[RunEvent]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",

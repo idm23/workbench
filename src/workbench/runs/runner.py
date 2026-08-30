@@ -30,7 +30,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from workbench.agents.prompts import prompt_for
+from workbench.agents.prompts import conversation_prompt, prompt_for
 from workbench.agents.protocol import (
     AgentEvent,
     AgentFailed,
@@ -130,6 +130,59 @@ def resume_token_for(db: Session, task: Task, backend: str) -> str | None:
     )
 
 
+def resume_token_for_project(db: Session, project_id: int, backend: str) -> str | None:
+    """The token that continues this project's own conversation, if any.
+
+    Same reasoning as `resume_token_for`, scoped to `project_id` instead of
+    a task — this is what makes clicking back into "the project's
+    conversation" continue it rather than starting cold.
+    """
+    return db.scalar(
+        select(Run.resume_token)
+        .where(
+            Run.project_id == project_id,
+            Run.backend == backend,
+            Run.resume_token.is_not(None),
+        )
+        .order_by(Run.id.desc())
+        .limit(1)
+    )
+
+
+def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
+    """A project conversation's version of `prepare`: no worktree, no
+    fetch, no setup command — there is no task-scoped work to isolate, and
+    skipping all three is what makes its first message faster than a task
+    run's, on top of never needing them again after that.
+    """
+    project = run.project
+    if project is None:
+        return NotPrepared(f"Run {run.id} has no project to talk to.")
+
+    checkout = local_checkout(project.owner, project.repo)
+    if checkout is None:
+        return NotPrepared(
+            f"{project.owner}/{project.repo} has not been cloned onto this machine yet."
+        )
+
+    backend = get_backend(run.backend)
+    if isinstance(backend, UnknownBackend):
+        return NotPrepared(backend.message)
+
+    return Prepared(
+        backend=backend,
+        request=AgentRequest(
+            worktree=checkout,
+            phase=RunPhase.CONVERSATION,
+            prompt=conversation_prompt(project.owner, project.repo),
+            resume_token=resume_token_for_project(db, project.id, run.backend),
+            model=run.model,
+            run_id=run.id,
+            project_id=project.id,
+        ),
+    )
+
+
 def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     """Get the worktree and the backend ready, or explain why not.
 
@@ -137,7 +190,12 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     project's setup command can take minutes, and without this the stream would
     sit blank long enough to look broken.
     """
+    if run.phase is RunPhase.CONVERSATION:
+        return _prepare_conversation(db, run)
+
     task = run.task
+    if task is None:
+        return NotPrepared(f"Run {run.id} has no task to work.")
     project = task.project
 
     checkout = local_checkout(project.owner, project.repo)
@@ -329,6 +387,47 @@ def _serialize_subtasks(proposals: list[SubtaskProposal] | None) -> dict | None:
     }
 
 
+def _record_conversation(db: Session, run: Run, ending: Ending) -> Run:
+    """A project conversation's version of `record`.
+
+    No task means no status to set and nothing to diff — a conversation
+    ending is just that: the person stopped typing for a while (or hit
+    Stop), not a success or failure of *doing* anything in particular.
+    """
+    match ending:
+        case AgentFinished():
+            return finish_run(
+                db,
+                run,
+                RunStatus.SUCCEEDED,
+                summary=ending.text,
+                resume_token=ending.resume_token,
+                model=ending.model,
+                total_cost_usd=ending.total_cost_usd,
+                num_turns=ending.num_turns,
+            )
+        case AgentFailed():
+            return finish_run(
+                db,
+                run,
+                RunStatus.FAILED,
+                error=ending.message,
+                resume_token=ending.resume_token,
+                model=ending.model,
+                total_cost_usd=ending.total_cost_usd,
+                num_turns=ending.num_turns,
+            )
+        case AgentUnavailable():
+            return finish_run(db, run, RunStatus.FAILED, error=ending.message)
+        case Interrupted():
+            return finish_run(
+                db,
+                run,
+                RunStatus.CANCELLED,
+                error=f"Stopped by {ending.signal_name} before the agent finished.",
+            )
+
+
 def record(db: Session, run: Run, ending: Ending) -> Run:
     """Translate how the agent ended into how the run ended.
 
@@ -340,8 +439,18 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
     (written live, mid-run, through the outcome API) rather than from whether
     the backend process merely exited without crashing — see the module
     docstring on `runs.store.report_outcome`.
+
+    A conversation is handled entirely separately, before any of the above:
+    it has no task, and every branch below reads one.
     """
+    if run.phase is RunPhase.CONVERSATION:
+        return _record_conversation(db, run, ending)
+
     task = run.task
+    if task is None:
+        # Should not happen — only a conversation lacks a task, and that
+        # case is handled above — but this function must never raise.
+        return finish_run(db, run, RunStatus.FAILED, error=f"Run {run.id} has no task.")
     base_branch = origin_branch_for(task)
     worktree = Path(task.worktree_path) if task.worktree_path else None
 
