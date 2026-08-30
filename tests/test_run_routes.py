@@ -12,7 +12,16 @@ from sqlalchemy.orm import Session
 
 from workbench.app import app
 from workbench.database.db import get_db, get_engine, get_session_factory, make_engine
-from workbench.database.models import Base, Project, Run, RunStatus, Task, TaskStatus, User
+from workbench.database.models import (
+    Base,
+    Project,
+    Run,
+    RunPhase,
+    RunStatus,
+    Task,
+    TaskStatus,
+    User,
+)
 from workbench.runs import lifecycle
 from workbench.runs import stream as stream_module
 from workbench.runs.executors import Started, StartRefused
@@ -264,6 +273,28 @@ def test_the_origin_is_not_re_asked_once_a_worktree_exists(client, session, exec
     assert response.status_code == 303
     session.refresh(task)
     assert task.origin_ref == "staging"
+
+
+# --- Retrying a failed run ---------------------------------------------------
+
+
+def test_retrying_starts_a_new_run_of_the_same_phase(client, session, executor):
+    """Not "plan" by default — the Retry button posts the failed run's own
+    phase, so a failed execute run resumes execute rather than replanning."""
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    session.add(
+        Run(task_id=task.id, phase=RunPhase.EXECUTE, backend="fake", status=RunStatus.FAILED)
+    )
+    session.commit()
+
+    response = client.post(f"/tasks/{task.id}/runs", data={"phase": "execute"})
+
+    assert response.status_code == 303
+    new_run = session.query(Run).filter_by(status=RunStatus.QUEUED).one()
+    assert new_run.phase is RunPhase.EXECUTE
+    assert executor.started == [new_run.id]
 
 
 def test_cancelling_asks_the_executor_to_stop(client, session, executor):
