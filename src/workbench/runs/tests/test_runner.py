@@ -18,10 +18,18 @@ from workbench.agents.protocol import (
     AgentFinished,
     AgentRequest,
     AgentUnavailable,
+    SubtaskProposal,
 )
 from workbench.agents.registry import UnknownBackend
 from workbench.agents.tests.fake import FakeBackend
-from workbench.database.models import RunEvent, RunEventKind, RunPhase, RunStatus
+from workbench.database.models import (
+    RunEvent,
+    RunEventKind,
+    RunOutcome,
+    RunPhase,
+    RunStatus,
+    TaskStatus,
+)
 from workbench.runs import runner as runner_module
 from workbench.runs.runner import Interrupted, NotPrepared, execute, main, prepare, resume_token_for
 from workbench.runs.store import create_run, finish_run
@@ -117,6 +125,105 @@ def test_the_handle_is_cleared_once_the_run_is_over(db, run, checkout, backend):
     assert run.handle is None
     statuses = [e for e in events_for(db, run) if e.kind is RunEventKind.STATUS]
     assert statuses[0].payload["status"] == "running"
+
+
+# --- Agent-reported outcomes -------------------------------------------------
+
+
+def test_an_explicit_finished_outcome_marks_the_task_done(db, run, checkout, backend):
+    run.agent_outcome = RunOutcome.FINISHED
+    db.commit()
+
+    execute(db, run)
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.task.status is TaskStatus.DONE
+
+
+def test_no_reported_outcome_leaves_the_tasks_status_untouched(db, run, checkout, backend):
+    """A correctly-behaving agent always reports; this is the degenerate path."""
+    execute(db, run)
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.task.status is TaskStatus.OPEN
+    notices = [e.payload["text"] for e in events_for(db, run) if e.kind is RunEventKind.NOTICE]
+    assert any("did not report an outcome" in text for text in notices)
+
+
+def test_a_reported_finished_outcome_is_distrusted_if_the_run_was_cut_short(
+    db, run, checkout, monkeypatch
+):
+    """Hitting the turn limit still yields AgentFinished, so self-reported
+    success alone is not enough to trust — see `stopped_early`."""
+    run.agent_outcome = RunOutcome.FINISHED
+    db.commit()
+    monkeypatch.setattr(
+        runner_module,
+        "get_backend",
+        lambda _n: FakeBackend(outcome=AgentFinished(text="done", stopped_early=True)),
+    )
+
+    execute(db, run)
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.task.status is TaskStatus.OPEN
+    notices = [e.payload["text"] for e in events_for(db, run) if e.kind is RunEventKind.NOTICE]
+    assert any("cut off" in text for text in notices)
+
+
+def test_needs_replanning_pauses_for_a_person_and_blocks_the_task(db, run, checkout, backend):
+    run.agent_outcome = RunOutcome.NEEDS_REPLANNING
+    run.outcome_detail = "The instructions assumed a config file that doesn't exist."
+    db.commit()
+
+    execute(db, run)
+
+    assert run.status is RunStatus.AWAITING_REVIEW
+    assert run.task.status is TaskStatus.BLOCKED
+    assert run.error is None
+
+
+def test_a_reported_failure_fails_the_run_and_blocks_the_task(db, run, checkout, backend):
+    run.agent_outcome = RunOutcome.FAILED
+    run.outcome_detail = "Tests fail and I could not find why."
+    db.commit()
+
+    execute(db, run)
+
+    assert run.status is RunStatus.FAILED
+    assert run.task.status is TaskStatus.BLOCKED
+    assert run.error == "Tests fail and I could not find why."
+
+
+def test_a_plans_proposed_subtasks_are_stored(db, task, checkout, monkeypatch):
+    fake = FakeBackend(
+        outcome=AgentFinished(
+            text="Plan text",
+            proposed_subtasks=[
+                SubtaskProposal(title="Do part A", body="details", ready_to_execute=True),
+                SubtaskProposal(title="Investigate B", body="details"),
+            ],
+        )
+    )
+    monkeypatch.setattr(runner_module, "get_backend", lambda _n: fake)
+    run = create_run(db, task, RunPhase.PLAN, backend="fake")
+
+    execute(db, run)
+
+    assert run.proposed_subtasks == {
+        "subtasks": [
+            {"title": "Do part A", "body": "details", "ready_to_execute": True},
+            {"title": "Investigate B", "body": "details", "ready_to_execute": False},
+        ]
+    }
+
+
+def test_a_plan_with_no_subtasks_stores_none(db, task, checkout, backend):
+    run = create_run(db, task, RunPhase.PLAN, backend="fake")
+
+    execute(db, run)
+
+    assert run.proposed_subtasks is None
 
 
 # --- The plan phase --------------------------------------------------------

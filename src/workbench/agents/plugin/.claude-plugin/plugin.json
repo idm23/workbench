@@ -1,0 +1,4 @@
+{
+  "name": "workbench-outcome",
+  "description": "Report a Workbench execute run's outcome back to the app, and spin off follow-up tasks when useful."
+}

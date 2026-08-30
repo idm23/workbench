@@ -23,6 +23,7 @@ from workbench.database.models import (
     Run,
     RunEvent,
     RunEventKind,
+    RunOutcome,
     RunPhase,
     RunStatus,
     Task,
@@ -106,6 +107,22 @@ def mark_running(db: Session, run: Run) -> Run:
     return run
 
 
+def report_outcome(db: Session, run: Run, outcome: RunOutcome, detail: str | None = None) -> Run:
+    """Record what the agent itself says happened, while the run is still going.
+
+    Written live, through the outcome API, rather than only at the end: the
+    whole point is that this decision survives a crash or a deploy restart
+    that kills the process before it would otherwise report anything, the
+    same reasoning that makes every other run event its own committed
+    transaction rather than something batched.
+    """
+    run.agent_outcome = outcome
+    if detail is not None:
+        run.outcome_detail = detail
+    db.commit()
+    return run
+
+
 def finish_run(
     db: Session,
     run: Run,
@@ -119,6 +136,8 @@ def finish_run(
     model: str | None = None,
     total_cost_usd: float | None = None,
     num_turns: int | None = None,
+    outcome_detail: str | None = None,
+    proposed_subtasks: dict | None = None,
 ) -> Run:
     """Record how a run ended, whatever the ending was.
 
@@ -147,6 +166,10 @@ def finish_run(
         run.total_cost_usd = total_cost_usd
     if num_turns is not None:
         run.num_turns = num_turns
+    if outcome_detail is not None:
+        run.outcome_detail = outcome_detail
+    if proposed_subtasks is not None:
+        run.proposed_subtasks = proposed_subtasks
     run.finished_at = datetime.now(UTC)
     # The job is over either way, and a stale handle is worse than none: a pid
     # will eventually belong to something else entirely, and a unit name will

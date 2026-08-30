@@ -5,7 +5,7 @@ state. They have to do it the same way, which is why the writes live in one
 module and their behaviour is pinned here rather than in any one caller.
 """
 
-from workbench.database.models import RunEvent, RunEventKind, RunPhase, RunStatus
+from workbench.database.models import RunEvent, RunEventKind, RunOutcome, RunPhase, RunStatus
 from workbench.runs.store import (
     append_event,
     create_run,
@@ -13,6 +13,7 @@ from workbench.runs.store import (
     mark_running,
     next_seq,
     record_launch,
+    report_outcome,
 )
 
 
@@ -120,3 +121,21 @@ def test_awaiting_review_is_finished_but_not_terminal(db, task):
 
     assert run.finished_at is not None
     assert run.status.is_terminal is False
+
+
+def test_reporting_an_outcome_is_visible_before_the_run_finishes(db, run):
+    """The point of a live write: it survives even if the process never
+    reaches `finish_run` at all — a crash, a killed unit."""
+    report_outcome(db, run, RunOutcome.NEEDS_REPLANNING, "hit something unexpected")
+
+    assert run.agent_outcome is RunOutcome.NEEDS_REPLANNING
+    assert run.outcome_detail == "hit something unexpected"
+    assert run.status is RunStatus.QUEUED
+    assert run.finished_at is None
+
+
+def test_reporting_an_outcome_with_no_detail_leaves_it_unset(db, run):
+    report_outcome(db, run, RunOutcome.FINISHED)
+
+    assert run.agent_outcome is RunOutcome.FINISHED
+    assert run.outcome_detail is None

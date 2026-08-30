@@ -52,8 +52,9 @@ from workbench.agents.protocol import (
     AgentStream,
     AgentUnavailable,
     CredentialStatus,
+    SubtaskProposal,
 )
-from workbench.config import agent_environment, bills_subscription
+from workbench.config import agent_environment, bills_subscription, port
 from workbench.database.models import RunEventKind, RunPhase
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,39 @@ BACKEND_NAME = "claude"
 #: bound matters more than usual because nobody is watching it spend money.
 MAX_TURNS_PLAN = 60
 MAX_TURNS_EXECUTE = 200
+
+#: Where the agent-facing skill lives, and the only skill this backend
+#: enables. Ships inside the repo rather than being installed anywhere —
+#: `plugins` takes a plain path, so there is nothing for `install.py` to do.
+_PLUGIN_DIR = Path(__file__).parent / "plugin"
+_OUTCOME_SKILL = "workbench-outcome"
+
+#: What a plan run's structured response must contain. Enforced by the SDK,
+#: not parsed out of prose — `output_format` works under real plan mode
+#: (`permission_mode="plan"`) because it shapes the final answer rather than
+#: running a tool, which is the one thing that mode disallows outright.
+_PLAN_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "plan": {"type": "string"},
+            "subtasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                        "ready_to_execute": {"type": "boolean"},
+                    },
+                    "required": ["title", "body", "ready_to_execute"],
+                },
+            },
+        },
+        "required": ["plan", "subtasks"],
+    },
+}
 
 #: Longest string kept in an event payload. A single Write tool call can carry
 #: an entire file, and every event is a row that is kept forever — truncating
@@ -268,18 +302,87 @@ def translate(message: Any) -> list[AgentEvent]:
             ]
 
 
+def _env_for(request: AgentRequest) -> dict[str, str]:
+    """How a run finds its way back to Workbench's own API.
+
+    Meaningful only for execute — the plan phase is held read-only and
+    cannot call anything — but harmless to hand over either way.
+    """
+    return {
+        "WORKBENCH_RUN_ID": str(request.run_id),
+        "WORKBENCH_TASK_ID": str(request.task_id),
+        "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
+    }
+
+
 def _options(request: AgentRequest) -> ClaudeAgentOptions:
-    return ClaudeAgentOptions(
-        cwd=request.worktree,
-        permission_mode=_permission_mode(request.phase),
-        max_turns=_max_turns(request.phase),
-        model=request.model,
-        resume=request.resume_token,
+    options: dict[str, Any] = {
+        "cwd": request.worktree,
+        "permission_mode": _permission_mode(request.phase),
+        "max_turns": _max_turns(request.phase),
+        "model": request.model,
+        "resume": request.resume_token,
         # The agent works in a throwaway worktree of the project, so the
         # project's own CLAUDE.md and settings are exactly the context it
         # should have.
-        setting_sources=["project"],
-    )
+        "setting_sources": ["project"],
+        "env": _env_for(request),
+    }
+    if request.phase is RunPhase.PLAN:
+        # Structured output, not a tool call — the one decomposition
+        # mechanism that works under real plan mode. See _PLAN_OUTPUT_FORMAT.
+        options["output_format"] = _PLAN_OUTPUT_FORMAT
+    else:
+        # The outcome-reporting skill only makes sense once tools can
+        # actually run, which plan mode does not allow.
+        options["plugins"] = [{"type": "local", "path": str(_PLUGIN_DIR)}]
+        options["skills"] = [_OUTCOME_SKILL]
+    return ClaudeAgentOptions(**options)
+
+
+def _stopped_early(result: ResultMessage) -> bool:
+    """Whether the CLI cut the turn short itself, rather than the agent
+    choosing to stop. Distinct from an outright error: this is still a
+    `ResultMessage` that reached us, just not one to trust a self-reported
+    "finished" against."""
+    reason = getattr(result, "terminal_reason", None)
+    return reason is not None and reason != "completed"
+
+
+def _plan_text(result: ResultMessage) -> str:
+    """The plan's prose, from structured output when there is any.
+
+    `result.result` is the schema's JSON serialised as text when
+    `output_format` was set — showing that to a person as "the plan" would
+    be unreadable, so the `plan` field is what actually gets shown.
+    """
+    structured = result.structured_output
+    if isinstance(structured, dict) and isinstance(structured.get("plan"), str):
+        return structured["plan"]
+    return result.result or ""
+
+
+def _proposed_subtasks(result: ResultMessage) -> list[SubtaskProposal] | None:
+    """A plan's decomposition, from the same structured output.
+
+    Defensive about shape despite the schema: a model can still deviate, and
+    this is the one place that would ever see it.
+    """
+    structured = result.structured_output
+    if not isinstance(structured, dict):
+        return None
+    raw = structured.get("subtasks")
+    if not isinstance(raw, list):
+        return None
+    return [
+        SubtaskProposal(
+            title=str(item["title"]),
+            body=str(item.get("body") or ""),
+            ready_to_execute=bool(item.get("ready_to_execute", False)),
+        )
+        for item in raw
+        if isinstance(item, dict) and item.get("title")
+    ]
 
 
 #: How long to wait for the credential probe. It is an offline read of a file
@@ -486,12 +589,15 @@ class ClaudeBackend:
             yield AgentFailed("The agent stopped without reporting a result.", model=model)
             return
 
+        is_plan = request.phase is RunPhase.PLAN
         finished = AgentFinished(
-            text=result.result or "",
+            text=_plan_text(result) if is_plan else (result.result or ""),
             resume_token=result.session_id,
             model=model,
             total_cost_usd=result.total_cost_usd,
             num_turns=result.num_turns,
+            proposed_subtasks=_proposed_subtasks(result) if is_plan else None,
+            stopped_early=_stopped_early(result),
         )
         if result.is_error:
             yield AgentFailed(
