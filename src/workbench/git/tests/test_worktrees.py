@@ -13,6 +13,8 @@ import pytest
 from workbench.git.worktrees import (
     GitFailed,
     GitOk,
+    Synced,
+    SyncRefused,
     WorktreeReady,
     branch_name,
     clone_path_for,
@@ -22,6 +24,7 @@ from workbench.git.worktrees import (
     has_commits,
     local_checkout,
     slugify,
+    sync_worktree,
 )
 
 
@@ -219,6 +222,118 @@ def test_fetching_first_picks_up_what_origin_has_now(cloned_repo):
 def test_fetch_checkout_is_a_no_op_without_a_remote(repo):
     """`clone_project` calls this even for a from-scratch repository in tests."""
     assert isinstance(fetch_checkout(repo), GitOk)
+
+
+# --- Syncing a worktree with its origin -------------------------------------
+#
+# A branch is set once, when `ensure_worktree` first creates it, and nothing
+# brings it forward after that. Left sitting between planning and approving,
+# it drifts behind whatever its origin has since gained — the same problem
+# the fetch fix above solves for a *new* worktree, but for one that already
+# exists. `sync_worktree` is a fast-forward-only merge: it must never lose
+# work, so every refusal case here matters as much as the happy path.
+
+
+def test_sync_fast_forwards_a_clean_worktree(cloned_repo):
+    origin, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    _commit_more(origin, "new.txt")
+
+    result = sync_worktree(checkout, worktree.path, "main")
+
+    assert isinstance(result, Synced)
+    assert (worktree.path / "new.txt").exists()
+
+
+def test_sync_fetches_first(cloned_repo):
+    """Otherwise it would only ever catch up to whatever the last fetch saw."""
+    origin, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    _commit_more(origin, "new.txt")
+
+    result = sync_worktree(checkout, worktree.path, "main")
+
+    assert isinstance(result, Synced)
+
+
+def test_sync_is_a_harmless_no_op_when_already_current(cloned_repo):
+    _, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+
+    assert isinstance(sync_worktree(checkout, worktree.path, "main"), Synced)
+
+
+def test_sync_refuses_a_dirty_worktree(cloned_repo):
+    """Someone's in-progress work — a button press must never touch it."""
+    origin, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    (worktree.path / "scratch.txt").write_text("not committed\n")
+    _commit_more(origin, "new.txt")
+
+    result = sync_worktree(checkout, worktree.path, "main")
+
+    assert isinstance(result, SyncRefused)
+    assert "uncommitted" in result.message
+    assert (worktree.path / "scratch.txt").exists()
+    assert not (worktree.path / "new.txt").exists()
+
+
+def test_sync_refuses_a_branch_with_its_own_commits(cloned_repo):
+    """Not a fast-forward, and forcing it through would risk losing work."""
+    origin, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    (worktree.path / "own_work.txt").write_text("mine\n")
+    subprocess.run(("git", "add", "."), cwd=worktree.path, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "own work"),
+        cwd=worktree.path,
+        check=True,
+        capture_output=True,
+    )
+    _commit_more(origin, "new.txt")
+
+    result = sync_worktree(checkout, worktree.path, "main")
+
+    assert isinstance(result, SyncRefused)
+    assert "commits of its own" in result.message
+    assert (worktree.path / "own_work.txt").exists()
+
+
+def test_sync_falls_back_to_a_local_only_base(cloned_repo):
+    """A base that names another task's own branch, never pushed to origin."""
+    _, checkout = cloned_repo
+    first = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(first, WorktreeReady)
+    (first.path / "shared.txt").write_text("v1\n")
+    subprocess.run(("git", "add", "."), cwd=first.path, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "v1"),
+        cwd=first.path,
+        check=True,
+        capture_output=True,
+    )
+
+    second = ensure_worktree(checkout, task_id=2, title="y", base_branch=first.branch)
+    assert isinstance(second, WorktreeReady)
+
+    (first.path / "shared.txt").write_text("v2\n")
+    subprocess.run(("git", "add", "."), cwd=first.path, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "v2"),
+        cwd=first.path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = sync_worktree(checkout, second.path, first.branch)
+
+    assert isinstance(result, Synced)
+    assert (second.path / "shared.txt").read_text() == "v2\n"
 
 
 # --- Deriving the checkout ---------------------------------------------------

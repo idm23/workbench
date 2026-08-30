@@ -105,6 +105,15 @@
                   <button class="slim" type="submit">{{ 'Execute' if node.task.entry_phase == 'execute' else 'Plan' }}</button>
                 </form>
               {% endif %}
+              {% if node.task.worktree_path and not (busy and busy.status in ('queued', 'running')) %}
+                {# A branch is set once, when its worktree is first created,
+                   and nothing brings it forward after that — safe to offer
+                   any time nothing is actively writing to the worktree,
+                   since the route itself refuses rather than reconciling. #}
+                <form method="post" action="/tasks/{{ node.task.id }}/sync">
+                  <button class="slim secondary" type="submit">Sync</button>
+                </form>
+              {% endif %}
               <form method="post" action="/tasks/{{ node.task.id }}/delete">
                 <button class="slim secondary" type="submit">Delete</button>
               </form>

@@ -183,13 +183,20 @@ class WorktreeReady:
 type WorktreeResult = WorktreeReady | GitFailed
 
 
-def ensure_worktree(repo: Path, task_id: int, title: str, base_branch: str) -> WorktreeResult:
-    """Create the task's branch and worktree, or return the existing one.
+def _resolve_ref(repo: Path, base_branch: str) -> str:
+    """`origin/<base>` when that ref exists, so work starts from what GitHub
+    has rather than from whatever this clone happens to be sitting on;
+    falls back to the plain name otherwise — a repository with no remote,
+    or a `base_branch` that already names a local-only branch (another
+    task's own, never pushed)."""
+    candidate = f"origin/{base_branch}"
+    if isinstance(_run_git(["rev-parse", "--verify", candidate], cwd=repo), GitFailed):
+        return base_branch
+    return candidate
 
-    Branches from `origin/<base>` when that ref exists so the work starts from
-    what GitHub has rather than from whatever this clone happens to be sitting
-    on, and falls back to the local branch for a repository with no remote.
-    """
+
+def ensure_worktree(repo: Path, task_id: int, title: str, base_branch: str) -> WorktreeResult:
+    """Create the task's branch and worktree, or return the existing one."""
     branch = branch_name(task_id, title)
     path = worktree_path_for(task_id, title)
 
@@ -199,10 +206,7 @@ def ensure_worktree(repo: Path, task_id: int, title: str, base_branch: str) -> W
         return GitFailed(f"{path} exists but is not a worktree. Remove it and retry.")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    start_point = f"origin/{base_branch}"
-    if isinstance(_run_git(["rev-parse", "--verify", start_point], cwd=repo), GitFailed):
-        start_point = base_branch
+    start_point = _resolve_ref(repo, base_branch)
 
     existing_branch = _run_git(["rev-parse", "--verify", branch], cwd=repo)
     if isinstance(existing_branch, GitOk):
@@ -232,6 +236,66 @@ def remove_worktree(repo: Path, path: Path) -> GitResult:
         _run_git(["worktree", "prune"], cwd=repo)
         return GitOk("")
     return result
+
+
+@dataclass(frozen=True)
+class Synced:
+    """The branch is now at (or already was at) the tip of its origin."""
+
+    message: str
+
+
+@dataclass(frozen=True)
+class SyncRefused:
+    """Safe to leave alone rather than force through.
+
+    Either the working tree has uncommitted changes — someone's in-progress
+    work, on a worktree pressing a button should never touch — or the branch
+    has commits of its own, which is not a fast-forward and would need an
+    actual merge or rebase to resolve.
+    """
+
+    message: str
+
+
+type SyncResult = Synced | SyncRefused | GitFailed
+
+
+def sync_worktree(repo: Path, worktree: Path, base_branch: str) -> SyncResult:
+    """Fast-forward a task's branch onto its origin, or refuse.
+
+    A task's branch is created once and never touched again on its own —
+    `ensure_worktree` only looks at `base_branch` the first time a worktree is
+    made. Left long enough between planning and approving, it drifts behind
+    whatever `base_branch` has since gained, which is a problem for exactly
+    the same reason the original stale-clone bug was: an agent working from
+    it does not have what has since landed.
+
+    `git merge --ff-only` is the whole safety mechanism here, not a detail:
+    it succeeds silently when there is nothing to reconcile and fails loudly
+    the moment there is something real to lose, rather than this function
+    having to work out the difference itself.
+    """
+    status = _run_git(["status", "--porcelain"], cwd=worktree)
+    if isinstance(status, GitFailed):
+        return status
+    if status.stdout.strip():
+        return SyncRefused(
+            "This task's worktree has uncommitted changes — commit or discard them first."
+        )
+
+    fetched = fetch_checkout(repo)
+    if isinstance(fetched, GitFailed):
+        return fetched
+
+    ref = _resolve_ref(repo, base_branch)
+    merged = _run_git(["merge", "--ff-only", ref], cwd=worktree)
+    if isinstance(merged, GitFailed):
+        return SyncRefused(
+            f"This task's branch has commits of its own and cannot be fast-forwarded "
+            f"to {base_branch}. Merge or rebase it by hand."
+        )
+    return Synced(merged.stdout)
 
 
 def has_commits(worktree: Path, base_branch: str) -> bool:
