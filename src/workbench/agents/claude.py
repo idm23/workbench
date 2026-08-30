@@ -25,6 +25,7 @@ import claude_agent_sdk
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     ClaudeSDKError,
     CLINotFoundError,
     PermissionMode,
@@ -38,7 +39,6 @@ from claude_agent_sdk import (
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
-    query,
 )
 
 from workbench.agents.protocol import (
@@ -359,29 +359,6 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(**options)
 
 
-async def _prompt_stream(initial: str, inputs: AsyncIterator[str]) -> AsyncIterator[dict[str, Any]]:
-    """The initial prompt, followed by whatever gets typed in later.
-
-    `query()` accepts this shape lazily — confirmed live against the
-    installed SDK, not just its docstring: fed one message up front, it sits
-    waiting; a second one pushed onto the underlying queue minutes later is
-    answered under the same session, and the loop only ends once this
-    generator does. Closing `inputs` (the runner's idle timeout) is what
-    lets a conversation actually finish rather than run forever.
-    """
-    yield {"type": "user", "message": {"role": "user", "content": initial}}
-    async for text in inputs:
-        yield {"type": "user", "message": {"role": "user", "content": text}}
-
-
-def _prompt_for(request: AgentRequest) -> str | AsyncIterator[dict[str, Any]]:
-    """A plain string when nothing can type into this run, exactly as
-    before; the lazy shape only once something actually might."""
-    if request.inputs is None:
-        return request.prompt
-    return _prompt_stream(request.prompt, request.inputs)
-
-
 def _stopped_early(result: ResultMessage) -> bool:
     """Whether the CLI cut the turn short itself, rather than the agent
     choosing to stop. Distinct from an outright error: this is still a
@@ -594,19 +571,58 @@ class ClaudeBackend:
         return read_credential(payload, cli)
 
     async def run(self, request: AgentRequest) -> AgentStream:
-        model: str | None = None
-        result: ResultMessage | None = None
+        """Drive the conversation on one persistent connection, turn by turn.
 
-        try:
-            async for message in query(prompt=_prompt_for(request), options=_options(request)):
+        `query()` — used here until this was found live in production — is
+        documented by the SDK itself as unidirectional: fire everything
+        known upfront, read back everything it produces. It happily accepts
+        an `AsyncIterable` prompt, which is what made it *look* like the
+        right tool for typed follow-ups, but nothing requires the CLI to
+        keep listening once a turn's result has gone out, and in practice it
+        does not: a project conversation got its first reply and then ended
+        on its own, `succeeded`, before anyone had a chance to type a
+        second thing. `ClaudeSDKClient` is the SDK's own answer for exactly
+        this shape — "interactive conversations with follow-ups... send
+        messages based on responses" — connect once, then `query()` /
+        `receive_response()` per turn on the same session for as long as
+        `request.inputs` keeps producing them.
+        """
+        model: str | None = None
+        last_result: ResultMessage | None = None
+
+        async def turn(client: ClaudeSDKClient) -> AsyncIterator[AgentEvent]:
+            nonlocal model, last_result
+            async for message in client.receive_response():
                 if isinstance(message, AssistantMessage) and message.model:
                     # What actually answered, which is what gets recorded —
                     # `request.model` is only ever a preference.
                     model = message.model
                 if isinstance(message, ResultMessage):
-                    result = message
+                    last_result = message
                 for event in translate(message):
                     yield event
+
+        try:
+            async with ClaudeSDKClient(options=_options(request)) as client:
+                await client.query(request.prompt)
+                async for event in turn(client):
+                    yield event
+
+                # Every later message typed into this run, as it arrives —
+                # `request.inputs` is what makes that lazy rather than a fixed
+                # list. Stops pulling from it once a turn has already failed,
+                # since nothing above expects an error partway through a
+                # conversation to be followed by more of it.
+                if request.inputs is not None:
+                    while last_result is not None and not last_result.is_error:
+                        try:
+                            text = await anext(request.inputs)
+                        except StopAsyncIteration:
+                            break
+                        last_result = None
+                        await client.query(text)
+                        async for event in turn(client):
+                            yield event
 
         except CLINotFoundError as exc:
             # Nothing was attempted: the wheel's bundled CLI is missing or
@@ -624,26 +640,27 @@ class ClaudeBackend:
             yield AgentFailed(f"The agent failed: {exc}", model=model)
             return
 
-        if result is None:
-            # The stream ended without the SDK's final message. Whatever the
-            # agent did is still in the worktree, so this is a failed run and
-            # not an unavailable one.
+        if last_result is None:
+            # The stream ended without the SDK's final message for its last
+            # turn. Whatever the agent did is still in the worktree, so this
+            # is a failed run and not an unavailable one.
             yield AgentFailed("The agent stopped without reporting a result.", model=model)
             return
 
         is_plan = request.phase is RunPhase.PLAN
         finished = AgentFinished(
-            text=_plan_text(result) if is_plan else (result.result or ""),
-            resume_token=result.session_id,
+            text=_plan_text(last_result) if is_plan else (last_result.result or ""),
+            resume_token=last_result.session_id,
             model=model,
-            total_cost_usd=result.total_cost_usd,
-            num_turns=result.num_turns,
-            proposed_subtasks=_proposed_subtasks(result) if is_plan else None,
-            stopped_early=_stopped_early(result),
+            total_cost_usd=last_result.total_cost_usd,
+            num_turns=last_result.num_turns,
+            proposed_subtasks=_proposed_subtasks(last_result) if is_plan else None,
+            stopped_early=_stopped_early(last_result),
         )
-        if result.is_error:
+        if last_result.is_error:
             yield AgentFailed(
-                message=result.result or f"The agent reported an error ({result.subtype}).",
+                message=last_result.result
+                or f"The agent reported an error ({last_result.subtype}).",
                 resume_token=finished.resume_token,
                 model=finished.model,
                 total_cost_usd=finished.total_cost_usd,
