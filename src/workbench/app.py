@@ -34,9 +34,16 @@ from workbench.git.github import (
     parse_repo_reference,
 )
 from workbench.git.revision import head_revision
-from workbench.git.worktrees import Cloned, clone_project, local_checkout
+from workbench.git.worktrees import (
+    Cloned,
+    Synced,
+    SyncRefused,
+    clone_project,
+    local_checkout,
+    sync_worktree,
+)
 from workbench.runs.activity import activity_by_task
-from workbench.runs.lifecycle import NotCancellable, cancel_run, start_run
+from workbench.runs.lifecycle import NotCancellable, active_run_for_task, cancel_run, start_run
 from workbench.runs.rate_limits import latest_readings
 from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.tasks import (
@@ -50,7 +57,7 @@ from workbench.tasks import (
 from workbench.tasks import (
     delete_task as delete_task_and_children,
 )
-from workbench.tasks.origin import InvalidOrigin, origin_choices, resolve_origin
+from workbench.tasks.origin import InvalidOrigin, origin_branch_for, origin_choices, resolve_origin
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -415,6 +422,40 @@ def approve_plan(db: DbSession, run_id: int) -> RedirectResponse:
     if isinstance(result, Run):
         return _redirect(target, notice=f"Run {result.id} started (execute).")
     return _redirect(target, error=result.message)
+
+
+@app.post("/tasks/{task_id}/sync")
+def sync_task(db: DbSession, task_id: int) -> RedirectResponse:
+    """Fast-forward a task's branch onto its origin, from a phone.
+
+    A task's branch is set once, when its worktree is first created, and
+    nothing brings it forward after that — so a task left sitting between
+    planning and approval quietly falls behind whatever its origin has since
+    gained. This is the fix that does not need a terminal: refuses rather
+    than reconciling, exactly like the checks a deploy already makes.
+    """
+    task = _get_task_or_404(db, task_id)
+    target = f"/projects/{task.project_id}"
+
+    if task.worktree_path is None:
+        return _redirect(target, error="This task has no worktree yet.")
+
+    if active_run_for_task(db, task.id) is not None:
+        return _redirect(target, error="Wait for the run in progress to finish first.")
+
+    checkout = local_checkout(task.project.owner, task.project.repo)
+    if checkout is None:
+        return _redirect(
+            target, error=f"{task.project.owner}/{task.project.repo} is not cloned here."
+        )
+
+    base_branch = origin_branch_for(task)
+    result = sync_worktree(checkout, Path(task.worktree_path), base_branch)
+    if isinstance(result, Synced):
+        return _redirect(target, notice=f"Synced with {base_branch}.")
+    if isinstance(result, SyncRefused):
+        return _redirect(target, error=result.message)
+    return _redirect(target, error=f"{result.message} {result.stderr}".strip())
 
 
 @app.post("/runs/{run_id}/cancel")
