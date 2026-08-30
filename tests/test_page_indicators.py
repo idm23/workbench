@@ -246,6 +246,28 @@ def test_a_finished_run_leaves_no_marker(client, session):
     assert 'class="pip"' not in project_page(client, session)
 
 
+def test_a_failed_run_is_marked_and_offers_a_retry(client, session):
+    """A run that failed for a reason unrelated to the work — a rate limit,
+    a dropped connection — still has a resume token worth not losing."""
+    a_run(session, status=RunStatus.FAILED, phase=RunPhase.EXECUTE)
+
+    page = project_page(client, session)
+
+    assert "failed</a>" in _squashed(page)
+    assert 'class="status failed"' in page
+    assert ">Retry<" in page
+
+
+def test_retrying_a_failed_run_uses_its_own_phase(client, session):
+    """Not "plan" by default — a failed execute run should retry execute."""
+    a_run(session, status=RunStatus.FAILED, phase=RunPhase.EXECUTE)
+
+    page = project_page(client, session)
+
+    i = page.find(">Retry<")
+    assert 'value="execute"' in page[max(0, i - 300) : i]
+
+
 def test_only_the_task_being_worked_is_marked(client, session):
     a_run(session, title="Write the runner", status=RunStatus.RUNNING)
 

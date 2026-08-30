@@ -17,11 +17,14 @@ from sqlalchemy.orm import Session
 
 from workbench.database.models import Run, RunPhase, RunStatus, Task
 
-#: Statuses worth marking. The two active ones because work is happening, and
+#: Statuses worth marking. The two active ones because work is happening,
 #: `awaiting_review` because a plan nobody has looked at is the state most
 #: likely to be forgotten — it is waiting on a person, and nothing else on the
-#: page says so.
-MARKED_STATUSES = (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.AWAITING_REVIEW)
+#: page says so — and `failed` for the same reason from the other direction: a
+#: run that failed for a reason that has nothing to do with the work itself
+#: (a rate-limit window, a dropped connection) still has a resume token worth
+#: not losing, and the button to use it should be right where the run was.
+MARKED_STATUSES = (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.AWAITING_REVIEW, RunStatus.FAILED)
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,8 @@ class TaskActivity:
             return "queued"
         if self.status is RunStatus.AWAITING_REVIEW:
             return "review"
+        if self.status is RunStatus.FAILED:
+            return "failed"
         return "planning" if self.phase is RunPhase.PLAN else "working"
 
     @property
@@ -66,6 +71,12 @@ class TaskActivity:
 
     @property
     def needs_attention(self) -> bool:
+        """Specifically: there is a plan waiting to be approved.
+
+        `failed` also wants a person, but a different action (retry, not
+        approve) — kept as its own check on `status` at the call site rather
+        than folded in here, so this keeps meaning exactly one thing.
+        """
         return self.status is RunStatus.AWAITING_REVIEW
 
 
