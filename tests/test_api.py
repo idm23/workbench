@@ -11,12 +11,37 @@ it.
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from workbench.app import app
 from workbench.database.db import get_db, make_engine
 from workbench.database.models import Base, Project, Run, RunOutcome, RunPhase, Task, User
 from workbench.runs.store import create_run, mark_running
+
+#: Module state rather than a second fixture: only a couple of tests need to
+#: set up a `Run` directly (there is no HTTP route to create one), and a
+#: second fixture just for them would be more machinery than the need
+#: warrants. Set for the life of one `client` fixture at a time.
+_engine: Engine | None = None
+
+
+def _db() -> Session:
+    """A session against the same engine the app under test is reading."""
+    assert _engine is not None, "the client fixture must be active"
+    return Session(_engine)
+
+
+def _task(db: Session, task_id: int) -> Task:
+    task = db.get(Task, task_id)
+    assert task is not None
+    return task
+
+
+def _run(db: Session, run_id: int) -> Run:
+    run = db.get(Run, run_id)
+    assert run is not None
+    return run
 
 
 @pytest.fixture
@@ -27,6 +52,8 @@ def client(tmp_path, monkeypatch):
     and that answer comes from the filesystem, so a stray clone in the real
     data directory would otherwise leak into these results.
     """
+    global _engine
+
     monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "test.db"))
     engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
     Base.metadata.create_all(engine)
@@ -50,13 +77,11 @@ def client(tmp_path, monkeypatch):
         )
         setup.commit()
 
+    _engine = engine
     with TestClient(app) as client:
-        # Attached rather than exposed as a second fixture: a couple of tests
-        # need to set up a `Run` directly, which has no HTTP route of its own
-        # to create one, and this shares the same engine the app is reading.
-        client.engine = engine
         yield client
 
+    _engine = None
     app.dependency_overrides.clear()
 
 
@@ -203,20 +228,20 @@ def test_a_ready_subtask_sets_entry_phase_to_execute(client):
         json={"title": "child", "ready_to_execute": True},
     )
 
-    with Session(client.engine) as db:
+    with _db() as db:
         child = db.query(Task).filter_by(title="child").one()
         assert child.entry_phase is RunPhase.EXECUTE
 
 
 def test_a_subtask_defaults_its_origin_to_the_parents_branch(client):
     parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
-    with Session(client.engine) as db:
-        db.get(Task, parent["id"]).branch = "workbench/task-1-parent"
+    with _db() as db:
+        _task(db, parent["id"]).branch = "workbench/task-1-parent"
         db.commit()
 
     client.post(f"/api/tasks/{parent['id']}/subtasks", json={"title": "child"})
 
-    with Session(client.engine) as db:
+    with _db() as db:
         child = db.query(Task).filter_by(title="child").one()
         assert child.origin_ref == f"task:{parent['id']}"
 
@@ -226,7 +251,7 @@ def test_a_subtask_under_an_unbranched_parent_has_no_origin_set(client):
 
     client.post(f"/api/tasks/{parent['id']}/subtasks", json={"title": "child"})
 
-    with Session(client.engine) as db:
+    with _db() as db:
         child = db.query(Task).filter_by(title="child").one()
         assert child.origin_ref is None
 
@@ -245,8 +270,8 @@ def _running_execute_run(client, task_id: int) -> int:
     executor, which is out of scope here — these tests are about the
     outcome endpoint's own validation, not the run lifecycle.
     """
-    with Session(client.engine) as db:
-        run = create_run(db, db.get(Task, task_id), RunPhase.EXECUTE, backend="fake")
+    with _db() as db:
+        run = create_run(db, _task(db, task_id), RunPhase.EXECUTE, backend="fake")
         mark_running(db, run)
         return run.id
 
@@ -261,8 +286,8 @@ def test_an_outcome_is_recorded_on_the_run(client):
     )
 
     assert response.status_code == 204
-    with Session(client.engine) as db:
-        run = db.get(Run, run_id)
+    with _db() as db:
+        run = _run(db, run_id)
         assert run.agent_outcome is RunOutcome.NEEDS_REPLANNING
         assert run.outcome_detail == "stuck"
 
@@ -278,8 +303,8 @@ def test_an_invalid_outcome_value_is_rejected(client):
 
 def test_an_outcome_for_a_non_running_run_is_rejected(client):
     task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
-    with Session(client.engine) as db:
-        run = create_run(db, db.get(Task, task["id"]), RunPhase.EXECUTE, backend="fake")
+    with _db() as db:
+        run = create_run(db, _task(db, task["id"]), RunPhase.EXECUTE, backend="fake")
         run_id = run.id
 
     response = client.post(f"/api/runs/{run_id}/outcome", json={"outcome": "finished"})
@@ -290,8 +315,8 @@ def test_an_outcome_for_a_non_running_run_is_rejected(client):
 
 def test_an_outcome_for_a_plan_run_is_rejected(client):
     task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
-    with Session(client.engine) as db:
-        run = create_run(db, db.get(Task, task["id"]), RunPhase.PLAN, backend="fake")
+    with _db() as db:
+        run = create_run(db, _task(db, task["id"]), RunPhase.PLAN, backend="fake")
         mark_running(db, run)
         run_id = run.id
 
