@@ -147,6 +147,25 @@ def max_concurrent_runs() -> int:
         return DEFAULT_MAX_CONCURRENT_RUNS
 
 
+#: How long a run keeps listening for something typed into it after it has
+#: gone quiet — no new input, no agent output either. Long enough that
+#: reading a long reply and typing a reply of your own is not a race; short
+#: enough that an abandoned run does not squat a concurrency slot or a
+#: rate-limit window until the outer systemd unit timeout finally kills it.
+DEFAULT_INPUT_IDLE_SECONDS = 300
+
+
+def input_idle_seconds() -> int:
+    raw = os.environ.get("WORKBENCH_INPUT_IDLE_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_INPUT_IDLE_SECONDS
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("WORKBENCH_INPUT_IDLE_SECONDS is not a number: %r", raw)
+        return DEFAULT_INPUT_IDLE_SECONDS
+
+
 #: Credential variables that switch a backend from a subscription to
 #: metered API billing. Named here rather than inside a backend because the
 #: choice is Workbench's, and the next backend will have its own spelling of

@@ -8,9 +8,12 @@ module and their behaviour is pinned here rather than in any one caller.
 from workbench.database.models import RunEvent, RunEventKind, RunOutcome, RunPhase, RunStatus
 from workbench.runs.store import (
     append_event,
+    append_input,
     create_run,
+    fetch_new_inputs,
     finish_run,
     mark_running,
+    next_input_seq,
     next_seq,
     record_launch,
     report_outcome,
@@ -139,3 +142,40 @@ def test_reporting_an_outcome_with_no_detail_leaves_it_unset(db, run):
 
     assert run.agent_outcome is RunOutcome.FINISHED
     assert run.outcome_detail is None
+
+
+# --- Typing into a run that is still going ----------------------------------
+
+
+def test_input_sequence_numbers_start_at_one_and_increase(db, run):
+    first = append_input(db, run.id, "hello")
+    second = append_input(db, run.id, "again")
+
+    assert (first.seq, second.seq) == (1, 2)
+
+
+def test_input_and_event_sequences_are_independent(db, run):
+    """Different tables, different readers — neither should skip numbers
+    because the other one wrote something."""
+    append_event(db, run.id, RunEventKind.TEXT, {"text": "a"})
+    append_input(db, run.id, "hello")
+
+    assert next_seq(db, run.id) == 2
+    assert next_input_seq(db, run.id) == 2
+
+
+def test_fetch_new_inputs_resumes_from_the_given_sequence(db, run):
+    append_input(db, run.id, "first")
+    second = append_input(db, run.id, "second")
+    third = append_input(db, run.id, "third")
+
+    resumed = fetch_new_inputs(db, run.id, after_seq=1)
+
+    assert [row.body for row in resumed] == ["second", "third"]
+    assert [row.seq for row in resumed] == [second.seq, third.seq]
+
+
+def test_fetch_new_inputs_is_empty_when_there_is_nothing_new(db, run):
+    append_input(db, run.id, "already delivered")
+
+    assert fetch_new_inputs(db, run.id, after_seq=1) == []

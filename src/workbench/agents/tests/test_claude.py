@@ -9,6 +9,7 @@ files, cannot commit them, and burns its turn limit retrying.
 `query` is stubbed throughout: no subprocess, no credential, no cost.
 """
 
+import asyncio
 import json
 import subprocess
 from collections.abc import AsyncIterator
@@ -317,6 +318,52 @@ def test_the_run_and_task_ids_reach_the_environment(monkeypatch):
         "WORKBENCH_TASK_ID": "7",
         "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
     }
+
+
+async def _drain_prompt(prompt) -> list[dict[str, Any]]:
+    return [item async for item in prompt]
+
+
+def test_no_input_channel_leaves_the_prompt_a_plain_string(monkeypatch):
+    """Unchanged from before typed input existed at all — nothing wired up
+    means byte-for-byte the same behaviour."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(prompt="Do the thing")))
+
+    assert captured["prompt"] == "Do the thing"
+
+
+def test_typed_input_wraps_the_prompt_as_a_lazy_stream(monkeypatch):
+    async def one_more_message():
+        yield "a follow-up"
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(prompt="Do the thing", inputs=one_more_message())))
+
+    assert not isinstance(captured["prompt"], str)
+    sent = asyncio.run(_drain_prompt(captured["prompt"]))
+    assert sent == [
+        {"type": "user", "message": {"role": "user", "content": "Do the thing"}},
+        {"type": "user", "message": {"role": "user", "content": "a follow-up"}},
+    ]
+
+
+def test_an_input_channel_with_nothing_new_still_sends_the_initial_prompt(monkeypatch):
+    async def nothing_more():
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "query", stub_query([a_result()], captured))
+
+    drain(ClaudeBackend().run(a_request(prompt="Do the thing", inputs=nothing_more())))
+
+    sent = asyncio.run(_drain_prompt(captured["prompt"]))
+    assert sent == [{"type": "user", "message": {"role": "user", "content": "Do the thing"}}]
 
 
 def test_execute_loads_the_outcome_skill(monkeypatch):

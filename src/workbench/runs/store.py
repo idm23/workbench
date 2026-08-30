@@ -23,6 +23,7 @@ from workbench.database.models import (
     Run,
     RunEvent,
     RunEventKind,
+    RunInput,
     RunOutcome,
     RunPhase,
     RunStatus,
@@ -76,6 +77,47 @@ def append_event(
     db.add(event)
     db.commit()
     return event
+
+
+def next_input_seq(db: Session, run_id: int) -> int:
+    """The next sequence number for a run's typed-input queue.
+
+    A separate counter from `next_seq`: `run_inputs` and `run_events` are
+    different tables with different readers, and numbering them together
+    would make neither sequence dense — the runner's poll and the browser's
+    replay each need their own gapless count.
+    """
+    highest = db.scalar(select(func.max(RunInput.seq)).where(RunInput.run_id == run_id))
+    return (highest or 0) + 1
+
+
+def append_input(db: Session, run_id: int, body: str) -> RunInput:
+    """Queue a message for the runner to deliver, committed immediately.
+
+    Committed for the same reason `append_event` is: the runner polls this
+    table from an entirely different process, and an uncommitted row is
+    invisible to it.
+    """
+    row = RunInput(run_id=run_id, seq=next_input_seq(db, run_id), body=body)
+    db.add(row)
+    db.commit()
+    return row
+
+
+def fetch_new_inputs(db: Session, run_id: int, after_seq: int) -> list[RunInput]:
+    """Everything typed into this run after `after_seq`, in order.
+
+    The runner's poll loop calls this with the last sequence number it has
+    already delivered, exactly how the browser's SSE replay resumes from
+    `Last-Event-ID` against `run_events`.
+    """
+    return list(
+        db.scalars(
+            select(RunInput)
+            .where(RunInput.run_id == run_id, RunInput.seq > after_seq)
+            .order_by(RunInput.seq)
+        ).all()
+    )
 
 
 def record_launch(db: Session, run: Run, executor: str, handle: str) -> Run:

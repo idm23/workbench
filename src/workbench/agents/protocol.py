@@ -70,6 +70,13 @@ class AgentRequest:
     run_id: int = 0
     task_id: int = 0
 
+    #: Messages typed into this run after it started, delivered lazily as
+    #: they arrive rather than handed over all at once — the whole point is
+    #: that they can keep coming while the backend is already working.
+    #: `None` for a request nothing wired this up for, which behaves exactly
+    #: as if no one ever types anything: `prompt` alone, unchanged.
+    inputs: AsyncIterator[str] | None = None
+
 
 @dataclass(frozen=True)
 class SubtaskProposal:

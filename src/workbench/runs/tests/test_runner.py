@@ -526,6 +526,137 @@ def test_prepare_does_not_refetch_once_a_worktree_already_exists(
     assert calls == []
 
 
+# --- Typing into a run while it goes ----------------------------------------
+
+
+def test_watch_for_input_delivers_a_message_inserted_after_it_starts(db, run, monkeypatch):
+    import contextlib
+
+    from workbench.runs.store import append_input
+
+    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.01)
+
+    async def scenario():
+        activity = runner_module._Activity()
+        watcher = runner_module._watch_for_input(db, run.id, activity, idle_seconds=1)
+        received = []
+
+        async def consume():
+            async for body in watcher:
+                received.append(body)
+
+        task = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.05)
+        append_input(db, run.id, "actually, also check the tests")
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return received
+
+    assert asyncio.run(scenario()) == ["actually, also check the tests"]
+
+
+def test_watch_for_input_touches_activity_when_something_arrives(db, run, monkeypatch):
+    from workbench.runs.store import append_input
+
+    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.01)
+
+    async def scenario():
+        activity = runner_module._Activity()
+        stale = activity.last
+        append_input(db, run.id, "hello")
+        watcher = runner_module._watch_for_input(db, run.id, activity, idle_seconds=1)
+        body = await watcher.__anext__()
+        return body, stale, activity.last
+
+    body, stale, touched = asyncio.run(scenario())
+    assert body == "hello"
+    assert touched > stale
+
+
+def test_watch_for_input_stops_once_nothing_has_happened_for_a_while(db, run, monkeypatch):
+    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.01)
+
+    async def scenario():
+        activity = runner_module._Activity()
+        activity.last -= 10  # already well past any idle window
+        watcher = runner_module._watch_for_input(db, run.id, activity, idle_seconds=0.05)
+        return [body async for body in watcher]
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_watch_for_input_does_not_miss_a_row_committed_near_the_idle_deadline(
+    db, run, data_dir, monkeypatch
+):
+    """Regression for a real race: checking the idle deadline *before*
+    fetching could let a row committed through a genuinely separate
+    connection, just as the window was closing, go unseen even though it
+    arrived while this loop was still going to look — found by an actual
+    concurrent smoke test, not assumed safe from a single-session test.
+    """
+    import threading
+    import time as time_module
+
+    from sqlalchemy.orm import Session as SessionCls
+
+    from workbench.database.db import make_engine
+    from workbench.runs.store import append_input
+
+    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.1)
+    other_engine = make_engine(f"sqlite+pysqlite:///{data_dir / 'workbench.db'}")
+
+    def post_from_a_separate_connection():
+        # Lands squarely between the poll ticks at .1 and .2 — comfortable
+        # margin either side against scheduling jitter.
+        time_module.sleep(0.12)
+        with SessionCls(other_engine) as other_db:
+            append_input(other_db, run.id, "from elsewhere")
+
+    threading.Thread(target=post_from_a_separate_connection, daemon=True).start()
+
+    async def scenario():
+        activity = runner_module._Activity()
+        watcher = runner_module._watch_for_input(db, run.id, activity, idle_seconds=0.15)
+        return [body async for body in watcher]
+
+    assert asyncio.run(scenario()) == ["from elsewhere"]
+
+
+class InputCapturingBackend:
+    """A fake that actually drains `request.inputs`, unlike the usual
+    `FakeBackend`, which is what makes it possible to prove a typed message
+    reaches the backend at all rather than just that the plumbing compiles."""
+
+    name = "fake"
+
+    def __init__(self, outcome):
+        self._outcome = outcome
+        self.received: list[str] = []
+
+    async def run(self, request):
+        if request.inputs is not None:
+            async for text in request.inputs:
+                self.received.append(text)
+        yield self._outcome
+
+
+def test_a_typed_message_reaches_the_backend_through_a_real_run(db, run, checkout, monkeypatch):
+    from workbench.runs.store import append_input
+
+    append_input(db, run.id, "actually, also check the tests")
+    fake = InputCapturingBackend(AgentFinished(text="done"))
+    monkeypatch.setattr(runner_module, "get_backend", lambda _n: fake)
+    monkeypatch.setattr(runner_module, "input_idle_seconds", lambda: 0.3)
+    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.02)
+
+    execute(db, run)
+
+    assert fake.received == ["actually, also check the tests"]
+    assert run.status is RunStatus.SUCCEEDED
+
+
 # --- The entry point -------------------------------------------------------
 
 
