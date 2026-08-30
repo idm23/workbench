@@ -37,11 +37,20 @@ from workbench.agents.protocol import (
     AgentRequest,
     AgentUnavailable,
     Backend,
+    SubtaskProposal,
 )
 from workbench.agents.registry import UnknownBackend, get_backend
 from workbench.config import agent_environment, billing_mode
 from workbench.database.db import session_scope
-from workbench.database.models import Run, RunEventKind, RunPhase, RunStatus, Task
+from workbench.database.models import (
+    Run,
+    RunEventKind,
+    RunOutcome,
+    RunPhase,
+    RunStatus,
+    Task,
+    TaskStatus,
+)
 from workbench.git.worktrees import (
     GitFailed,
     diffstat,
@@ -185,6 +194,8 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
             prompt=prompt_for(run.phase, task.title, task.body),
             resume_token=resume_token_for(db, task, run.backend),
             model=run.model,
+            run_id=run.id,
+            task_id=task.id,
         ),
     )
 
@@ -247,12 +258,30 @@ def _worktree_diffstat(worktree: Path, base_branch: str) -> str:
     return f"{committed}\nUncommitted:\n{pending}".strip()
 
 
+def _serialize_subtasks(proposals: list[SubtaskProposal] | None) -> dict | None:
+    """A plan's proposed decomposition, in the shape the `proposed_subtasks`
+    JSON column stores and the approve route later reads back."""
+    if not proposals:
+        return None
+    return {
+        "subtasks": [
+            {"title": p.title, "body": p.body, "ready_to_execute": p.ready_to_execute}
+            for p in proposals
+        ]
+    }
+
+
 def record(db: Session, run: Run, ending: Ending) -> Run:
     """Translate how the agent ended into how the run ended.
 
     The plan phase stopping at `awaiting_review` rather than `succeeded` is the
     plan/execute split doing its job: the run is over, the task is not, and a
     person decides which.
+
+    An execute run's *task*-level outcome comes from `run.agent_outcome`
+    (written live, mid-run, through the outcome API) rather than from whether
+    the backend process merely exited without crashing — see the module
+    docstring on `runs.store.report_outcome`.
     """
     task = run.task
     base_branch = origin_branch_for(task)
@@ -269,9 +298,68 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
                 model=ending.model,
                 total_cost_usd=ending.total_cost_usd,
                 num_turns=ending.num_turns,
+                proposed_subtasks=_serialize_subtasks(ending.proposed_subtasks),
+            )
+
+        case AgentFinished() if run.agent_outcome is RunOutcome.NEEDS_REPLANNING:
+            task.status = TaskStatus.BLOCKED
+            return finish_run(
+                db,
+                run,
+                RunStatus.AWAITING_REVIEW,
+                summary=ending.text,
+                diffstat=_worktree_diffstat(worktree, base_branch) if worktree else None,
+                resume_token=ending.resume_token,
+                model=ending.model,
+                total_cost_usd=ending.total_cost_usd,
+                num_turns=ending.num_turns,
+            )
+
+        case AgentFinished() if run.agent_outcome is RunOutcome.FAILED:
+            task.status = TaskStatus.BLOCKED
+            return finish_run(
+                db,
+                run,
+                RunStatus.FAILED,
+                summary=ending.text,
+                error=run.outcome_detail or "The agent reported that this task failed.",
+                diffstat=_worktree_diffstat(worktree, base_branch) if worktree else None,
+                resume_token=ending.resume_token,
+                model=ending.model,
+                total_cost_usd=ending.total_cost_usd,
+                num_turns=ending.num_turns,
             )
 
         case AgentFinished():
+            # Either explicitly "finished", or the agent never called the
+            # outcome API at all. Treating every clean process exit as
+            # success would auto-close a task the agent silently left
+            # unfinished — hitting the turn limit still yields AgentFinished
+            # — so DONE requires an explicit report, and a stopped-early
+            # report is distrusted even when it says "finished".
+            if run.agent_outcome is RunOutcome.FINISHED and not ending.stopped_early:
+                task.status = TaskStatus.DONE
+            elif run.agent_outcome is RunOutcome.FINISHED:
+                append_event(
+                    db,
+                    run.id,
+                    RunEventKind.NOTICE,
+                    {
+                        "text": "The agent reported finishing, but the run was cut off "
+                        "first (e.g. it ran out of turns) — the task's status was "
+                        "left unchanged."
+                    },
+                )
+            elif run.agent_outcome is None:
+                append_event(
+                    db,
+                    run.id,
+                    RunEventKind.NOTICE,
+                    {
+                        "text": "The agent did not report an outcome — the task's "
+                        "status was left unchanged."
+                    },
+                )
             return finish_run(
                 db,
                 run,

@@ -129,6 +129,20 @@ _TERMINAL_RUN_STATUSES = frozenset({RunStatus.SUCCEEDED, RunStatus.FAILED, RunSt
 _ACTIVE_RUN_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
 
 
+class RunOutcome(StrEnum):
+    """What the agent itself reported through the live outcome API.
+
+    Distinct from `RunStatus`: a backend process can exit cleanly
+    (`AgentFinished`) while the agent reports that the task actually needs
+    re-planning or failed outright, and `record()` maps the two together
+    rather than treating "the process didn't crash" as "it succeeded".
+    """
+
+    FINISHED = "finished"
+    FAILED = "failed"
+    NEEDS_REPLANNING = "needs_replanning"
+
+
 def _stored_values(enum_type: type[StrEnum]) -> list[str]:
     """Persist enum *values*, not member names.
 
@@ -252,6 +266,20 @@ class Task(Base):
     # it names is already fixed and nothing re-reads this to change it.
     origin_ref: Mapped[str | None] = mapped_column(String(300), default=None)
 
+    # What phase this task's *first* run should be. Unset means today's only
+    # behaviour, plan first. Set to execute when a plan's decomposition
+    # judged a subtask already fully specified — see workbench.tasks.store.
+    entry_phase: Mapped[RunPhase | None] = mapped_column(
+        Enum(
+            RunPhase,
+            native_enum=False,
+            create_constraint=False,
+            length=20,
+            values_callable=_stored_values,
+        ),
+        default=None,
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -352,6 +380,32 @@ class Run(Base):
     diffstat: Mapped[str | None] = mapped_column(Text, default=None)
     pr_url: Mapped[str | None] = mapped_column(String(500), default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # What the agent itself reported happened, via the live outcome API —
+    # distinct from whether the backend process merely exited without
+    # crashing. Read once, by runs.runner.record(). Null means the agent
+    # never called it.
+    agent_outcome: Mapped[RunOutcome | None] = mapped_column(
+        Enum(
+            RunOutcome,
+            native_enum=False,
+            create_constraint=False,
+            length=20,
+            values_callable=_stored_values,
+        ),
+        default=None,
+    )
+
+    # The agent's own one-line explanation for `agent_outcome`, for
+    # `failed`/`needs_replanning`. Kept apart from `error` (reserved for an
+    # actual crash) because `needs_replanning` is an expected, unalarming
+    # outcome and must not render with `error`'s red styling.
+    outcome_detail: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # A plan run's proposed decomposition, from structured output:
+    # {"subtasks": [{"title", "body", "ready_to_execute"}, ...]}. Consumed
+    # once, by the approve route, then left as a record of what was proposed.
+    proposed_subtasks: Mapped[dict | None] = mapped_column(JSON, default=None)
 
     # Reported by the backend on completion, where it reports them at all — a
     # locally hosted model will leave cost null rather than zero. Recorded now

@@ -62,6 +62,28 @@ class AgentRequest:
     #: outcome, because that is what gets recorded.
     model: str | None = None
 
+    #: Plain identifiers, not a vendor shape — a backend that can call back
+    #: into Workbench's own API (the live outcome report, a subtask spun off
+    #: mid-execute) needs to say which run and task it is. Never parsed by
+    #: anything above the seam; only a backend turns them into whatever a
+    #: running agent can actually see (an environment variable, say).
+    run_id: int = 0
+    task_id: int = 0
+
+
+@dataclass(frozen=True)
+class SubtaskProposal:
+    """One piece of a plan's proposed decomposition.
+
+    `ready_to_execute` is the plan's own judgement that this piece is fully
+    specified — the resulting task's `entry_phase` starts at execute rather
+    than plan when true, skipping a planning pass the plan itself already did.
+    """
+
+    title: str
+    body: str
+    ready_to_execute: bool = False
+
 
 @dataclass(frozen=True)
 class AgentFinished:
@@ -77,6 +99,17 @@ class AgentFinished:
     model: str | None = None
     total_cost_usd: float | None = None
     num_turns: int | None = None
+
+    #: A plan run's proposed subtasks, from structured output. Always `None`
+    #: for an execute run — decomposition is a plan-phase concept.
+    proposed_subtasks: list[SubtaskProposal] | None = None
+
+    #: True when the backend cut the conversation short itself — hitting the
+    #: turn limit, say — rather than the agent choosing to stop. Distinct from
+    #: whether the process crashed: this is still `AgentFinished`, just not
+    #: trustworthy as a genuine "I'm done", which is why a self-reported
+    #: `finished` outcome is distrusted when this is true.
+    stopped_early: bool = False
 
 
 @dataclass(frozen=True)

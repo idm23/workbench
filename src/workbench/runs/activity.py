@@ -31,6 +31,14 @@ class TaskActivity:
     run_id: int
     phase: RunPhase
     status: RunStatus
+    #: A plan run's proposed decomposition, when there is one. Carried here
+    #: rather than fetched separately so the page can decide "Execute" vs
+    #: "Approve & create N subtasks" without a second query per row.
+    proposed_subtasks: dict | None = None
+
+    @property
+    def proposed_subtask_count(self) -> int:
+        return len((self.proposed_subtasks or {}).get("subtasks", []))
 
     @property
     def label(self) -> str:
@@ -69,7 +77,7 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
     state the page is describing.
     """
     rows = db.execute(
-        select(Run.id, Run.task_id, Run.phase, Run.status)
+        select(Run.id, Run.task_id, Run.phase, Run.status, Run.proposed_subtasks)
         .join(Task, Task.id == Run.task_id)
         .where(Task.project_id == project_id, Run.status.in_(MARKED_STATUSES))
         .order_by(Run.id)
@@ -77,6 +85,8 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
 
     # Ascending, so a later row overwrites an earlier one and the newest wins.
     return {
-        task_id: TaskActivity(run_id=run_id, phase=phase, status=status)
-        for run_id, task_id, phase, status in rows
+        task_id: TaskActivity(
+            run_id=run_id, phase=phase, status=status, proposed_subtasks=proposed_subtasks
+        )
+        for run_id, task_id, phase, status, proposed_subtasks in rows
     }

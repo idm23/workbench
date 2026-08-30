@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 from workbench.api import router as api_router
 from workbench.config import instance
 from workbench.database.db import get_db
-from workbench.database.models import Project, Run, RunPhase, Task, TaskStatus, User
+from workbench.database.models import Project, Run, RunPhase, RunStatus, Task, TaskStatus, User
 from workbench.doctor import page_warnings
 from workbench.git.github import (
     InvalidReference,
@@ -42,6 +42,7 @@ from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.tasks import (
     WrongProject,
     build_tree,
+    create_subtask,
     create_task,
     flatten,
     set_status,
@@ -374,6 +375,45 @@ def start_task_run(
     result = start_run(db, task, chosen)
     if isinstance(result, Run):
         return _redirect(target, notice=f"Run {result.id} started ({chosen.value}).")
+    return _redirect(target, error=result.message)
+
+
+@app.post("/runs/{run_id}/approve")
+def approve_plan(db: DbSession, run_id: int) -> RedirectResponse:
+    """Act on a reviewed plan: create what it proposed, or carry it out.
+
+    The one button a plan run's `awaiting_review` state has been missing —
+    without it, approving a plan and starting the execute phase was never
+    actually reachable from the page. What it does depends on what the plan
+    itself decided: a decomposition creates the subtasks it proposed, and
+    nothing else — either happens once you have a chance to see it, the
+    same "look before it runs" a plan run's whole existence is for.
+    """
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    task = run.task
+    target = f"/projects/{task.project_id}"
+
+    if run.phase is not RunPhase.PLAN or run.status is not RunStatus.AWAITING_REVIEW:
+        return _redirect(target, error=f"Run {run_id} has no plan awaiting approval.")
+
+    proposed = (run.proposed_subtasks or {}).get("subtasks", [])
+    if proposed:
+        for subtask in proposed:
+            create_subtask(
+                db,
+                task,
+                title=subtask["title"],
+                body=subtask.get("body"),
+                ready_to_execute=bool(subtask.get("ready_to_execute")),
+            )
+        return _redirect(target, notice=f"Created {len(proposed)} subtask(s) from the plan.")
+
+    result = start_run(db, task, RunPhase.EXECUTE)
+    if isinstance(result, Run):
+        return _redirect(target, notice=f"Run {result.id} started (execute).")
     return _redirect(target, error=result.message)
 
 
