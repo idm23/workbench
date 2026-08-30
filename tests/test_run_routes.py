@@ -389,6 +389,71 @@ def test_approving_a_missing_run_is_a_404(client, session):
     assert client.post("/runs/999/approve").status_code == 404
 
 
+# --- Syncing a worktree with its origin -------------------------------------
+
+
+def test_syncing_a_task_with_no_worktree_is_refused(client, session):
+    response = client.post(f"/tasks/{a_task(session).id}/sync")
+
+    assert "no+worktree" in response.headers["location"]
+
+
+def test_syncing_while_a_run_is_active_is_refused(client, session, executor):
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "plan"})
+
+    response = client.post(f"/tasks/{task.id}/sync")
+
+    assert "in+progress" in response.headers["location"]
+
+
+def test_syncing_an_uncloned_project_is_refused(client, session):
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+
+    response = client.post(f"/tasks/{task.id}/sync")
+
+    assert "not+cloned" in response.headers["location"]
+
+
+def test_a_successful_sync_says_so(client, session, monkeypatch, cloned):
+    from workbench.git.worktrees import Synced
+
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    monkeypatch.setattr(
+        "workbench.app.sync_worktree", lambda *a, **k: Synced("Already up to date.")
+    )
+
+    response = client.post(f"/tasks/{task.id}/sync")
+
+    assert "Synced+with+main" in response.headers["location"]
+
+
+def test_a_refused_sync_shows_the_reason(client, session, monkeypatch, cloned):
+    from workbench.git.worktrees import SyncRefused
+
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    monkeypatch.setattr(
+        "workbench.app.sync_worktree",
+        lambda *a, **k: SyncRefused("has commits of its own"),
+    )
+
+    response = client.post(f"/tasks/{task.id}/sync")
+
+    assert "commits+of+its+own" in response.headers["location"]
+
+
+def test_syncing_a_missing_task_is_a_404(client, session):
+    assert client.post("/tasks/9999/sync").status_code == 404
+
+
 # --- What the page offers --------------------------------------------------
 
 
@@ -448,6 +513,53 @@ def test_a_running_task_offers_to_stop_instead(client, session, cloned, executor
 
     assert "/runs/1/cancel" in page
     assert "Stop run" in page
+
+
+def test_a_task_with_a_worktree_offers_to_sync(client, session, cloned):
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    task.branch = "workbench/task-1-write-the-runner"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/tasks/{task.id}/sync" in page
+    assert ">Sync<" in page
+
+
+def test_a_task_with_no_worktree_yet_is_not_offered_a_sync(client, session, cloned):
+    """Its other seeded task has one, so the page should still show one Sync."""
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert page.count(">Sync<") == 1
+
+
+def test_a_task_actively_running_is_not_offered_a_sync(client, session, cloned, executor):
+    """Nothing should touch a worktree a process is writing to right now."""
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "plan"})
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert ">Sync<" not in page
+
+
+def test_a_plan_awaiting_review_still_offers_to_sync(client, session, cloned):
+    """The exact situation this exists for: nothing is actively running."""
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    _plan_awaiting_review(session, task=task)
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert ">Sync<" in page
 
 
 def test_a_plan_awaiting_review_offers_to_approve(client, session, cloned):
