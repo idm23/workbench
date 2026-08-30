@@ -45,7 +45,7 @@
               {% if busy %}
                 {# The dot reads at a glance; the word is what carries the
                    meaning for anyone the colour does not reach. #}
-                <a class="status {{ 'live' if busy.is_live else 'review' if busy.needs_attention else 'pending' }}"
+                <a class="status {{ 'live' if busy.is_live else 'review' if busy.needs_attention else 'failed' if busy.status == 'failed' else 'pending' }}"
                    href="/runs/{{ busy.run_id }}"
                    style="text-decoration: none;"
                    title="Run {{ busy.run_id }} is {{ busy.status }}"
@@ -74,6 +74,15 @@
                 <form method="post" action="/tasks/{{ node.task.id }}/runs">
                   <input type="hidden" name="phase" value="plan">
                   <button class="slim" type="submit">Plan</button>
+                </form>
+              {% elif busy and busy.status == 'failed' %}
+                {# Retries the same phase the failed run was attempting —
+                   not always "plan" — so a rate limit or a dropped connection
+                   resumes the same conversation via its resume token instead
+                   of asking a mid-execute agent to plan again. #}
+                <form method="post" action="/tasks/{{ node.task.id }}/runs">
+                  <input type="hidden" name="phase" value="{{ busy.phase }}">
+                  <button class="slim" type="submit">Retry</button>
                 </form>
               {% elif busy %}
                 <form method="post" action="/runs/{{ busy.run_id }}/cancel">

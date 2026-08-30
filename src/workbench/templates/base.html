@@ -216,7 +216,10 @@
     color: var(--muted);
   }
   .status.active { color: var(--accent); border-color: var(--accent); }
-  .status.blocked, .status.cancelled { color: var(--danger); border-color: var(--danger); }
+  .status.blocked, .status.cancelled, .status.failed {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
 
   /* Setup warnings. Above the rate-limit panel deliberately: a window that is
      80% spent still lets an agent run, and a backend with no credential does
@@ -321,6 +324,7 @@
   .status.review { color: var(--fg); border-color: var(--fg); }
   .status.pending .pip { background: var(--muted); }
   .status.review .pip { background: var(--fg); }
+  .status.failed .pip { background: var(--danger); }
   .status.live .pip { animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
