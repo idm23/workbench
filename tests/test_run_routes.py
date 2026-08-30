@@ -661,6 +661,69 @@ def test_an_execute_ready_task_offers_to_execute_first(client, session, cloned):
     assert page.count(">Plan<") == 1  # the project's other, unplanned task
 
 
+# --- Typing into a run while it goes ----------------------------------------
+
+
+def _running_run(session) -> Run:
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run, mark_running
+
+    run = create_run(session, a_task(session), RunPhase.EXECUTE, backend="claude")
+    mark_running(session, run)
+    return run
+
+
+def test_sending_a_message_queues_it_and_logs_it(client, session):
+    from workbench.database.models import RunEvent, RunEventKind, RunInput
+
+    run = _running_run(session)
+
+    response = client.post(f"/runs/{run.id}/message", data={"body": "also check the tests"})
+
+    assert response.status_code == 303
+    queued = session.query(RunInput).filter_by(run_id=run.id).one()
+    assert queued.body == "also check the tests"
+    logged = session.query(RunEvent).filter_by(run_id=run.id, kind=RunEventKind.INPUT).one()
+    assert logged.payload == {"text": "also check the tests"}
+
+
+def test_sending_an_empty_message_is_refused(client, session):
+    run = _running_run(session)
+
+    response = client.post(f"/runs/{run.id}/message", data={"body": "   "})
+
+    assert "Type+something" in response.headers["location"]
+
+
+def test_sending_a_message_to_a_run_that_is_not_running_is_refused(client, session):
+    run = a_finished_run(session)
+
+    response = client.post(f"/runs/{run.id}/message", data={"body": "hello"})
+
+    assert "not+active" in response.headers["location"]
+
+
+def test_sending_a_message_to_a_missing_run_is_404(client, session):
+    assert client.post("/runs/999/message", data={"body": "hello"}).status_code == 404
+
+
+def test_a_running_run_offers_to_send_a_message(client, session):
+    run = _running_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert f'action="/runs/{run.id}/message"' in page
+    assert ">Send<" in page
+
+
+def test_a_finished_run_does_not_offer_to_send_a_message(client, session):
+    run = a_finished_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "/message" not in page
+
+
 # --- Reading a run back ----------------------------------------------------
 
 

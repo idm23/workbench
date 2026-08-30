@@ -22,7 +22,9 @@ import logging
 import os
 import signal
 import sys
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from sqlalchemy import select
@@ -40,7 +42,7 @@ from workbench.agents.protocol import (
     SubtaskProposal,
 )
 from workbench.agents.registry import UnknownBackend, get_backend
-from workbench.config import agent_environment, billing_mode
+from workbench.config import agent_environment, billing_mode, input_idle_seconds
 from workbench.database.db import session_scope
 from workbench.database.models import (
     Run,
@@ -60,8 +62,12 @@ from workbench.git.worktrees import (
     run_setup_command,
     uncommitted_diffstat,
 )
-from workbench.runs.store import append_event, finish_run, mark_running
+from workbench.runs.store import append_event, fetch_new_inputs, finish_run, mark_running
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, resolve_origin
+
+#: How often to check for something typed into the run, matching the cadence
+#: `stream.py` already polls `run_events` at for the browser's own tailing.
+INPUT_POLL_SECONDS = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +206,49 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     )
 
 
+@dataclass
+class _Activity:
+    """The last moment anything happened on this run — agent output or
+    typed input — as a plain monotonic timestamp shared between the event
+    loop and the input watcher below."""
+
+    last: float = field(default_factory=time.monotonic)
+
+    def touch(self) -> None:
+        self.last = time.monotonic()
+
+
+async def _watch_for_input(
+    db: Session, run_id: int, activity: _Activity, idle_seconds: float
+) -> AsyncIterator[str]:
+    """Everything typed into this run, as it arrives, until it goes quiet.
+
+    Polls `run_inputs` the same way `stream.py` polls `run_events` for the
+    browser — this process and whatever handles the `POST /runs/{id}/message`
+    route are different processes, so there is nothing to await but the
+    table. Stops (closing the generator) once neither this nor the agent's
+    own output has touched `activity` for `idle_seconds`, which is what lets
+    a conversation actually end rather than poll forever: `query()` in
+    `agents/claude.py` only stops once this generator does.
+
+    Fetches *before* checking the idle deadline, not after: checking first
+    would let a row committed just as the deadline passes be missed even
+    though it was there the whole time this loop was already going to look —
+    a real race when `idle_seconds` and the poll cadence are close in
+    magnitude, found by a genuinely concurrent smoke test rather than assumed
+    safe from the unit tests alone.
+    """
+    last_seq = 0
+    while True:
+        for row in fetch_new_inputs(db, run_id, after_seq=last_seq):
+            last_seq = row.seq
+            activity.touch()
+            yield row.body
+        if time.monotonic() - activity.last > idle_seconds:
+            return
+        await asyncio.sleep(INPUT_POLL_SECONDS)
+
+
 async def drive(db: Session, run_id: int, prepared: Prepared) -> Ending:
     """Run the agent, committing every event as it arrives.
 
@@ -224,10 +273,19 @@ async def drive(db: Session, run_id: int, prepared: Prepared) -> Ending:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, on_signal, sig.name)
 
+    # A long tool-call loop with nothing typed into it must not let the idle
+    # clock expire mid-turn — every event touches it, not only new input.
+    activity = _Activity()
+    request = replace(
+        prepared.request,
+        inputs=_watch_for_input(db, run_id, activity, input_idle_seconds()),
+    )
+
     outcome: AgentOutcome | None = None
     try:
-        async for item in prepared.backend.run(prepared.request):
+        async for item in prepared.backend.run(request):
             if isinstance(item, AgentEvent):
+                activity.touch()
                 append_event(db, run_id, item.kind, item.payload)
             else:
                 outcome = item

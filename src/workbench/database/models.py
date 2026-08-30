@@ -98,6 +98,10 @@ class RunEventKind(StrEnum):
     STATUS = "status"
     #: Anything else worth showing: backend chatter, warnings, progress.
     NOTICE = "notice"
+    #: A message a person typed into a run while it was still going. Its own
+    #: kind rather than folded into NOTICE: a reader needs to tell what the
+    #: person said apart from what the agent or the backend said.
+    INPUT = "input"
 
 
 class RunStatus(StrEnum):
@@ -482,3 +486,31 @@ class RunEvent(Base):
 
     def __repr__(self) -> str:
         return f"<RunEvent run={self.run_id} seq={self.seq} {self.kind}>"
+
+
+class RunInput(Base):
+    """A message typed into a run while it is still going.
+
+    Deliberately its own table rather than reusing `run_events`, even though
+    it mirrors it exactly: this one is polled by the runner as a queue of
+    work to deliver to the backend, and `run_events` is a display log — a
+    sent message is written to both, but only this one is ever read back out
+    by anything other than a person's browser.
+    """
+
+    __tablename__ = "run_inputs"
+    __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_run_inputs_run_id_seq"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+
+    #: Monotonic per run, starting at 1 — same role as `RunEvent.seq`: what
+    #: the runner's poll resumes from.
+    seq: Mapped[int] = mapped_column(Integer)
+
+    body: Mapped[str] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<RunInput run={self.run_id} seq={self.seq}>"
