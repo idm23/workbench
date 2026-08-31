@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from workbench.config import repos_dir, worktrees_dir
+from workbench.git.github import InvalidReference, parse_repo_reference
 
 logger = logging.getLogger(__name__)
 
@@ -331,17 +332,61 @@ def uncommitted_diffstat(worktree: Path) -> str:
     return result.stdout
 
 
+def ensure_push_remote(worktree: Path) -> GitResult:
+    """Point `origin`'s *push* URL at SSH, leaving its fetch URL alone.
+
+    Every clone is made from `projects.github_url`, which `RepoRef.url` always
+    builds as HTTPS — so `origin` is HTTPS, and a push asks for a password
+    GitHub stopped accepting years ago. Nothing noticed because fetching a
+    public repository needs no credentials: push is the first operation in a
+    run that authenticates at all, and no run reached it until one did.
+
+    Split rather than switched. Making the fetch URL SSH too would mean a key
+    is needed just to *add* a public project, which is a worse trade than the
+    one bug it fixes. `remote.origin.pushurl` is git's own answer to exactly
+    this, and it matches the split the deployment already has: the deploy key
+    pushes, the API token opens pull requests, and reading needs neither.
+
+    Called on the way into every push rather than at clone time, because the
+    clones that need it most already exist and nothing re-clones them.
+    Idempotent, and a no-op once the URL is already SSH.
+    """
+    current = _run_git(["remote", "get-url", "--push", "origin"], cwd=worktree)
+    if isinstance(current, GitFailed):
+        return current
+
+    url = current.stdout.strip()
+    if url.startswith("git@"):
+        return GitOk(url)
+
+    ref = parse_repo_reference(url)
+    if isinstance(ref, InvalidReference):
+        # Not GitHub, or a form nothing here understands. Left exactly as it
+        # is: guessing at a push URL is how a run pushes somewhere nobody
+        # meant it to.
+        return GitFailed(f"Cannot push: {url!r} is not a GitHub remote this can authenticate to.")
+
+    return _run_git(["remote", "set-url", "--push", "origin", ref.ssh_url], cwd=worktree)
+
+
 def push_branch(worktree: Path, branch: str) -> GitResult:
     """Publish a task's branch, so a pull request has something to point at.
 
     Runs from the worktree rather than the clone: the branch is checked out
-    here, and this is the directory whose remote the deploy key is for.
+    here, and this is the directory whose remote the deploy key is for. A
+    worktree shares its repository's config, so repairing the push URL from
+    here fixes the clone itself — and therefore fixes it for a person who
+    later pushes from a terminal, not only for runs.
 
     `--set-upstream` so that anyone who later opens a terminal in this
     worktree can `git push` with no arguments and get the same thing. Given
     the network timeout rather than the local one — this is the one git
     operation in a run that talks to GitHub.
     """
+    prepared = ensure_push_remote(worktree)
+    if isinstance(prepared, GitFailed):
+        return prepared
+
     return _run_git(
         ["push", "--set-upstream", "origin", branch],
         cwd=worktree,
