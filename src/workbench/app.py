@@ -57,6 +57,7 @@ from workbench.runs.lifecycle import (
     active_run_for_project,
     active_run_for_task,
     cancel_run,
+    continue_run,
     start_conversation,
     start_run,
 )
@@ -531,6 +532,31 @@ def sync_task(db: DbSession, task_id: int) -> RedirectResponse:
     if isinstance(result, SyncRefused):
         return _redirect(target, error=result.message)
     return _redirect(target, error=f"{result.message} {result.stderr}".strip())
+
+
+@app.post("/runs/{run_id}/continue")
+def continue_finished_run(db: DbSession, run_id: int) -> RedirectResponse:
+    """Reopen a finished run as a conversation.
+
+    A plan or execute run ends the moment the agent is done rather than
+    waiting five minutes on the chance somebody types — so this is how a
+    dialog gets started, deliberately, when one is actually wanted.
+
+    Redirects to the *new* run, because that is where the conversation is.
+    The old one keeps its own page and its own record.
+    """
+    source = db.get(Run, run_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    target = f"/runs/{run_id}"
+    result = continue_run(db, source)
+    if isinstance(result, Run):
+        return _redirect(f"/runs/{result.id}")
+    # Every refusal — the cap, a run already in flight on this task, a run
+    # that left no session — is an ordinary answer to a button press, and
+    # says so where the button was.
+    return _redirect(target, error=result.message)
 
 
 @app.post("/runs/{run_id}/cancel")

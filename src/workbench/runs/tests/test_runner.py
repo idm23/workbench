@@ -859,9 +859,11 @@ class InputCapturingBackend:
         yield self._outcome
 
 
-def test_a_typed_message_reaches_the_backend_through_a_real_run(db, run, checkout, monkeypatch):
+def test_a_typed_message_reaches_the_backend_through_a_real_run(db, task, checkout, monkeypatch):
+    """A conversation, because that is now the only phase that listens."""
     from workbench.runs.store import append_input
 
+    run = create_conversation(db, task.project, backend="fake")
     append_input(db, run.id, "actually, also check the tests")
     fake = InputCapturingBackend(AgentFinished(text="done"))
     monkeypatch.setattr(runner_module, "get_backend", lambda _n: fake)
@@ -871,6 +873,27 @@ def test_a_typed_message_reaches_the_backend_through_a_real_run(db, run, checkou
     execute(db, run)
 
     assert fake.received == ["actually, also check the tests"]
+    assert run.status is RunStatus.SUCCEEDED
+
+
+def test_a_plan_or_execute_run_does_not_wait_to_be_typed_at(db, run, checkout, monkeypatch):
+    """It has delivered its result and nobody is expected to answer.
+
+    Waiting held the run `running` long after it was done, kept one of two
+    concurrency slots, and delayed the pull request by the whole window — for
+    a message that could not have reached the agent anyway, since inputs are
+    only pulled between turns.
+    """
+    fake = InputCapturingBackend(AgentFinished(text="done"))
+    monkeypatch.setattr(runner_module, "get_backend", lambda _n: fake)
+    monkeypatch.setattr(
+        runner_module,
+        "input_idle_seconds",
+        lambda: pytest.fail("an execute run consulted the idle window"),
+    )
+
+    execute(db, run)
+
     assert run.status is RunStatus.SUCCEEDED
 
 
@@ -1041,3 +1064,86 @@ def test_main_leaves_the_rest_of_the_environment_intact(db, run, checkout, backe
 
     assert os.environ["HOME"] == "/home/someone"
     assert os.environ["PATH"] == "/usr/bin:/bin"
+
+
+# --- Continuing a task's finished run ----------------------------------------
+#
+# The counterpart to plan and execute ending the moment the agent is done.
+# Ending promptly is only reasonable because the thread can be picked back up
+# deliberately, and this is that path.
+
+
+def _worked_task(db, run, checkout, backend):
+    """A task that has been run once, so it has a worktree and a session."""
+    execute(db, run)
+    return run.task
+
+
+def test_a_task_conversation_runs_in_that_tasks_worktree(db, run, checkout, backend):
+    """Not the clone, the way a project conversation does. A session token is
+    keyed to the directory it was issued in, so resuming anywhere else starts
+    cold while looking identical."""
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    followup = create_task_conversation(db, task, backend="fake")
+
+    execute(db, followup)
+
+    assert str(backend.requests[-1].worktree) == task.worktree_path
+    assert backend.requests[-1].phase is RunPhase.CONVERSATION
+
+
+def test_a_task_conversation_resumes_the_session_that_ran_the_task(db, run, checkout, backend):
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    followup = create_task_conversation(db, task, backend="fake")
+
+    execute(db, followup)
+
+    assert backend.requests[-1].resume_token == run.resume_token
+
+
+def test_a_task_conversation_says_it_is_a_follow_up_not_a_second_attempt(
+    db, run, checkout, backend
+):
+    """A resumed agent reads a new prompt as a new instruction and starts
+    working again — the opposite of what the button offered."""
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    followup = create_task_conversation(db, task, backend="fake")
+
+    execute(db, followup)
+
+    assert "not a new attempt" in backend.requests[-1].prompt
+
+
+def test_a_task_conversation_without_a_worktree_is_refused(db, task, checkout, backend):
+    """Nothing has run this task, so there is no directory the session could
+    be resumed in."""
+    from workbench.runs.store import create_task_conversation
+
+    followup = create_task_conversation(db, task, backend="fake")
+
+    execute(db, followup)
+
+    assert followup.status is RunStatus.FAILED
+    assert "worktree" in (followup.error or "")
+
+
+def test_a_task_conversation_leaves_the_tasks_status_alone(db, run, checkout, backend):
+    """Talking about work is not doing it. `record` routes on phase before it
+    reads a task at all, which is what keeps this true."""
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    task.status = TaskStatus.OPEN
+    db.commit()
+    followup = create_task_conversation(db, task, backend="fake")
+
+    execute(db, followup)
+
+    assert followup.status is RunStatus.SUCCEEDED
+    assert task.status is TaskStatus.OPEN
