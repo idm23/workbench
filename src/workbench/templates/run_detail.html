@@ -23,6 +23,12 @@
     <div><span>Reported cost</span><span title="A token valuation, not an amount charged">${{ '%.4f'|format(run.total_cost_usd) }}</span></div>
   {% endif %}
   {% if task and task.branch %}<div><span>Branch</span><span class="mono">{{ task.branch }}</span></div>{% endif %}
+  {% if run.pr_url %}
+    {# The point of the whole run, and until now the one thing it produced
+       that the app never showed. A link rather than the URL: this is read on
+       a phone, where a pull request URL wraps over three lines. #}
+    <div><span>Pull request</span><a href="{{ run.pr_url }}" rel="noopener">Open on GitHub</a></div>
+  {% endif %}
   {% if run.agent_outcome %}
     {# What the agent itself reported, through the live outcome API — distinct
        from `run.status`, which only says whether the process crashed. #}
