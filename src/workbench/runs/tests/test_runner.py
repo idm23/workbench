@@ -158,6 +158,56 @@ def test_no_reported_outcome_leaves_the_tasks_status_untouched(db, run, checkout
     assert any("did not report an outcome" in text for text in notices)
 
 
+def _report_from_another_process(run_id: int, outcome, detail: str | None = None) -> None:
+    """Report an outcome the way the outcome API actually does: from a
+    different session, as the web process, while the runner holds its own."""
+    from workbench.database.db import get_session_factory
+    from workbench.database.models import Run
+    from workbench.runs.store import report_outcome
+
+    with get_session_factory()() as elsewhere:
+        elsewhere_run = elsewhere.get(Run, run_id)
+        assert elsewhere_run is not None
+        report_outcome(elsewhere, elsewhere_run, outcome, detail)
+
+
+def test_an_outcome_reported_by_the_web_process_is_not_missed(db, run, checkout, backend):
+    """The gap every test around this one steps over.
+
+    They all set `run.agent_outcome` on the runner's own session, where it is
+    trivially visible. In production nothing does that: the agent reports
+    through the HTTP API, so the write lands in the web process's session,
+    and the factory sets `expire_on_commit=False` — so the runner's cached
+    Run keeps the None it loaded at startup and every outcome is missed.
+
+    Observed on the real server: a run whose agent reported `finished`, whose
+    page showed `Outcome: finished`, and whose task was left open under a
+    notice saying no outcome was reported.
+    """
+    _report_from_another_process(run.id, RunOutcome.FINISHED)
+
+    execute(db, run)
+
+    assert run.task.status is TaskStatus.DONE
+    notices = [e.payload["text"] for e in events_for(db, run) if e.kind is RunEventKind.NOTICE]
+    assert not any("did not report an outcome" in text for text in notices)
+
+
+def test_a_failure_reported_by_the_web_process_still_fails_the_run(db, run, checkout, backend):
+    """The same staleness, on the branch where it costs most.
+
+    A missed `failed` did not merely leave a task open — it recorded the run
+    as succeeded, because the guards fell through to the default.
+    """
+    _report_from_another_process(run.id, RunOutcome.FAILED, "Tests fail and I could not find why.")
+
+    execute(db, run)
+
+    assert run.status is RunStatus.FAILED
+    assert run.task.status is TaskStatus.BLOCKED
+    assert run.error == "Tests fail and I could not find why."
+
+
 def test_a_reported_finished_outcome_is_distrusted_if_the_run_was_cut_short(
     db, run, checkout, monkeypatch
 ):
