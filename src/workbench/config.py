@@ -109,6 +109,16 @@ DEFAULT_EXECUTOR = "local-process"
 SYSTEMD_EXECUTOR = "systemd-unit"
 
 
+def systemd_available() -> bool:
+    """Whether this machine can actually run a unit, not just talk about one.
+
+    The container the fresh-install test runs in has neither, and a laptop
+    checkout usually has the binary without the daemon — checking both is
+    what tells those apart from a real server.
+    """
+    return shutil.which("systemctl") is not None and Path("/run/systemd/system").is_dir()
+
+
 def default_executor() -> str:
     """Which executor to start runs with on this machine.
 
@@ -120,7 +130,7 @@ def default_executor() -> str:
     configured = os.environ.get("WORKBENCH_EXECUTOR", "").strip()
     if configured:
         return configured
-    if shutil.which("systemctl") and Path("/run/systemd/system").is_dir():
+    if systemd_available():
         return SYSTEMD_EXECUTOR
     return DEFAULT_EXECUTOR
 

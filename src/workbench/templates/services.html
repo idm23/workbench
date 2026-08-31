@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Running — Workbench{% endblock %}
+
+{% block back %}<a class="back" href="/">&lsaquo; All users</a>{% endblock %}
+
+{% block content %}
+<h1>What's running</h1>
+<p class="sub">This instance only — not staging or production's other half.</p>
+
+{% if not systemd_available %}
+  <p class="msg notice">
+    No systemd on this machine, so this only shows what Workbench itself
+    knows about, not a real unit's status.
+  </p>
+{% endif %}
+
+<h2 class="section">Services</h2>
+{% if services %}
+  <ul class="items">
+    {% for service in services %}
+      <li>
+        <div class="row-title">
+          <span>{{ service.label }}</span>
+          <span class="status {{ service.status_class }}">{{ service.state }}</span>
+        </div>
+        <div class="row-meta mono">{{ service.unit }}</div>
+        {% if service.run %}
+          <div class="row-meta">
+            <a href="/runs/{{ service.run.id }}">Run {{ service.run.id }}</a>
+            &nbsp;·&nbsp;{{ service.run.backend }}
+          </div>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">Nothing running right now.</p>
+{% endif %}
+
+<h2 class="section">Shells in progress</h2>
+{% if shells %}
+  <ul class="items">
+    {% for shell in shells %}
+      <li>
+        <div class="row-title">
+          <a href="/runs/{{ shell.run.id }}">{{ shell.label }}</a>
+          <span class="chev">Run {{ shell.run.id }}</span>
+        </div>
+        <div class="row-meta mono">{{ shell.command }}</div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">No shell commands in flight.</p>
+{% endif %}
+{% endblock %}
