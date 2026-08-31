@@ -9,89 +9,127 @@
 <title>{% block title %}Workbench{% endblock %}</title>
 <style>
   :root {
-    --bg: #f7f6f3;
+    --bg: #f5f3ee;
     --panel: #ffffff;
+    --panel-2: #faf8f4;
     --fg: #1a1a18;
     --muted: #6b6a63;
-    --rule: #d9d7d0;
+    --rule: #e2dfd5;
     --accent: #b45309;
+    --accent-fg: #fffaf5;
+    --success: #2f7a4d;
     --danger: #a02c2c;
     --danger-bg: #fbeaea;
     --notice-bg: #fdf3e3;
+    --shadow: rgba(30, 26, 15, .08);
+    --shadow-soft: rgba(30, 26, 15, .05);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #17171a;
-      --panel: #1f1f23;
+      --bg: #131315;
+      --panel: #1e1e22;
+      --panel-2: #202126;
       --fg: #ececea;
       --muted: #9a9a94;
-      --rule: #2e2e33;
+      --rule: #303035;
       --accent: #f0a868;
+      --accent-fg: #1c1206;
+      --success: #6cc38f;
       --danger: #f08a8a;
       --danger-bg: #331e1e;
       --notice-bg: #33291a;
+      --shadow: rgba(0, 0, 0, .5);
+      --shadow-soft: rgba(0, 0, 0, .32);
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
+    min-height: 100vh;
     background: var(--bg);
+    /* A faint wash rather than a flat fill — decorative only, and invalid
+       (ignored) on a browser without color-mix() support, which just leaves
+       the plain background colour. */
+    background-image: radial-gradient(
+      ellipse 60% 32rem at 20% -8rem,
+      color-mix(in srgb, var(--accent) 9%, transparent),
+      transparent 65%
+    );
+    background-repeat: no-repeat;
     color: var(--fg);
-    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
           "Helvetica Neue", Arial, sans-serif;
     -webkit-text-size-adjust: 100%;
   }
   .wrap {
-    max-width: 34rem;
+    max-width: 38rem;
     margin: 0 auto;
     padding: max(1.25rem, env(safe-area-inset-top)) 1.25rem
              max(2rem, env(safe-area-inset-bottom));
   }
   a { color: inherit; }
   .back {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
     color: var(--muted);
     text-decoration: none;
     font-size: .9rem;
-    margin-bottom: 1rem;
+    margin-bottom: 1.25rem;
+    transition: color .15s ease, transform .15s ease;
   }
-  .back:hover { color: var(--fg); }
+  .back:hover { color: var(--accent); transform: translateX(-2px); }
   h1 {
-    font-size: clamp(1.75rem, 8vw, 2.4rem);
-    line-height: 1.1;
-    letter-spacing: -0.02em;
-    margin: 0 0 .35rem;
-    font-weight: 650;
+    font-size: clamp(1.75rem, 8vw, 2.5rem);
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    margin: 0 0 .4rem;
+    font-weight: 750;
   }
   .sub { color: var(--muted); margin: 0 0 1.75rem; font-size: .95rem; }
 
   .msg {
-    padding: .8rem 1rem;
-    border-radius: .5rem;
+    padding: .85rem 1.05rem;
+    border-radius: .75rem;
     margin-bottom: 1.25rem;
     font-size: .95rem;
+    border-left: 3px solid transparent;
+    box-shadow: 0 1px 2px var(--shadow-soft);
   }
-  .msg.error { background: var(--danger-bg); color: var(--danger); }
-  .msg.notice { background: var(--notice-bg); }
+  .msg.error { background: var(--danger-bg); color: var(--danger); border-left-color: var(--danger); }
+  .msg.notice { background: var(--notice-bg); border-left-color: var(--accent); }
 
-  ul.items { list-style: none; margin: 0 0 1.75rem; padding: 0; }
-  ul.items li { border-top: 1px solid var(--rule); }
-  ul.items li:last-child { border-bottom: 1px solid var(--rule); }
+  /* Every row and task in the app lives in its own card rather than behind a
+     divider — the `.row`/subtask `<li>` below fills its parent's padding box
+     exactly (see the negative margin), so hovering the link and hovering the
+     card are the same event and need no extra selector to keep in sync. */
+  ul.items { list-style: none; margin: 0 0 1.75rem; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+  ul.items li {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: .85rem;
+    padding: 1rem 1.1rem;
+    box-shadow: 0 1px 2px var(--shadow-soft);
+    overflow: hidden;
+    transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  }
+  ul.items li:hover { border-color: var(--accent); box-shadow: 0 4px 12px var(--shadow); transform: translateY(-1px); }
   .row {
     display: block;
-    padding: .9rem 0;
+    margin: -1rem -1.1rem;
+    padding: 1rem 1.1rem;
     text-decoration: none;
     color: inherit;
   }
   .row-title {
-    font-weight: 600;
+    font-weight: 650;
     display: flex;
     justify-content: space-between;
     gap: 1rem;
     align-items: baseline;
   }
-  .row-meta { color: var(--muted); font-size: .9rem; margin-top: .2rem; }
-  .chev { color: var(--muted); font-weight: 400; }
+  .row-meta { color: var(--muted); font-size: .9rem; margin-top: .25rem; }
+  .chev { color: var(--muted); font-weight: 400; display: inline-block; transition: transform .15s ease, color .15s ease; }
+  ul.items li:hover .chev { transform: translateX(2px); color: var(--accent); }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: .85rem;
@@ -100,19 +138,21 @@
     display: inline-block;
     font-size: .75rem;
     color: var(--muted);
+    background: var(--panel-2);
     border: 1px solid var(--rule);
     border-radius: 999px;
-    padding: .05rem .5rem;
-    margin-top: .4rem;
+    padding: .1rem .6rem;
+    margin-top: .5rem;
   }
   .empty {
     color: var(--muted);
-    border: 1px dashed var(--rule);
-    border-radius: .5rem;
-    padding: 1.25rem;
+    border: 1.5px dashed var(--rule);
+    border-radius: .85rem;
+    padding: 1.5rem 1.25rem;
     text-align: center;
     margin-bottom: 1.75rem;
     font-size: .95rem;
+    background: var(--panel-2);
   }
 
   form { border-top: 1px solid var(--rule); padding-top: 1.25rem; }
@@ -122,103 +162,190 @@
     text-transform: uppercase;
     letter-spacing: .07em;
     color: var(--muted);
-    font-weight: 600;
+    font-weight: 700;
     margin-bottom: .45rem;
   }
-  input[type=text] {
+  input[type=text], textarea, select {
     width: 100%;
-    padding: .75rem .85rem;
+    padding: .8rem .9rem;
+    font: inherit;
     font-size: 1rem; /* 16px minimum, or iOS zooms on focus */
     background: var(--panel);
     color: var(--fg);
     border: 1px solid var(--rule);
-    border-radius: .5rem;
+    border-radius: .7rem;
     margin-bottom: .75rem;
+    transition: border-color .15s ease, box-shadow .15s ease;
   }
-  input[type=text]:focus {
-    outline: 2px solid var(--accent);
-    outline-offset: -1px;
+  input[type=text]:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
   }
   .hint { color: var(--muted); font-size: .85rem; margin: -.35rem 0 .75rem; }
+  textarea { resize: vertical; }
   button {
     width: 100%;
     min-height: 2.9rem; /* comfortable tap target */
     padding: .75rem 1rem;
     font-size: 1rem;
-    font-weight: 600;
-    color: var(--bg);
-    background: var(--fg);
+    font-weight: 650;
+    color: var(--accent-fg);
+    background: var(--accent);
     border: none;
-    border-radius: .5rem;
+    border-radius: .7rem;
     cursor: pointer;
+    box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent);
+    transition: transform .1s ease, box-shadow .15s ease, opacity .15s ease;
   }
-  button:active { opacity: .85; }
+  button:hover { box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 45%, transparent); }
+  button:active { transform: translateY(1px) scale(.99); opacity: .92; }
   button.secondary {
     background: transparent;
     color: var(--fg);
     border: 1px solid var(--rule);
+    box-shadow: none;
   }
-  button.slim { width: auto; min-height: 2.2rem; padding: .35rem .8rem; font-size: .85rem; }
-  textarea, select {
-    width: 100%;
-    padding: .75rem .85rem;
-    font: inherit;
-    font-size: 1rem; /* as with inputs, below 16px iOS zooms on focus */
-    background: var(--panel);
-    color: var(--fg);
-    border: 1px solid var(--rule);
-    border-radius: .5rem;
-    margin-bottom: .75rem;
+  button.secondary:hover { border-color: var(--accent); color: var(--accent); box-shadow: none; }
+  /* Reserved for the one truly irreversible action (deleting a task) — every
+     other "stop" or "discard" button stays a plain secondary, since undoing
+     those is just starting again. */
+  button.danger {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--rule));
+    box-shadow: none;
   }
-  textarea { resize: vertical; }
+  button.danger:hover { background: var(--danger-bg); border-color: var(--danger); box-shadow: none; }
+  button.slim { width: auto; min-height: 2.3rem; padding: .4rem .9rem; font-size: .85rem; border-radius: .55rem; }
 
   /* The task tree. Indentation is a left margin driven by depth rather than
      nested <ul>s, so the template iterates one flat list and there is no
      recursive Jinja macro to read. */
-  ul.tree { list-style: none; margin: 0 0 1.75rem; padding: 0; }
-  ul.tree li { border-top: 1px solid var(--rule); padding: .7rem 0; }
-  ul.tree li:last-child { border-bottom: 1px solid var(--rule); }
-  .task { display: flex; gap: .6rem; align-items: flex-start; }
+  ul.tree { list-style: none; margin: 0 0 1.75rem; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+  .task {
+    display: flex;
+    gap: .75rem;
+    align-items: flex-start;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: .85rem;
+    padding: .9rem 1rem;
+    box-shadow: 0 1px 2px var(--shadow-soft);
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
   .task-body { flex: 1; min-width: 0; }
-  .task-title { font-weight: 600; overflow-wrap: anywhere; }
+  .task-title { font-weight: 650; overflow-wrap: anywhere; }
+  .task.done { opacity: .72; }
   .task.done .task-title { color: var(--muted); text-decoration: line-through; }
   .task-note { color: var(--muted); font-size: .9rem; margin-top: .15rem; }
   .task-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
   .task-actions form { border: none; padding: 0; margin: 0; }
+  /* A run in flight gets a warm border rather than only the pip inside —
+     legible even to someone scanning the whole tree at a glance. */
+  .task.busy {
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--rule));
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .task.busy .task-title { font-weight: 700; }
 
   /* A checkbox that posts a form. Sized as a tap target first: this is the
-     control used most often, and always from a phone. */
+     control used most often, and always from a phone. Circular rather than
+     square, so a filled one reads as a checkmark rather than a filled
+     square. */
   .tick {
     appearance: none;
     flex: 0 0 auto;
-    width: 1.35rem; height: 1.35rem;
-    margin-top: .1rem;
-    border: 1px solid var(--rule);
-    border-radius: .35rem;
+    width: 1.5rem; height: 1.5rem;
+    margin-top: .05rem;
+    border: 1.5px solid var(--rule);
+    border-radius: 999px;
     background: var(--panel);
     cursor: pointer;
-    font-size: .9rem;
+    font-size: .85rem;
     line-height: 1;
     color: var(--fg);
     padding: 0;
     min-height: 0;
+    box-shadow: none;
+    transition: background .15s ease, border-color .15s ease, color .15s ease;
   }
+  .tick:hover { border-color: var(--accent); }
+  .tick.checked { background: var(--success); border-color: var(--success); color: var(--accent-fg); }
 
+  /* Filled, tinted badges rather than outlined ones. The dot inherits
+     `color` via `currentColor`, so a status only ever has to say its color
+     once and the dot and the text stay in sync automatically. */
   .status {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
     font-size: .7rem;
     text-transform: uppercase;
     letter-spacing: .06em;
     font-weight: 700;
     border-radius: 999px;
-    padding: .1rem .55rem;
-    border: 1px solid var(--rule);
+    padding: .2rem .65rem;
     color: var(--muted);
+    background: color-mix(in srgb, var(--muted) 14%, var(--panel));
   }
-  .status.active { color: var(--accent); border-color: var(--accent); }
+  .status.active, .status.live, .status.running {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  }
   .status.blocked, .status.cancelled, .status.failed {
     color: var(--danger);
-    border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 16%, var(--panel));
+  }
+  .status.done, .status.succeeded {
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 18%, var(--panel));
+  }
+  .status.review { color: var(--fg); background: color-mix(in srgb, var(--fg) 10%, var(--panel)); }
+
+  /* A task an agent is working on. The dot carries the meaning at a glance
+     and the label carries it for anyone the colour does not reach. */
+  .pip {
+    flex: 0 0 auto;
+    width: .5rem;
+    height: .5rem;
+    border-radius: 999px;
+    background: currentColor;
+    display: inline-block;
+    vertical-align: middle;
+  }
+  .status.live .pip { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .3; }
+  }
+  /* Someone who has asked for less motion still gets the dot and the label. */
+  @media (prefers-reduced-motion: reduce) {
+    .status.live .pip { animation: none; }
+  }
+
+  /* The project's own standing conversation. Sized and coloured like the
+     primary button it stands in for, not like the small activity pill a
+     task's own busy marker uses — this is the one action on the page, not
+     a status report. */
+  .conversation-banner {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    text-decoration: none;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--rule));
+    border-radius: .85rem;
+    padding: .9rem 1.1rem;
+    font-weight: 650;
+    margin-bottom: 1.75rem;
+    transition: box-shadow .15s ease, transform .15s ease;
+  }
+  .conversation-banner:hover { box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 25%, transparent); transform: translateY(-1px); }
+  .conversation-banner .pip { animation: pulse 1.6s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .conversation-banner .pip { animation: none; }
   }
 
   /* Setup warnings. Above the rate-limit panel deliberately: a window that is
@@ -230,13 +357,14 @@
   .setup-item {
     border: 1px solid var(--rule);
     border-left-width: 3px;
-    border-radius: .5rem;
-    padding: .6rem .75rem;
-    margin-bottom: .5rem;
+    border-radius: .75rem;
+    padding: .7rem .85rem;
+    margin-bottom: .6rem;
+    box-shadow: 0 1px 2px var(--shadow-soft);
   }
   .setup-item.urgent { border-left-color: var(--danger); background: var(--danger-bg); }
   .setup-item.todo { border-left-color: var(--muted); background: var(--notice-bg); }
-  .setup-title { font-weight: 600; }
+  .setup-title { font-weight: 650; }
   .setup-item.urgent .setup-title { color: var(--danger); }
   .setup-detail {
     color: var(--muted);
@@ -259,10 +387,11 @@
      which is why this sits on every page rather than on a run's own. */
   .limits {
     border: 1px solid var(--rule);
-    border-radius: .5rem;
-    padding: .6rem .75rem;
+    border-radius: .85rem;
+    padding: .75rem .9rem;
     margin-bottom: 1.25rem;
     background: var(--panel);
+    box-shadow: 0 1px 2px var(--shadow-soft);
   }
   .limits-head {
     display: flex;
@@ -292,7 +421,7 @@
     display: block;
     width: 100%;
     height: .4rem;
-    margin-top: .25rem;
+    margin-top: .3rem;
     border-radius: 999px;
     background: var(--rule);
     overflow: hidden;
@@ -306,60 +435,33 @@
   .limit.warning .meter > span { background: var(--accent); }
   .limit.warning .limit-meta { color: var(--accent); }
   .limit.exhausted .meter > span { background: var(--danger); }
-  .limit.exhausted .limit-meta { color: var(--danger); font-weight: 600; }
-
-  /* A task an agent is working on. The dot carries the meaning at a glance and
-     the label carries it for anyone the colour does not reach. */
-  .pip {
-    flex: 0 0 auto;
-    width: .5rem;
-    height: .5rem;
-    border-radius: 999px;
-    background: var(--accent);
-    display: inline-block;
-    margin-right: .35rem;
-    vertical-align: middle;
-  }
-  .status.live { color: var(--accent); border-color: var(--accent); }
-  .status.review { color: var(--fg); border-color: var(--fg); }
-  .status.pending .pip { background: var(--muted); }
-  .status.review .pip { background: var(--fg); }
-  .status.failed .pip { background: var(--danger); }
-  .status.live .pip { animation: pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: .25; }
-  }
-  /* Someone who has asked for less motion still gets the dot and the label. */
-  @media (prefers-reduced-motion: reduce) {
-    .status.live .pip { animation: none; }
-  }
-  .task.busy { }
-  .task.busy .task-title { font-weight: 650; }
+  .limit.exhausted .limit-meta { color: var(--danger); font-weight: 650; }
 
   /* A run's page: metadata, then the event log as it arrives. */
   h2.section {
-    font-size: .8rem;
+    font-size: .78rem;
     text-transform: uppercase;
-    letter-spacing: .07em;
+    letter-spacing: .08em;
     color: var(--muted);
-    margin: 1.75rem 0 .6rem;
+    font-weight: 700;
+    margin: 2rem 0 .75rem;
     display: flex;
     align-items: center;
     gap: .5rem;
   }
   .run-meta {
     border: 1px solid var(--rule);
-    border-radius: .5rem;
-    padding: .25rem .75rem;
+    border-radius: .85rem;
+    padding: .3rem .9rem;
     margin-bottom: 1.25rem;
     background: var(--panel);
+    box-shadow: 0 1px 2px var(--shadow-soft);
   }
   .run-meta > div {
     display: flex;
     justify-content: space-between;
     gap: 1rem;
-    padding: .45rem 0;
+    padding: .5rem 0;
     font-size: .9rem;
     border-top: 1px solid var(--rule);
     overflow-wrap: anywhere;
@@ -369,11 +471,12 @@
   .block {
     background: var(--panel);
     border: 1px solid var(--rule);
-    border-radius: .5rem;
-    padding: .8rem;
+    border-radius: .85rem;
+    padding: .9rem 1rem;
     margin: 0 0 1.25rem;
     font-size: .85rem;
-    line-height: 1.45;
+    line-height: 1.5;
+    box-shadow: 0 1px 2px var(--shadow-soft);
     /* Long tool output and diffstats scroll inside their own box rather than
        making the whole page scroll sideways on a phone. */
     overflow-x: auto;
@@ -381,35 +484,44 @@
     overflow-wrap: anywhere;
   }
 
-  ul.events { list-style: none; margin: 0 0 1.75rem; padding: 0; }
+  /* The event log, as a stack of cards rather than a divided list — closer
+     to a chat transcript, which is what a project conversation actually is.
+     The left border is each kind's whole identity; the background only
+     lifts `text` and `input` slightly above the rest, since those are what a
+     person actually reads and everything else is supporting detail. */
+  ul.events { list-style: none; margin: 0 0 1.75rem; padding: 0; display: flex; flex-direction: column; gap: .5rem; }
   .ev {
     display: flex;
-    gap: .6rem;
-    padding: .5rem 0;
-    border-top: 1px solid var(--rule);
+    gap: .75rem;
+    padding: .65rem .85rem;
+    border-radius: .7rem;
+    border-left: 3px solid var(--rule);
+    background: var(--panel-2);
     font-size: .9rem;
   }
-  .ev:last-child { border-bottom: 1px solid var(--rule); }
   .ev-kind {
-    flex: 0 0 5.2rem;
-    font-size: .65rem;
+    flex: 0 0 4.8rem;
+    font-size: .62rem;
     text-transform: uppercase;
     letter-spacing: .06em;
     font-weight: 700;
     color: var(--muted);
     padding-top: .2rem;
   }
-  .ev-body { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ev-body { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+  .ev.text { background: var(--panel); border-left-color: var(--accent); }
   /* Reasoning and tool plumbing are dimmed: they are worth being able to read
      but should not compete with what the agent actually said. */
   .ev.thinking .ev-body, .ev.tool_result .ev-body, .ev.notice .ev-body { color: var(--muted); }
-  .ev.tool_use .ev-body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .ev.tool_use { border-left-color: var(--fg); }
+  .ev.tool_use .ev-body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
+  .ev.status { border-left-color: var(--accent); }
   .ev.status .ev-kind { color: var(--accent); }
   /* What a person typed in, set apart so a conversation does not read as
      one-sided. */
-  .ev.input { background: var(--notice-bg); }
-  .ev.input .ev-kind { color: var(--fg); }
-  .ev.input .ev-body { font-weight: 600; }
+  .ev.input { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); border-left-color: var(--accent); }
+  .ev.input .ev-kind { color: var(--accent); }
+  .ev.input .ev-body { font-weight: 650; color: var(--fg); }
 
   .live-dot { font-size: .65rem; letter-spacing: .06em; color: var(--accent); font-weight: 700; }
   .live-dot.on::before {
