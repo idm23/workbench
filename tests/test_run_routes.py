@@ -6,6 +6,8 @@ being worked, the unit would not start — and each has to come back as somethin
 readable on a phone rather than as a 500 or a silent redirect.
 """
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -780,6 +782,63 @@ def test_a_finished_run_does_not_offer_to_send_a_message(client, session):
     page = client.get(f"/runs/{run.id}").text
 
     assert "/message" not in page
+
+
+def _queued_run(session) -> Run:
+    """A run that exists but whose runner has not started yet.
+
+    Not a contrived state: it is what every conversation looks like at the
+    moment the page is first rendered.
+    """
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run
+
+    return create_run(session, a_task(session), RunPhase.EXECUTE, backend="claude")
+
+
+def _reply_form(page: str) -> str:
+    """The reply form's opening tag, or "" when the page has none."""
+    match = re.search(r'<form[^>]*id="reply"[^>]*>', page)
+    return match.group(0) if match else ""
+
+
+def test_a_queued_run_renders_the_message_box_hidden_rather_than_not_at_all(client, session):
+    """The bug this fixes, and the reason it was invisible.
+
+    Starting a conversation redirects here the instant the row exists, while
+    the run is still queued and the runner is a process systemd has only just
+    been asked to start. A form that is only *rendered* once the run is
+    running is therefore a form nobody ever sees: the stream appends events
+    and never re-renders the page, so the box arrived only for whoever
+    happened to reload mid-run.
+    """
+    run = _queued_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert f'action="/runs/{run.id}/message"' in page
+    assert "hidden" in _reply_form(page)
+
+
+def test_a_running_run_shows_the_message_box_straight_away(client, session):
+    """Rendered hidden only while there is nothing listening yet."""
+    run = _running_run(session)
+
+    form = _reply_form(client.get(f"/runs/{run.id}").text)
+
+    assert form, "the run page rendered no reply form at all"
+    assert "hidden" not in form
+
+
+def test_the_page_reveals_the_message_box_from_the_stream(client, session):
+    """The other half: without this listener the form stays hidden forever,
+    because the only reload this page does is the one when the run ends."""
+    run = _queued_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert 'source.addEventListener("status"' in page
+    assert "reply.hidden" in page
 
 
 # --- Reading a run back ----------------------------------------------------

@@ -88,10 +88,22 @@
   <p class="empty" id="no-events">Nothing recorded yet.</p>
 {% endif %}
 
-{% if run.status == 'running' %}
-  {# Only while running: a queued run has nothing listening yet, and a
-     finished one has nothing left to say it to. #}
-  <form method="post" action="/runs/{{ run.id }}/message" style="margin-top: 1.25rem;">
+{% if not run.status.is_terminal %}
+  {# Rendered for any run that has not finished, and hidden until it is
+     actually running — rather than rendered only when running.
+
+     The distinction is the whole fix. Starting a conversation redirects here
+     the instant the row exists, while the run is still `queued` and systemd
+     has only just been asked to start the runner, so a gate evaluated once
+     server-side answers "no" at the one moment it is guaranteed to be wrong.
+     Nothing revisited it afterwards: the stream appends events and never
+     touched the form, so the box was unreachable from the button and only a
+     manual reload mid-run ever produced it.
+
+     A finished run still renders nothing at all, so reading one back a week
+     later is unchanged. #}
+  <form method="post" action="/runs/{{ run.id }}/message" id="reply"
+        style="margin-top: 1.25rem;" {{ 'hidden' if run.status != 'running' else '' }}>
     <label for="body">Say something</label>
     <textarea id="body" name="body" rows="2"
               placeholder="Type a message to send into this run…"></textarea>
@@ -109,6 +121,7 @@
     var list = document.getElementById("events");
     var dot = document.getElementById("live");
     var empty = document.getElementById("no-events");
+    var reply = document.getElementById("reply");
     var source = new EventSource("/runs/{{ run.id }}/events?after={{ last_seq }}");
 
     function add(kind, data) {
@@ -133,10 +146,25 @@
       });
     });
 
+    // What actually reveals the box, from the same events that drive the dot.
+    // A second listener rather than a branch inside `add`: appending an event
+    // and reflecting a state change are different jobs, and only this one has
+    // to keep working if the rendering above changes.
+    source.addEventListener("status", function (message) {
+      if (!reply) { return; }
+      try {
+        reply.hidden = JSON.parse(message.data).status !== "running";
+      } catch (error) { /* skip a bad frame */ }
+    });
+
     source.addEventListener("end", function () {
       source.close();
       dot.className = "live-dot";
       dot.textContent = "";
+      // Before the reload below, not after: otherwise there is a window in
+      // which the box is still there to type into and the run is already over,
+      // and the send comes back "This run is not active."
+      if (reply) { reply.hidden = true; }
       // The run is over, so the summary, diffstat, and status above are now
       // stale. Reloading is cheaper than teaching this page to render them.
       window.setTimeout(function () { window.location.reload(); }, 400);

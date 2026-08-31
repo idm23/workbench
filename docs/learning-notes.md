@@ -503,6 +503,32 @@ Worth knowing for later: `claude setup-token` mints a long-lived subscription to
 (inference-only scope, supplied as `CLAUDE_CODE_OAUTH_TOKEN`), which is the shape a headless
 box actually wants and would retire the fortnightly cliff.
 
+## A server-rendered gate is a snapshot, and sometimes of the wrong instant
+
+The reply box on a run page was gated on `{% if run.status == 'running' %}`, which is the
+right condition and was still never true. Starting a conversation creates the row, asks
+systemd to start the runner, and redirects to the run page immediately — so the page renders
+while the run is `queued`, a moment *before* the condition becomes true. The runner is a
+different process; there is nothing to wait for.
+
+Everything after that worked as designed and made it worse. The SSE stream connected and
+appended events, so the page looked alive. But the stream only ever appended `<li>`s — it
+never revisited the form. And the one reload the page does perform fires on `end`, when the
+run is over and the box correctly should not be there. The result was a control that existed
+in the template, passed its tests, and was unreachable from the button that leads to it.
+
+**The bug is not the condition, it is that the condition was evaluated once.** This is the
+same shape as the deploy rule in `CLAUDE.md` — *every step converges rather than firing on a
+change* — arriving in the web tier. Anything rendered from state that is about to change
+needs either a re-render or something that keeps it in step; a gate resolved server-side at
+page load is a snapshot, and here it was reliably a snapshot of the instant before.
+
+The fix is to render the form for any non-terminal run, hidden, and let the `status` events
+already on the stream reveal it — the same events that already drive the live dot. Worth
+noting the test that would have caught it: every existing test asserted on a run *already*
+running or already finished, and none on a run in the state the page is actually first
+rendered in.
+
 ## Small ones
 
 **`curl -I` sends HEAD**, and FastAPI does not auto-add HEAD to a GET route. A `405` with
