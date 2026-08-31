@@ -331,6 +331,24 @@ def uncommitted_diffstat(worktree: Path) -> str:
     return result.stdout
 
 
+def push_branch(worktree: Path, branch: str) -> GitResult:
+    """Publish a task's branch, so a pull request has something to point at.
+
+    Runs from the worktree rather than the clone: the branch is checked out
+    here, and this is the directory whose remote the deploy key is for.
+
+    `--set-upstream` so that anyone who later opens a terminal in this
+    worktree can `git push` with no arguments and get the same thing. Given
+    the network timeout rather than the local one — this is the one git
+    operation in a run that talks to GitHub.
+    """
+    return _run_git(
+        ["push", "--set-upstream", "origin", branch],
+        cwd=worktree,
+        timeout=NETWORK_TIMEOUT_SECONDS,
+    )
+
+
 def current_commit(worktree: Path) -> str | None:
     result = _run_git(["rev-parse", "HEAD"], cwd=worktree)
     return result.stdout if isinstance(result, GitOk) else None

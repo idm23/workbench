@@ -14,6 +14,11 @@ import httpx
 API_ROOT = "https://api.github.com"
 TIMEOUT_SECONDS = 5.0
 
+#: Opening a pull request is a write against a repository that may be large,
+#: and it happens once at the end of a run rather than on a page load, so it
+#: gets more room than the lookup above.
+WRITE_TIMEOUT_SECONDS = 30.0
+
 # GitHub logins are alphanumeric with interior hyphens; repository names also
 # allow dots and underscores.
 _OWNER = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
@@ -145,4 +150,119 @@ def fetch_repo_metadata(ref: RepoRef) -> RepoLookup:
     return RepoMetadata(
         description=payload.get("description"),
         default_branch=payload.get("default_branch"),
+    )
+
+
+@dataclass(frozen=True)
+class PullRequestOpened:
+    """A pull request exists for this branch — new, or already there."""
+
+    url: str
+
+    #: False when the pull request was already open. A re-run of an execute
+    #: phase pushes more commits to the same branch, and GitHub refuses a
+    #: second pull request for it; that is success, not failure, so the
+    #: distinction is recorded rather than the outcome changed.
+    created: bool = True
+
+
+@dataclass(frozen=True)
+class PullRequestFailed:
+    """No pull request, and a person has to know why.
+
+    Not raised, for the same reason as everything else in this module: the
+    caller is a run that has already done its work, and losing that work over
+    a failed API call would be the worse outcome.
+    """
+
+    message: str
+
+
+type PullRequestResult = PullRequestOpened | PullRequestFailed
+
+
+def _headers(token: str) -> dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        # GitHub rejects requests without a User-Agent.
+        "User-Agent": "workbench",
+    }
+
+
+def _existing_pull_request(ref: RepoRef, head: str, token: str) -> PullRequestResult:
+    """The open pull request for a branch, when one is already there.
+
+    Asked only after a 422, which is what GitHub answers for a duplicate. The
+    alternative — treating that as an error — would make the second execute
+    run on a task look like a failure when it did exactly the right thing.
+    """
+    try:
+        response = httpx.get(
+            f"{API_ROOT}/repos/{ref.owner}/{ref.repo}/pulls",
+            params={"head": f"{ref.owner}:{head}", "state": "open"},
+            headers=_headers(token),
+            timeout=TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError:
+        return PullRequestFailed(f"Could not reach GitHub to look up the pull request for {head}.")
+
+    if response.status_code != 200:
+        return PullRequestFailed(
+            f"GitHub returned {response.status_code} looking up the pull request for {head}."
+        )
+
+    payload = response.json()
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        url = payload[0].get("html_url")
+        if isinstance(url, str):
+            return PullRequestOpened(url=url, created=False)
+
+    return PullRequestFailed(
+        f"GitHub refused a pull request for {head} as a duplicate, but reports none open for it."
+    )
+
+
+def open_pull_request(
+    ref: RepoRef, *, head: str, base: str, title: str, body: str, token: str
+) -> PullRequestResult:
+    """Open a pull request from a task's branch onto what it was cut from.
+
+    `base` is the branch the worktree was created from rather than the
+    repository's default. That is what sends work into `staging` on a project
+    that promotes through it, and what makes a task branched from another
+    task stack onto that one instead of jumping the queue to main.
+    """
+    try:
+        response = httpx.post(
+            f"{API_ROOT}/repos/{ref.owner}/{ref.repo}/pulls",
+            json={"title": title, "body": body, "head": head, "base": base},
+            headers=_headers(token),
+            timeout=WRITE_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError:
+        return PullRequestFailed(f"Could not reach GitHub to open a pull request for {head}.")
+
+    if response.status_code == 201:
+        url = response.json().get("html_url")
+        if isinstance(url, str):
+            return PullRequestOpened(url=url)
+        return PullRequestFailed("GitHub opened a pull request but did not say where.")
+
+    if response.status_code == 422:
+        # Either a duplicate, or something genuinely wrong with the request —
+        # a base branch that does not exist, most likely. Only the first is
+        # recoverable, and asking is how they are told apart.
+        return _existing_pull_request(ref, head, token)
+
+    if response.status_code in (401, 403):
+        return PullRequestFailed(
+            f"GitHub refused the pull request for {head} with {response.status_code} — "
+            "WORKBENCH_GITHUB_TOKEN is missing the pull-request write scope for this "
+            "repository, or has expired."
+        )
+
+    return PullRequestFailed(
+        f"GitHub returned {response.status_code} opening a pull request for {head}."
     )
