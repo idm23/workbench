@@ -57,7 +57,16 @@
           <div class="task-body">
             <div class="task-title">{{ node.task.title }}</div>
 
-            {% if node.task.body %}<div class="task-note">{{ node.task.body }}</div>{% endif %}
+            {% if node.body_rest %}
+              {# Long enough to be worth folding — a planning note written
+                 for an agent, not a person skimming from a phone. #}
+              <details class="task-note">
+                <summary>{{ node.body_preview }}&hellip;</summary>
+                <div class="task-note-rest">{{ node.body_rest }}</div>
+              </details>
+            {% elif node.body_preview %}
+              <div class="task-note">{{ node.body_preview }}</div>
+            {% endif %}
 
             {% if node.progress %}
               <div class="task-note">{{ node.progress }} done</div>

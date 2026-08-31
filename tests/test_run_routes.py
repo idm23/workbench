@@ -545,6 +545,31 @@ def test_a_parent_task_shows_a_progress_meter(client, session, cloned):
     assert 'aria-valuenow="100"' in page
 
 
+def test_a_short_task_body_is_shown_in_full(client, session, cloned):
+    task = a_task(session)
+    task.body = "A short note."
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "A short note." in page
+    assert "<details" not in page
+
+
+def test_a_long_task_body_is_folded_behind_a_toggle(client, session, cloned):
+    """The "more"/"less" affordance itself is CSS `content`, invisible to a
+    server-rendered response — what the page actually has to emit is the
+    `<details>`/`<summary>` pair a browser turns into that toggle."""
+    task = a_task(session)
+    task.body = "word " * 100
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert '<details class="task-note">' in page
+    assert "<summary>" in page
+
+
 def test_a_runnable_task_offers_an_origin_picker(client, session, cloned):
     page = client.get(f"/projects/{a_task(session).project_id}").text
 

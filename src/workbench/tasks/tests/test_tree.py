@@ -102,6 +102,55 @@ def test_a_leaf_has_no_progress_percent():
     assert build_tree([make(1)])[0].progress_percent is None
 
 
+def test_no_body_has_no_preview():
+    node = build_tree([make(1)])[0]
+
+    assert node.body_preview is None
+    assert node.body_rest is None
+
+
+def test_a_short_body_is_shown_whole_with_nothing_left_over():
+    task = make(1)
+    task.body = "Short enough to fit."
+
+    node = build_tree([task])[0]
+
+    assert node.body_preview == "Short enough to fit."
+    assert node.body_rest is None
+
+
+def test_a_long_body_is_split_at_a_word_boundary():
+    task = make(1)
+    task.body = "word " * 100  # 500 characters, well past the preview limit
+
+    node = build_tree([task])[0]
+    preview, rest = node.body_preview, node.body_rest
+    assert preview is not None
+    assert rest is not None
+
+    assert len(preview) <= 220
+    assert not preview.endswith("wor")  # never cuts mid-word
+    # Concatenating what is shown and what is folded reconstructs the body,
+    # modulo the single space consumed at the cut point.
+    body = task.body
+    assert body is not None
+    assert body.startswith(preview)
+    assert body.endswith(rest)
+
+
+def test_a_body_with_no_spaces_before_the_limit_is_hard_cut():
+    """No good place to break, so this falls back to a plain cut rather than
+    showing nothing or blowing past the limit."""
+    task = make(1)
+    task.body = "x" * 300
+
+    node = build_tree([task])[0]
+
+    assert node.body_preview is not None
+    assert len(node.body_preview) == 220
+    assert node.body_rest == "x" * 80
+
+
 def test_self_parenting_task_does_not_recurse():
     """Corrupt data must render, not hang."""
     roots = build_tree([make(1, parent=1, title="loop")])
