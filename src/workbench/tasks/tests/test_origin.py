@@ -13,6 +13,7 @@ from workbench.database.db import make_engine
 from workbench.database.models import Base, Project, Task, User
 from workbench.tasks import create_task
 from workbench.tasks.origin import (
+    DEFAULT,
     DEV,
     PROD,
     InvalidOrigin,
@@ -130,7 +131,29 @@ def test_origin_choices_always_offers_main_and_staging(session, project):
     task = create_task(session, project, title="x")
     assert isinstance(task, Task)
 
-    assert origin_choices(task)[:2] == [(PROD, "main (prod)"), (DEV, "staging (dev)")]
+    assert origin_choices(task)[:2] == [(DEV, "staging (dev)"), (PROD, "main (prod)")]
+
+
+def test_dev_is_offered_first_because_that_is_where_the_pull_request_goes(session, project):
+    """Order is the default: the picker preselects the first option for a task
+    nobody has chosen one for, and a run's pull request targets whatever its
+    worktree was cut from. Branching from prod would aim the pull request at
+    prod and carry every promotion merge since into its commit list."""
+    task = create_task(session, project, title="x")
+    assert isinstance(task, Task)
+
+    assert origin_choices(task)[0][0] == DEFAULT == DEV
+
+
+def test_an_unset_origin_still_falls_back_to_prod(session, project):
+    """Deliberately not DEFAULT. An unset origin means a task created through
+    the JSON API or before any of this existed, on a project that may have no
+    branch called `staging` at all — where prod is the only ref known to
+    resolve."""
+    task = create_task(session, project, title="x")
+    assert isinstance(task, Task)
+
+    assert resolve_origin(task, None) == project.default_branch
 
 
 def test_origin_choices_adds_a_branched_task_in_the_same_tree(session, project):

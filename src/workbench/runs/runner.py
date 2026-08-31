@@ -42,7 +42,7 @@ from workbench.agents.protocol import (
     SubtaskProposal,
 )
 from workbench.agents.registry import UnknownBackend, get_backend
-from workbench.config import agent_environment, billing_mode, input_idle_seconds
+from workbench.config import agent_environment, billing_mode, github_token, input_idle_seconds
 from workbench.database.db import session_scope
 from workbench.database.models import (
     Run,
@@ -53,12 +53,15 @@ from workbench.database.models import (
     Task,
     TaskStatus,
 )
+from workbench.git.github import PullRequestFailed, RepoRef, open_pull_request
 from workbench.git.worktrees import (
     GitFailed,
     diffstat,
     ensure_worktree,
     fetch_checkout,
+    has_commits,
     local_checkout,
+    push_branch,
     run_setup_command,
     uncommitted_diffstat,
 )
@@ -374,6 +377,104 @@ def _worktree_diffstat(worktree: Path, base_branch: str) -> str:
     return f"{committed}\nUncommitted:\n{pending}".strip()
 
 
+def _publish(
+    db: Session,
+    run: Run,
+    task: Task,
+    worktree: Path | None,
+    base_branch: str,
+    summary: str,
+) -> str | None:
+    """Push the branch and open the pull request, or say why not.
+
+    This is the half of the execute phase the agent is explicitly told not to
+    do — `execute_prompt` says "do not push, and do not open a pull request,
+    Workbench does both once you finish". Until this existed that instruction
+    was a promise nothing kept: the agent obeyed, committed, and stopped, and
+    the work sat on a branch in a worktree nobody would look in.
+
+    Never raises, and never turns a successful run into a failed one. By the
+    time this is called the agent has done the work and committed it, so the
+    worst case is a branch that has to be pushed by hand — which is strictly
+    better than the run being recorded as a failure and the commits being
+    treated as suspect. Every giving-up path leaves a notice on the run
+    saying what stopped it and, where there is one, the command that fixes it.
+    """
+    if worktree is None:
+        return None
+
+    if not has_commits(worktree, base_branch):
+        # Not a failure: an agent that correctly concluded nothing needed
+        # changing is the open question in CLAUDE.md, and an empty pull
+        # request would be the worst possible answer to it.
+        _notice(db, run, "No commits on this branch, so nothing was pushed.")
+        return None
+
+    branch = task.branch
+    if branch is None:
+        _notice(db, run, "This task has no branch recorded, so nothing could be pushed.")
+        return None
+
+    pushed = push_branch(worktree, branch)
+    if isinstance(pushed, GitFailed):
+        _notice(
+            db,
+            run,
+            f"The work is committed but could not be pushed: {pushed.message} "
+            f"{pushed.stderr}".strip()
+            + " Run `python -m workbench.doctor` — this is usually the deploy key.",
+        )
+        return None
+
+    token = github_token()
+    if token is None:
+        _notice(
+            db,
+            run,
+            f"Pushed {branch}, but no pull request was opened: WORKBENCH_GITHUB_TOKEN is not "
+            "set in /etc/workbench/env, and opening one needs the API rather than the "
+            "deploy key.",
+        )
+        return None
+
+    opened = open_pull_request(
+        RepoRef(owner=task.project.owner, repo=task.project.repo),
+        head=branch,
+        base=base_branch,
+        title=task.title,
+        body=_pull_request_body(run, summary),
+        token=token,
+    )
+    if isinstance(opened, PullRequestFailed):
+        _notice(db, run, f"Pushed {branch}, but no pull request: {opened.message}")
+        return None
+
+    _notice(
+        db,
+        run,
+        f"{'Opened' if opened.created else 'Updated the open'} pull request: {opened.url}",
+    )
+    return opened.url
+
+
+def _pull_request_body(run: Run, summary: str) -> str:
+    """What the pull request says, for someone who did not watch the run.
+
+    The agent's own summary, written while it still had the context — the
+    reason there is no separate summarising pass. Passed in rather than read
+    off the run: `finish_run` has not written it yet when this is called.
+
+    The trailer is what makes a pull request traceable back to the run that
+    produced it, which matters most for the ones that turn out to be wrong.
+    """
+    text = summary.strip() or "The agent recorded no summary for this run."
+    return f"{text}\n\n---\nWorkbench run {run.id} ({run.phase.value}), task {run.task_id}."
+
+
+def _notice(db: Session, run: Run, text: str) -> None:
+    append_event(db, run.id, RunEventKind.NOTICE, {"text": text})
+
+
 def _serialize_subtasks(proposals: list[SubtaskProposal] | None) -> dict | None:
     """A plan's proposed decomposition, in the shape the `proposed_subtasks`
     JSON column stores and the approve route later reads back."""
@@ -513,8 +614,14 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
             # unfinished — hitting the turn limit still yields AgentFinished
             # — so DONE requires an explicit report, and a stopped-early
             # report is distrusted even when it says "finished".
+            published: str | None = None
             if run.agent_outcome is RunOutcome.FINISHED and not ending.stopped_early:
                 task.status = TaskStatus.DONE
+                # Only here. The same standard that is trusted enough to close
+                # a task is the one trusted enough to open a pull request —
+                # a run that was cut off, or never said how it went, leaves
+                # its commits on the branch for a person to look at.
+                published = _publish(db, run, task, worktree, base_branch, ending.text)
             elif run.agent_outcome is RunOutcome.FINISHED:
                 append_event(
                     db,
@@ -541,6 +648,7 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
                 run,
                 RunStatus.SUCCEEDED,
                 summary=ending.text,
+                pr_url=published,
                 diffstat=_worktree_diffstat(worktree, base_branch) if worktree else None,
                 resume_token=ending.resume_token,
                 model=ending.model,

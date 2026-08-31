@@ -75,6 +75,7 @@ from workbench.tasks import (
 from workbench.tasks import (
     delete_task as delete_task_and_children,
 )
+from workbench.tasks.origin import DEFAULT as DEFAULT_ORIGIN
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, origin_choices, resolve_origin
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -312,6 +313,10 @@ def show_project(
             "checkout": local_checkout(project.owner, project.repo),
             # Only worth computing for a task that would actually show the
             # picker: one with no worktree yet has nothing to choose between.
+            # The option the picker preselects for a task that has never been
+            # started. Passed in rather than spelled in the template, so the
+            # reasoning lives beside the constant.
+            "default_origin": DEFAULT_ORIGIN,
             "origin_choices": {
                 task.id: origin_choices(task)
                 for task in tasks
