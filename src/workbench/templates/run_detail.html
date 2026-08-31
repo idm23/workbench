@@ -46,7 +46,7 @@
   <h2 class="section">Proposed subtasks</h2>
   <ul class="items">
     {% for subtask in run.proposed_subtasks.subtasks %}
-      <li style="padding: .9rem 0;">
+      <li>
         <div class="row-title">
           {{ subtask.title }}
           <span class="chev">{{ 'execute' if subtask.ready_to_execute else 'plan' }}</span>
