@@ -403,7 +403,21 @@ def _publish(
     if worktree is None:
         return None
 
-    if not has_commits(worktree, base_branch):
+    committed = has_commits(worktree, base_branch)
+    if isinstance(committed, GitFailed):
+        # Not the same as "nothing to push", and saying so is the whole point.
+        # This branch reported no commits for a run that had made one, because
+        # the base ref would not resolve — so the work existed, the message
+        # said it did not, and nobody had a reason to look.
+        _notice(
+            db,
+            run,
+            f"Could not tell whether there is anything to push, so nothing was: "
+            f"{committed.message} {committed.stderr}".strip(),
+        )
+        return None
+
+    if not committed:
         # Not a failure: an agent that correctly concluded nothing needed
         # changing is the open question in CLAUDE.md, and an empty pull
         # request would be the worst possible answer to it.

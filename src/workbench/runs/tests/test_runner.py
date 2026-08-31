@@ -220,7 +220,14 @@ def _finished(db, run):
     _report_from_another_process(run.id, RunOutcome.FINISHED)
 
 
-def _publishes(monkeypatch, *, commits=True, push=None, opened=None, token: str | None = "pat"):
+def _publishes(
+    monkeypatch,
+    *,
+    commits: bool | object = True,
+    push=None,
+    opened=None,
+    token: str | None = "pat",
+):
     """Stand in for the three collaborators `_publish` orchestrates."""
     from workbench.git.github import PullRequestOpened
     from workbench.git.worktrees import GitOk
@@ -284,6 +291,30 @@ def test_a_run_with_no_commits_is_not_pushed(db, run, checkout, backend, monkeyp
     assert "pushed" not in calls
     assert run.pr_url is None
     assert _notices(db, run, "nothing was pushed")
+
+
+def test_a_check_that_could_not_run_is_not_reported_as_nothing_to_push(
+    db, run, checkout, backend, monkeypatch
+):
+    """What actually happened on the server, and why it was invisible.
+
+    The base ref would not resolve, `has_commits` turned that into False, and
+    a run that had made a commit announced that it had not. Nobody had a
+    reason to look, and the work sat unpushed a second time.
+    """
+    from workbench.git.worktrees import GitFailed
+
+    calls = _publishes(
+        monkeypatch,
+        commits=GitFailed("git rev-list failed (exit 128).", stderr="unknown revision"),
+    )
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert "pushed" not in calls
+    assert _notices(db, run, "Could not tell")
+    assert not _notices(db, run, "No commits on this branch")
 
 
 def test_a_failed_push_says_so_without_failing_the_run(db, run, checkout, backend, monkeypatch):

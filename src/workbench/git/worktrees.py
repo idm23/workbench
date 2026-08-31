@@ -189,7 +189,11 @@ def _resolve_ref(repo: Path, base_branch: str) -> str:
     has rather than from whatever this clone happens to be sitting on;
     falls back to the plain name otherwise — a repository with no remote,
     or a `base_branch` that already names a local-only branch (another
-    task's own, never pushed)."""
+    task's own, never pushed).
+
+    Safe to call with a worktree as well as the clone: a worktree shares its
+    repository's refs, which is what lets the helpers below resolve a base
+    without being handed the clone separately."""
     candidate = f"origin/{base_branch}"
     if isinstance(_run_git(["rev-parse", "--verify", candidate], cwd=repo), GitFailed):
         return base_branch
@@ -299,11 +303,22 @@ def sync_worktree(repo: Path, worktree: Path, base_branch: str) -> SyncResult:
     return Synced(merged.stdout)
 
 
-def has_commits(worktree: Path, base_branch: str) -> bool:
-    """Whether anything was actually committed on this branch."""
-    result = _run_git(["rev-list", "--count", f"{base_branch}..HEAD"], cwd=worktree)
+def has_commits(worktree: Path, base_branch: str) -> bool | GitFailed:
+    """Whether anything was actually committed on this branch.
+
+    Returns `GitFailed` rather than False when the question could not be
+    asked. The two are not the same and the difference is expensive: "the
+    agent committed nothing" is a fine, expected outcome, while "the base ref
+    does not resolve" means work exists and nobody was told. Collapsing them
+    is how a run that had made a commit reported that it had not.
+
+    The base is resolved the same way `ensure_worktree` resolves it, which is
+    the bug that made the distinction matter — see `_resolve_ref`.
+    """
+    ref = _resolve_ref(worktree, base_branch)
+    result = _run_git(["rev-list", "--count", f"{ref}..HEAD"], cwd=worktree)
     if isinstance(result, GitFailed):
-        return False
+        return result
     return result.stdout.strip() not in ("", "0")
 
 
@@ -313,8 +328,15 @@ def diffstat(worktree: Path, base_branch: str) -> str:
     `--stat` rather than a full diff: this is stored on the run and rendered on
     a phone, and it is bounded by the number of files rather than by the size
     of the change.
+
+    Resolves the base the same way `ensure_worktree` does. A clone has a local
+    branch only for the one it checked out, so a task branched from anything
+    else — `staging`, say — has only `origin/staging` to compare against, and
+    the bare name silently produced an empty diffstat.
     """
-    result = _run_git(["diff", "--stat", f"{base_branch}...HEAD"], cwd=worktree)
+    result = _run_git(
+        ["diff", "--stat", f"{_resolve_ref(worktree, base_branch)}...HEAD"], cwd=worktree
+    )
     if isinstance(result, GitFailed):
         return ""
     return result.stdout
