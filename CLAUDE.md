@@ -20,9 +20,11 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > The installer now creates a dedicated `workbench` account, relocates the deployment to
 > `/srv`, and finishes by saying what a person still has to do by hand —
 > `python -m workbench.doctor` answers the same questions any time afterwards.
-> **No agent has yet run on the real server**: the polkit grant that lets the app start a
-> unit is proven against a stub and not against the machine, and nobody has signed the
-> agent in. See `README.md` for what is actually live.
+> **Agents now run on the real server.** The polkit grant, the per-run unit and the
+> conversation path are all proven against the machine rather than a stub. What the first
+> real use found was not any of those: it was the credential expiring on a clock nothing
+> was watching, with every page still reporting a healthy login. See Deployment below.
+> See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
@@ -221,6 +223,15 @@ in `docs/server-conventions.md`.
   late — reads work, so runs succeed until the OAuth token is refreshed and cannot be
   saved. Both units grant both paths, and the run unit also grants `~/.ssh`, which `ssh`
   writes on first connection.
+- **The subscription login expires on a clock nothing was watching.** The credential is
+  two dates, not one: an eight-hour access token the backend renews unattended, and a
+  renewal window of about a fortnight that is anchored to the original browser login and
+  is *not* extended by renewing. So a server signed in once stops working roughly two
+  weeks later however much it runs, and `claude auth status` keeps reporting a healthy
+  `claude.ai` login throughout — it answers which account, never whether it works. The
+  doctor now reads the window itself and warns three days out. Automating past that is
+  not possible: the SDK has no auth surface, and the only unattended renewal that exists
+  is the one a run already does for free. See `docs/learning-notes.md`.
 - The service user needs its own SSH deploy key and `user.name`/`user.email`, or
   unattended pushes and agent commits will fail. Prefer per-repo deploy keys or a
   fine-grained PAT over an account-wide key, which would grant push to every repo.
@@ -451,9 +462,18 @@ Unresolved. Recorded here so they are not rediscovered later.
   Fine now; wants pruning before it is not.
 - **Whether a parent task's status should derive from its children.** Currently
   independent, with a `2/5` progress count shown instead.
-- **Nothing has ever failed on the real server.** Every refusal path — dirty checkout,
+- **Should the server hold a long-lived token instead?** `claude setup-token` mints one
+  (inference-only scope, supplied as `CLAUDE_CODE_OAUTH_TOKEN`), which is the shape a
+  headless box wants and would retire the fortnightly re-login entirely. It bills the
+  subscription, so it is untouched by `API_CREDENTIAL_VARS` stripping, and it would ride
+  the `EnvironmentFile` mechanism `/etc/workbench/env` already has. Against it: that
+  moves the credential out of the service account's home, which is currently what makes
+  "which account pays" concrete rather than ambient.
+- **No deploy has ever failed on the real server.** Every refusal path — dirty checkout,
   crash-on-boot preflight, migration failure — is proven on CI runners and in unit tests,
-  never on this machine. The first genuine bad deploy is still an unknown.
+  never on this machine. The first genuine bad deploy is still an unknown. A *run* has now
+  failed there, at authentication, which is what the credential-window check above came
+  from.
 
 ### Answered by the schema and deployment slices
 

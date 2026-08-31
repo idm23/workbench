@@ -459,6 +459,50 @@ generalising: **a value that is not actually variable should not be a placeholde
 every placeholder is a contract between two versions of the code that meet only during a
 deploy.
 
+## A credential that reports itself signed in can still be dead
+
+The first real conversation runs on the server worked. Two of them, seventeen hours apart.
+The third failed with `401 OAuth access token has expired. Re-authenticate to continue.`,
+after the CLI retried twice on its own — and every page of the app was still green while it
+happened.
+
+**`claude auth status --json` does not answer "does this work".** It answers which account
+and by what method, and both stay true long after the credential has stopped working:
+
+```json
+{"loggedIn": true, "authMethod": "claude.ai", "email": "...", "subscriptionType": "pro"}
+```
+
+There is no expiry field in it, so a doctor built on that probe reports `ok` for a machine
+where every run fails at authentication. That is worse than having no check, because the
+banner exists precisely so that nobody has to guess.
+
+The expiry is in `~/.claude/.credentials.json` instead, and it is two dates rather than one:
+
+```
+expiresAt             the access token, eight hours
+refreshTokenExpiresAt the renewal window, about a fortnight
+```
+
+**Renewing does not extend the renewal window.** Both timestamps in that file are written by
+the same refresh response — they agree to the millisecond — and yet `refreshTokenExpiresAt`
+was not a fortnight from that refresh. It is anchored to the original interactive login. So a
+headless server signed in once will fail roughly two weeks later no matter how often it runs,
+and "it renewed fine yesterday" says nothing about tomorrow.
+
+Two consequences for the shape of the check. The access token expiring is *routine* and must
+not be reported as a problem — a run past the eight-hour mark renews without anyone noticing,
+so a check that failed on `expiresAt` would put a red banner on a working machine every night.
+And the fix cannot be automated: the SDK exposes no auth surface, `claude auth` has only
+`login`/`logout`/`status`, and `auth status` does not itself renew. The only unattended
+renewal that exists is the one a run already does for free. Past the window it needs a
+browser, which is exactly the class of step `doctor.py` was written to make *discoverable*
+rather than automatic.
+
+Worth knowing for later: `claude setup-token` mints a long-lived subscription token
+(inference-only scope, supplied as `CLAUDE_CODE_OAUTH_TOKEN`), which is the shape a headless
+box actually wants and would retire the fortnightly cliff.
+
 ## Small ones
 
 **`curl -I` sends HEAD**, and FastAPI does not auto-add HEAD to a GET route. A `405` with

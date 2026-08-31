@@ -9,11 +9,17 @@ the README paragraph it replaces.
 
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from workbench import doctor
-from workbench.agents.protocol import CREDENTIAL_NONE, CREDENTIAL_UNKNOWN, CredentialStatus
+from workbench.agents.protocol import (
+    CREDENTIAL_NONE,
+    CREDENTIAL_SUBSCRIPTION,
+    CREDENTIAL_UNKNOWN,
+    CredentialStatus,
+)
 from workbench.agents.tests.fake import FakeBackend
 from workbench.doctor import CheckState
 
@@ -74,6 +80,75 @@ def test_a_credential_that_could_not_be_probed_is_unknown_not_failed(monkeypatch
 
     assert check.state is CheckState.UNKNOWN
     assert not check.failed
+
+
+def signed_in(monkeypatch, **overrides):
+    fields = {
+        "backend": "fake",
+        "logged_in": True,
+        "method": CREDENTIAL_SUBSCRIPTION,
+        "account": "someone@example.com",
+        "detail": "Signed in as someone@example.com, billing a Claude subscription.",
+        "login_command": ("/opt/claude", "auth", "login", "--claudeai"),
+    }
+    status = CredentialStatus(**{**fields, **overrides})
+    monkeypatch.setattr(
+        "workbench.agents.registry.get_backend",
+        lambda *_a, **_k: FakeBackend(credential=status),
+    )
+    return status
+
+
+def test_a_login_about_to_stop_renewing_warns_while_runs_still_work(monkeypatch):
+    """The whole point of the check: said days early, on a machine where
+    nothing is broken yet and every run still succeeds."""
+    signed_in(monkeypatch, renewable_until=datetime.now(UTC) + timedelta(days=2))
+
+    check = doctor.check_agent_credential()
+
+    assert check.state is CheckState.WARN
+    # A warning must not set the exit code, or `install.sh` starts failing on a
+    # machine that installed perfectly.
+    assert not check.failed
+    assert "2 days" in check.detail
+    # Renewing is what someone would try first, and it is the one thing that
+    # does not help — so the detail has to say so where the deadline is said.
+    assert "does not extend" in check.detail
+    assert check.fix == "/opt/claude auth login --claudeai"
+
+
+def test_a_login_with_room_left_says_nothing(monkeypatch):
+    """A banner that is always up is a banner nobody reads."""
+    signed_in(monkeypatch, renewable_until=datetime.now(UTC) + timedelta(days=9))
+
+    check = doctor.check_agent_credential()
+
+    assert check.state is CheckState.OK
+    assert check.fix is None
+
+
+def test_a_backend_that_reports_no_window_is_given_no_deadline(monkeypatch):
+    """An API key has no renewal window, and neither does a probe that could
+    not read one. Inventing one would be a false alarm on a working machine."""
+    signed_in(monkeypatch, renewable_until=None)
+
+    assert doctor.check_agent_credential().state is CheckState.OK
+
+
+def test_a_login_past_renewing_fails_rather_than_warns(monkeypatch):
+    """The backend decides this, not the doctor — a credential that cannot
+    renew reports itself signed out, and this is where that lands."""
+    signed_out(
+        monkeypatch,
+        method=CREDENTIAL_SUBSCRIPTION,
+        detail="The subscription login expired and can no longer renew itself.",
+        renewable_until=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    check = doctor.check_agent_credential()
+
+    assert check.state is CheckState.FAIL
+    assert check.fix == "/opt/claude auth login --claudeai"
 
 
 # --- Tailscale ----------------------------------------------------------------
