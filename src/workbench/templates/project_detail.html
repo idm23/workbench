@@ -20,10 +20,8 @@
   </form>
 {% else %}
   {% if conversation %}
-    {# The project's own standing conversation — not scoped to any task —
-       reuses the same live/pip styling a task's own activity marker uses. #}
-    <a class="status live" href="/runs/{{ conversation.id }}"
-       style="text-decoration: none; display: inline-block; margin-bottom: 1.75rem;"
+    {# The project's own standing conversation — not scoped to any task. #}
+    <a class="conversation-banner" href="/runs/{{ conversation.id }}"
        title="Run {{ conversation.id }} is {{ conversation.status.value }}"
     ><span class="pip"></span>Continue conversation</a>
   {% else %}
@@ -43,7 +41,7 @@
           <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
             <input type="hidden" name="new_status"
                    value="{{ 'open' if effective_status == 'done' else 'done' }}">
-            <button class="tick" type="submit"
+            <button class="tick {{ 'checked' if effective_status == 'done' }}" type="submit"
                     aria-label="{{ 'Reopen' if effective_status == 'done' else 'Mark done' }}"
             >{{ '✓' if effective_status == 'done' else '' }}</button>
           </form>
@@ -137,7 +135,7 @@
                 </form>
               {% endif %}
               <form method="post" action="/tasks/{{ node.task.id }}/delete">
-                <button class="slim secondary" type="submit">Delete</button>
+                <button class="slim danger" type="submit">Delete</button>
               </form>
             </div>
           </div>
