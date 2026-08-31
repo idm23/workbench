@@ -208,6 +208,134 @@ def test_a_failure_reported_by_the_web_process_still_fails_the_run(db, run, chec
     assert run.error == "Tests fail and I could not find why."
 
 
+# --- Publishing the work -----------------------------------------------------
+#
+# `execute_prompt` tells the agent not to push and not to open a pull request,
+# because Workbench does both. Until this existed that was a promise nothing
+# kept: the agent obeyed, committed, and the work sat in a worktree.
+
+
+def _finished(db, run):
+    """A run the agent reported as finished, the way the outcome API does."""
+    _report_from_another_process(run.id, RunOutcome.FINISHED)
+
+
+def _publishes(monkeypatch, *, commits=True, push=None, opened=None, token: str | None = "pat"):
+    """Stand in for the three collaborators `_publish` orchestrates."""
+    from workbench.git.github import PullRequestOpened
+    from workbench.git.worktrees import GitOk
+
+    calls: dict = {}
+
+    def push_branch(worktree, branch):
+        calls["pushed"] = branch
+        return push if push is not None else GitOk("")
+
+    def open_pull_request(ref, **kwargs):
+        calls["pr"] = kwargs
+        return opened if opened is not None else PullRequestOpened(url="https://gh/pr/1")
+
+    monkeypatch.setattr(runner_module, "has_commits", lambda *_: commits)
+    monkeypatch.setattr(runner_module, "push_branch", push_branch)
+    monkeypatch.setattr(runner_module, "open_pull_request", open_pull_request)
+    monkeypatch.setattr(runner_module, "github_token", lambda: token)
+    return calls
+
+
+def test_a_finished_run_pushes_and_records_the_pull_request(
+    db, run, checkout, backend, monkeypatch
+):
+    calls = _publishes(monkeypatch)
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert calls["pushed"] == run.task.branch
+    assert run.pr_url == "https://gh/pr/1"
+
+
+def test_the_pull_request_targets_what_the_worktree_was_cut_from(
+    db, run, checkout, backend, monkeypatch
+):
+    """Not the repository's default branch. This is what sends work into
+    staging on a project that promotes through it."""
+    import subprocess
+
+    calls = _publishes(monkeypatch)
+    subprocess.run(("git", "branch", "staging"), cwd=checkout, check=True, capture_output=True)
+    run.task.origin_ref = "staging"
+    db.commit()
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert calls["pr"]["base"] == "staging"
+    assert calls["pr"]["head"] == run.task.branch
+
+
+def test_a_run_with_no_commits_is_not_pushed(db, run, checkout, backend, monkeypatch):
+    """An agent that correctly concluded nothing needed changing. An empty
+    pull request would be the worst possible answer to that."""
+    calls = _publishes(monkeypatch, commits=False)
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert "pushed" not in calls
+    assert run.pr_url is None
+    assert _notices(db, run, "nothing was pushed")
+
+
+def test_a_failed_push_says_so_without_failing_the_run(db, run, checkout, backend, monkeypatch):
+    """The work is committed by this point. Recording the run as a failure
+    would make those commits look suspect over an SSH key."""
+    from workbench.git.worktrees import GitFailed
+
+    _publishes(monkeypatch, push=GitFailed("git push failed (exit 128).", stderr="denied"))
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.task.status is TaskStatus.DONE
+    assert run.pr_url is None
+    assert _notices(db, run, "could not be pushed")
+    # The doctor is where the deploy key is diagnosed, so it is named here.
+    assert _notices(db, run, "workbench.doctor")
+
+
+def test_without_a_token_the_branch_is_still_pushed(db, run, checkout, backend, monkeypatch):
+    """Pushing uses the deploy key; opening a pull request needs the API. Only
+    the second one is missing, so only the second one is given up on."""
+    calls = _publishes(monkeypatch, token=None)
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert calls["pushed"] == run.task.branch
+    assert run.pr_url is None
+    assert _notices(db, run, "WORKBENCH_GITHUB_TOKEN")
+
+
+def test_an_unreported_run_is_not_published(db, run, checkout, backend, monkeypatch):
+    """The same standard that closes a task opens a pull request. A run that
+    never said how it went leaves its commits for a person to look at."""
+    calls = _publishes(monkeypatch)
+
+    execute(db, run)
+
+    assert "pushed" not in calls
+    assert run.pr_url is None
+
+
+def _notices(db, run, needle: str) -> bool:
+    return any(
+        needle in e.payload.get("text", "")
+        for e in events_for(db, run)
+        if e.kind is RunEventKind.NOTICE
+    )
+
+
 def test_a_reported_finished_outcome_is_distrusted_if_the_run_was_cut_short(
     db, run, checkout, monkeypatch
 ):

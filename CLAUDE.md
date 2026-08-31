@@ -171,6 +171,28 @@ manually *or* with an agent — creates a branch and a worktree; the agent runs 
 - An interrupted session still summarizes usefully, because the summarizer is fed
   both committed and uncommitted diffs.
 
+**The agent commits; Workbench pushes and opens the pull request.** Split deliberately,
+and the prompt says so out loud, so that a run which dies midway leaves its work on a
+branch rather than a half-formed pull request. Two consequences that are easy to get
+backwards. The two halves use *different credentials* — the push rides the service
+account's SSH deploy key, opening the pull request needs `WORKBENCH_GITHUB_TOKEN`
+through the API — so a machine with one and not the other pushes successfully and then
+stops, which is a notice on the run rather than a failure of it. And the pull request
+targets **whatever the worktree was cut from**, not the repository's default branch:
+that is what sends work into `staging` on a project that promotes through it, and what
+makes a task branched from another task stack onto it instead of jumping the queue.
+
+For the same reason the origin picker defaults to `staging`. A branch cut from `main`
+and aimed at `staging` carries every promotion merge `main` has had since, and the pull
+request lists them as if they were part of the change. Note this is the default a person
+sees, not the fallback for an origin nobody ever chose — that stays on the default branch,
+because a project reached through the JSON API may have nothing called `staging` at all.
+
+Publishing happens only on the path that closes the task: an explicit `finished` outcome
+that was not cut short. A run that says nothing, or that ran out of turns, leaves its
+commits for a person. A run with no commits at all is a notice and not a pull request —
+see the open question about whether that should be an outcome of its own.
+
 **Data model**, as built rather than as sketched:
 
 ```

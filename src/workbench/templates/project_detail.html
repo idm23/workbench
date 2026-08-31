@@ -142,7 +142,7 @@
                            executor refused — the concurrency cap, say —
                            rather than silently reverting to main. #}
                         <option value="{{ value }}"
-                          {{ 'selected' if value == (node.task.origin_ref or 'main') }}
+                          {{ 'selected' if value == (node.task.origin_ref or default_origin) }}
                         >{{ label }}</option>
                       {% endfor %}
                     </select>
