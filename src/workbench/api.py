@@ -177,7 +177,7 @@ def add_task(db: DbSession, project_id: int, incoming: TaskIn) -> TaskOut:
         parent_id=incoming.parent_id,
     )
     if isinstance(created, WrongProject):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, created.message)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, created.message)
 
     # Freshly created, so it has no children yet — build_tree would be a query
     # for an answer already known.
@@ -213,7 +213,7 @@ def add_subtask(db: DbSession, task_id: int, incoming: SubtaskIn) -> TaskOut:
         ready_to_execute=incoming.ready_to_execute,
     )
     if isinstance(created, WrongProject):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, created.message)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, created.message)
 
     return TaskOut(
         id=created.id,
@@ -261,12 +261,12 @@ def report_run_outcome(db: DbSession, run_id: int, incoming: OutcomeIn) -> None:
     run = _run_or_404(db, run_id)
     if run.status is not RunStatus.RUNNING:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"Run {run_id} is {run.status.value}, not running.",
         )
     if run.phase is not RunPhase.EXECUTE:
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Only an execute-phase run reports an outcome this way.",
         )
 
