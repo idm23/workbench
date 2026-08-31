@@ -22,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from workbench.api import router as api_router
-from workbench.config import instance
+from workbench.config import instance, systemd_available
 from workbench.database.db import get_db
 from workbench.database.models import (
     Project,
@@ -63,6 +63,7 @@ from workbench.runs.lifecycle import (
 from workbench.runs.rate_limits import latest_readings
 from workbench.runs.store import append_event, append_input
 from workbench.runs.stream import fetch_events, parse_last_event_id, stream
+from workbench.services import active_shells, running_services
 from workbench.tasks import (
     WrongProject,
     build_tree,
@@ -197,6 +198,27 @@ def create_user(db: DbSession, name: Annotated[str, Form()]) -> RedirectResponse
         db.rollback()
         return _redirect("/", error=f"There is already a user called {cleaned}.")
     return _redirect("/")
+
+
+@app.get("/services", response_class=HTMLResponse)
+def show_services(request: Request, db: DbSession) -> HTMLResponse:
+    """What this instance of Workbench is actually running right now.
+
+    Scoped to this instance on purpose — production and staging share a
+    machine, and `running_services` reads through the same instance-scoped
+    unit names the installer itself writes, so a page opened on one never
+    lists the other's units.
+    """
+    return templates.TemplateResponse(
+        request,
+        "services.html",
+        {
+            **_shared(db),
+            "services": running_services(db),
+            "shells": active_shells(db),
+            "systemd_available": systemd_available(),
+        },
+    )
 
 
 @app.get("/users/{user_id}", response_class=HTMLResponse)
