@@ -8,9 +8,8 @@ test in a session quietly writes to the first one's database.
 import subprocess
 
 import pytest
-from sqlalchemy.orm import Session
 
-from workbench.database.db import get_engine, get_session_factory, make_engine
+from workbench.database.db import get_engine, get_session_factory
 from workbench.database.models import Base, Project, RunPhase, Task, User
 from workbench.git.worktrees import clone_path_for
 from workbench.runs.store import create_run
@@ -31,9 +30,19 @@ def data_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def db(data_dir):
-    engine = make_engine(f"sqlite+pysqlite:///{data_dir / 'workbench.db'}")
+    """The session the runner would actually get, not a lookalike.
+
+    Through `get_session_factory()`, which sets `expire_on_commit=False`, and
+    not a bare `Session(engine)` — whose default is the opposite. That
+    difference is not cosmetic: with auto-expiry on, every `db.commit()`
+    silently re-reads the row, so a test cannot see a value another process
+    changed going stale. It masked a real bug, where the runner missed every
+    outcome the agent reported through the API because those are written by
+    the web process and this one never looked again.
+    """
+    engine = get_engine()
     Base.metadata.create_all(engine)
-    with Session(engine) as session:
+    with get_session_factory()() as session:
         yield session
 
 
