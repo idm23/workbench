@@ -512,6 +512,39 @@ def test_a_parent_task_is_not_offered_a_run(client, session, cloned):
     assert page.count(">Plan<") == 2
 
 
+def test_a_parent_task_offers_to_collapse_its_subtasks(client, session, cloned):
+    parent = a_task(session)
+    session.add(Task(project_id=parent.project_id, parent_id=parent.id, title="A child"))
+    session.commit()
+
+    page = client.get(f"/projects/{parent.project_id}").text
+
+    assert 'class="twist"' in page
+    assert 'data-depth="0"' in page
+    assert 'data-depth="1"' in page
+
+
+def test_a_leaf_task_offers_no_collapse_toggle(client, session, cloned):
+    """Nothing to collapse — there is no subtree under a leaf."""
+    page = client.get(f"/projects/{a_task(session).project_id}").text
+
+    assert 'class="twist"' not in page
+
+
+def test_a_parent_task_shows_a_progress_meter(client, session, cloned):
+    parent = a_task(session)
+    child = Task(project_id=parent.project_id, parent_id=parent.id, title="A child")
+    session.add(child)
+    session.commit()
+    child.status = TaskStatus.DONE
+    session.commit()
+
+    page = client.get(f"/projects/{parent.project_id}").text
+
+    assert "1/1 done" in page
+    assert 'aria-valuenow="100"' in page
+
+
 def test_a_runnable_task_offers_an_origin_picker(client, session, cloned):
     page = client.get(f"/projects/{a_task(session).project_id}").text
 
