@@ -43,6 +43,16 @@ class RepoRef:
         return f"https://github.com/{self.owner}/{self.repo}"
 
     @property
+    def ssh_url(self) -> str:
+        """The form that authenticates with a deploy key rather than a password.
+
+        Only ever used for pushing. Fetching stays on `url`, because a public
+        repository clones and fetches with no credentials at all — requiring a
+        key to read would break adding a project on a machine that has none.
+        """
+        return f"git@github.com:{self.owner}/{self.repo}.git"
+
+    @property
     def slug(self) -> str:
         return f"{self.owner}/{self.repo}"
 

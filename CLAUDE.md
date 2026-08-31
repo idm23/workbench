@@ -254,6 +254,16 @@ in `docs/server-conventions.md`.
   doctor now reads the window itself and warns three days out. Automating past that is
   not possible: the SDK has no auth surface, and the only unattended renewal that exists
   is the one a run already does for free. See `docs/learning-notes.md`.
+- **The deploy key can only be used by a remote that speaks SSH, and clones do not.**
+  Every clone is made from `projects.github_url`, which `RepoRef.url` always rebuilds as
+  HTTPS whatever was typed — so `origin` is HTTPS and a push asks for a password GitHub
+  stopped accepting. Nothing caught it because fetching a public repository needs no
+  credentials at all: push is the first operation in a run that authenticates, and the
+  doctor's key check passed the whole time it was broken. `push_branch` now sets
+  `remote.origin.pushurl` to the SSH form on the way in, leaving the fetch URL alone —
+  split rather than switched, because requiring a key to *read* would mean a key just to
+  add a public project. Doing it at push time rather than clone time is what repairs the
+  clones that already exist, since nothing re-clones them.
 - The service user needs its own SSH deploy key and `user.name`/`user.email`, or
   unattended pushes and agent commits will fail. Prefer per-repo deploy keys or a
   fine-grained PAT over an account-wide key, which would grant push to every repo.

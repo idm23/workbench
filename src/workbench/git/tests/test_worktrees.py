@@ -19,6 +19,7 @@ from workbench.git.worktrees import (
     branch_name,
     clone_path_for,
     diffstat,
+    ensure_push_remote,
     ensure_worktree,
     fetch_checkout,
     has_commits,
@@ -383,3 +384,78 @@ def test_each_instance_resolves_its_own_checkout(tmp_path, monkeypatch):
     # Staging has restored production's database but has no clone of its own,
     # so it correctly reports having nothing to work in.
     assert local_checkout("idm23", "workbench") is None
+
+
+# --- Pushing over SSH rather than HTTPS ---------------------------------------
+#
+# Every clone is made from `RepoRef.url`, which is always HTTPS, so `origin`
+# is HTTPS and a push asks for a password GitHub stopped accepting. Nothing
+# noticed because fetching a public repository needs no credentials at all —
+# push is the first operation in a run that authenticates.
+
+
+def _remote(path, which: str) -> str:
+    args = ["git", "remote", "get-url"] + (["--push"] if which == "push" else []) + ["origin"]
+    return subprocess.run(args, cwd=path, capture_output=True, text=True, check=True).stdout.strip()
+
+
+@pytest.fixture
+def https_checkout(cloned_repo):
+    """A checkout whose `origin` is a GitHub HTTPS URL, as every real one is."""
+    _, checkout = cloned_repo
+    subprocess.run(
+        ("git", "remote", "set-url", "origin", "https://github.com/idm23/workbench"),
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+    )
+    return checkout
+
+
+def test_an_https_remote_gains_an_ssh_push_url(https_checkout):
+    assert isinstance(ensure_push_remote(https_checkout), GitOk)
+
+    assert _remote(https_checkout, "push") == "git@github.com:idm23/workbench.git"
+
+
+def test_the_fetch_url_is_left_alone(https_checkout):
+    """The whole point of splitting them. Making fetch SSH too would mean a
+    key is needed just to add a public project, which is a worse trade than
+    the bug it fixes."""
+    ensure_push_remote(https_checkout)
+
+    assert _remote(https_checkout, "fetch") == "https://github.com/idm23/workbench"
+
+
+def test_repairing_is_idempotent(https_checkout):
+    """It runs on the way into every push, not once at clone time — because
+    the clones that need it already exist and nothing re-clones them."""
+    ensure_push_remote(https_checkout)
+    ensure_push_remote(https_checkout)
+
+    assert _remote(https_checkout, "push") == "git@github.com:idm23/workbench.git"
+
+
+def test_an_ssh_remote_is_left_exactly_as_it_is(cloned_repo):
+    _, checkout = cloned_repo
+    subprocess.run(
+        ("git", "remote", "set-url", "origin", "git@github.com:someone/other.git"),
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+    )
+
+    assert isinstance(ensure_push_remote(checkout), GitOk)
+    assert _remote(checkout, "push") == "git@github.com:someone/other.git"
+
+
+def test_a_remote_that_is_not_github_is_refused_rather_than_guessed_at(cloned_repo):
+    """A local path, a self-hosted forge, anything else. Guessing at a push
+    URL is how a run pushes somewhere nobody meant it to — and the fixture's
+    own `origin` is a directory, so this is the ordinary case in tests."""
+    _, checkout = cloned_repo
+
+    result = ensure_push_remote(checkout)
+
+    assert isinstance(result, GitFailed)
+    assert "not a GitHub remote" in result.message
