@@ -767,8 +767,8 @@ def test_sending_a_message_to_a_missing_run_is_404(client, session):
     assert client.post("/runs/999/message", data={"body": "hello"}).status_code == 404
 
 
-def test_a_running_run_offers_to_send_a_message(client, session):
-    run = _running_run(session)
+def test_a_running_conversation_offers_to_send_a_message(client, session):
+    run = _conversation(session)
 
     page = client.get(f"/runs/{run.id}").text
 
@@ -782,6 +782,16 @@ def test_a_finished_run_does_not_offer_to_send_a_message(client, session):
     page = client.get(f"/runs/{run.id}").text
 
     assert "/message" not in page
+
+
+def _conversation(session, *, running: bool = True) -> Run:
+    """A task conversation — now the only kind of run that takes messages."""
+    from workbench.runs.store import create_task_conversation, mark_running
+
+    run = create_task_conversation(session, a_task(session), backend="claude")
+    if running:
+        mark_running(session, run)
+    return run
 
 
 def _queued_run(session) -> Run:
@@ -802,7 +812,9 @@ def _reply_form(page: str) -> str:
     return match.group(0) if match else ""
 
 
-def test_a_queued_run_renders_the_message_box_hidden_rather_than_not_at_all(client, session):
+def test_a_queued_conversation_renders_the_message_box_hidden_rather_than_not_at_all(
+    client, session
+):
     """The bug this fixes, and the reason it was invisible.
 
     Starting a conversation redirects here the instant the row exists, while
@@ -812,7 +824,7 @@ def test_a_queued_run_renders_the_message_box_hidden_rather_than_not_at_all(clie
     and never re-renders the page, so the box arrived only for whoever
     happened to reload mid-run.
     """
-    run = _queued_run(session)
+    run = _conversation(session, running=False)
 
     page = client.get(f"/runs/{run.id}").text
 
@@ -820,9 +832,9 @@ def test_a_queued_run_renders_the_message_box_hidden_rather_than_not_at_all(clie
     assert "hidden" in _reply_form(page)
 
 
-def test_a_running_run_shows_the_message_box_straight_away(client, session):
+def test_a_running_conversation_shows_the_message_box_straight_away(client, session):
     """Rendered hidden only while there is nothing listening yet."""
-    run = _running_run(session)
+    run = _conversation(session)
 
     form = _reply_form(client.get(f"/runs/{run.id}").text)
 
@@ -833,12 +845,70 @@ def test_a_running_run_shows_the_message_box_straight_away(client, session):
 def test_the_page_reveals_the_message_box_from_the_stream(client, session):
     """The other half: without this listener the form stays hidden forever,
     because the only reload this page does is the one when the run ends."""
-    run = _queued_run(session)
+    run = _conversation(session, running=False)
 
     page = client.get(f"/runs/{run.id}").text
 
     assert 'source.addEventListener("status"' in page
     assert "reply.hidden" in page
+
+
+def test_a_running_plan_or_execute_run_offers_no_message_box(client, session):
+    """It ends the moment the agent is done rather than listening, so a box
+    here would take a message nothing would ever read."""
+    run = _running_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert _reply_form(page) == ""
+    assert "/message" not in page
+
+
+def test_a_finished_run_offers_to_be_continued(client, session):
+    """The other half of ending promptly: a dialog is a deliberate act."""
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert f'action="/runs/{run.id}/continue"' in page
+
+
+def test_a_finished_run_with_no_session_offers_nothing_to_continue(client, session):
+    """Resuming nothing answers from no context at all, which looks identical
+    from the outside and is much worse than saying there is nothing there."""
+    run = a_finished_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "/continue" not in page
+
+
+def test_continuing_a_finished_run_starts_a_conversation_on_its_task(client, session, executor):
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    response = client.post(f"/runs/{run.id}/continue")
+
+    started = session.query(Run).order_by(Run.id.desc()).first()
+    assert started is not None and started.id != run.id
+    assert started.phase is RunPhase.CONVERSATION
+    assert started.task_id == run.task_id
+    # Scoped to the task, never offered as the project's own conversation.
+    assert started.project_id is None
+    assert response.headers["location"] == f"/runs/{started.id}"
+
+
+def test_continuing_a_run_that_never_finished_is_refused(client, session):
+    run = _running_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    response = client.post(f"/runs/{run.id}/continue")
+
+    assert "not+finished" in response.headers["location"]
 
 
 # --- Reading a run back ----------------------------------------------------

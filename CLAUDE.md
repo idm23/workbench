@@ -193,6 +193,21 @@ that was not cut short. A run that says nothing, or that ran out of turns, leave
 commits for a person. A run with no commits at all is a notice and not a pull request —
 see the open question about whether that should be an outcome of its own.
 
+**A run ends when the agent is done; talking to it afterwards is a separate act.**
+Plan and execute runs stop the moment the agent delivers its result. They used to wait
+`input_idle_seconds` — five minutes — in case somebody typed, which bought nothing and
+cost a lot: the run stayed `running` long after it was finished, held one of two
+concurrency slots, and delayed the pull request by the length of the window. It could not
+have worked either, because `request.inputs` is only pulled *between* turns, so nothing
+typed during a plan run ever reached the agent.
+
+A conversation still waits, because that is the whole point of one. To talk to a finished
+run, continue it: a new `conversation`-phase run scoped to the same task, resuming the
+same session, in the same worktree — which it must be, because a backend's session token
+is keyed to the directory it was issued in. A new run rather than a resurrection of the
+old one, so the record of what happened stays what happened. So a dialog is something a
+person chooses, not something every run waits around on the chance of.
+
 **Data model**, as built rather than as sketched:
 
 ```

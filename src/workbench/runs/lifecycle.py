@@ -24,6 +24,7 @@ from workbench.runs.store import (
     append_event,
     create_conversation,
     create_run,
+    create_task_conversation,
     finish_run,
     record_launch,
 )
@@ -180,6 +181,60 @@ def start_run(
 
     chosen = backend or task.project.agent_backend or default_agent_backend()
     run = create_run(db, task, phase, backend=chosen)
+    return _launch(db, run, executor)
+
+
+@dataclass(frozen=True)
+class NotContinuable:
+    """This run cannot be reopened, and the reason is worth showing."""
+
+    message: str
+
+
+def continue_run(
+    db: Session,
+    source: Run,
+    *,
+    executor: str | None = None,
+) -> StartResult | NotContinuable:
+    """Reopen a finished run as a conversation, because someone asked to.
+
+    The counterpart to plan and execute runs ending the moment the agent is
+    done. Ending promptly is only reasonable if picking the thread back up is
+    possible, and making that a button rather than a five-minute window is
+    the point: a dialog is now something a person chooses, not something
+    every run waits around for on the chance that one is wanted.
+
+    A new run rather than a resurrection of this one. The old run is a record
+    of what happened and stays that way — its events, its cost, its outcome —
+    and continuing it would rewrite history that something else may already
+    have reported on.
+    """
+    reap(db)
+
+    task = source.task
+    if task is None:
+        return NotContinuable("Only a run that belongs to a task can be continued.")
+    if not source.status.is_terminal:
+        return NotContinuable("That run has not finished yet.")
+    if source.resume_token is None:
+        # Nothing to resume into. Starting cold would look identical from
+        # the outside and answer from no context at all, which is worse than
+        # saying so.
+        return NotContinuable("That run left no session to continue.")
+
+    existing = active_run_for_task(db, task.id)
+    if existing is not None:
+        return AlreadyRunning(existing.id)
+
+    limit = max_concurrent_runs()
+    running = active_runs(db)
+    if limit > 0 and len(running) >= limit:
+        return TooManyRuns(len(running), limit)
+
+    # The source run's backend, never the project's current default: the token
+    # is opaque and means nothing to any backend but the one that issued it.
+    run = create_task_conversation(db, task, backend=source.backend)
     return _launch(db, run, executor)
 
 

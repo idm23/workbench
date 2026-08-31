@@ -93,6 +93,31 @@ def execute_prompt(title: str, body: str | None = None) -> str:
     return "\n".join(parts)
 
 
+def continuation_prompt(title: str) -> str:
+    """Reopening a finished run, because a person chose to ask something.
+
+    The session is resumed, so the agent already has the task, the codebase
+    and everything it did — restating any of that would only invite it to
+    re-derive what it already worked out.
+
+    What it does need is the one thing the transcript cannot tell it: that
+    the work is over and this is a conversation, not a second attempt. Left
+    out, a resumed agent reads a new prompt as a new instruction and starts
+    working again, which is the opposite of what the button offered.
+    """
+    return (
+        f"That run is finished and this is a follow-up conversation about it, "
+        f"not a new attempt at {title!r}.\n"
+        "\n"
+        "Someone has opened this deliberately to ask you something. Say briefly "
+        "that you are here and what you last did, then wait — do not redo, "
+        "extend, or 'improve' the work unless you are actually asked to.\n"
+        "\n"
+        "This conversation stays open for a while: reply to each message and "
+        "then wait for the next one rather than assuming you are finished."
+    )
+
+
 def prompt_for(phase: RunPhase, title: str, body: str | None = None) -> str:
     """The prompt for a task phase, so callers switch on the enum in one
     place. `CONVERSATION` is not a task phase — see `conversation_prompt`."""
