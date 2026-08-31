@@ -18,7 +18,8 @@ import logging
 import shutil
 import subprocess
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -459,6 +460,81 @@ def _unknown_credential(detail: str) -> CredentialStatus:
     )
 
 
+#: The subscription credential, relative to the home directory of whoever the
+#: probe runs as. Read directly because `auth status` does not report it: that
+#: command answers "which account, by what method", which stays true for weeks
+#: after the credential itself has stopped working.
+CREDENTIAL_PATH = (".claude", ".credentials.json")
+
+#: The key the OAuth pair lives under. Anything else in that file — an API key
+#: entry, a future scheme — is not a subscription window and is left alone.
+OAUTH_KEY = "claudeAiOauth"
+
+
+@dataclass(frozen=True)
+class CredentialWindow:
+    """How long the credential on disk has left, as far as it can be read.
+
+    Both fields default to None, and that is the important state rather than a
+    tidy default: "the window could not be read" must never be mistaken for
+    "the window is fine". Every caller treats None as no opinion, so a file
+    that moves, gains a format, or is unreadable under a tighter sandbox
+    degrades this check to silence rather than to a false alarm.
+    """
+
+    expires_at: datetime | None = None
+    renewable_until: datetime | None = None
+
+    def renewal_lapsed(self) -> bool:
+        """Whether unattended renewal is already impossible.
+
+        False when nothing could be read, for the reason above.
+        """
+        return self.renewable_until is not None and self.renewable_until <= datetime.now(UTC)
+
+
+def _moment(value: Any) -> datetime | None:
+    """One of the file's timestamps as a datetime, or None if it is not one.
+
+    Milliseconds, unlike the seconds the SDK hands to `runs.rate_limits` — the
+    two sources disagree, which is exactly why neither guesses.
+    """
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
+    except OverflowError, OSError, ValueError:
+        logger.warning("Uninterpretable credential expiry: %r", value)
+        return None
+
+
+def read_credential_window(home: Path | None = None) -> CredentialWindow:
+    """When the credential expires, and how long it can renew itself.
+
+    Never raises and never guesses. The file belongs to the vendor, so it may
+    be absent (an API key, a long-lived token, a machine nobody has signed in
+    on) or shaped differently tomorrow, and either way an empty window is the
+    honest answer.
+    """
+    path = (home or Path.home()).joinpath(*CREDENTIAL_PATH)
+    try:
+        payload = json.loads(path.read_text())
+    except OSError, json.JSONDecodeError, UnicodeDecodeError:
+        # Debug rather than warning: not having one of these is an ordinary
+        # state, and the doctor reports the silence itself where it matters.
+        logger.debug("no readable credential window at %s", path)
+        return CredentialWindow()
+
+    oauth = payload.get(OAUTH_KEY) if isinstance(payload, dict) else None
+    if not isinstance(oauth, dict):
+        return CredentialWindow()
+
+    return CredentialWindow(
+        expires_at=_moment(oauth.get("expiresAt")),
+        renewable_until=_moment(oauth.get("refreshTokenExpiresAt")),
+    )
+
+
 def _login_command(cli: str | None) -> tuple[str, ...]:
     """How a person signs this backend in.
 
@@ -470,19 +546,50 @@ def _login_command(cli: str | None) -> tuple[str, ...]:
     return () if cli is None else (cli, "auth", "login", "--claudeai")
 
 
-def read_credential(payload: dict[str, Any], cli: str | None = None) -> CredentialStatus:
+def read_credential(
+    payload: dict[str, Any],
+    cli: str | None = None,
+    window: CredentialWindow | None = None,
+) -> CredentialStatus:
     """Translate the CLI's `auth status` report into Workbench's vocabulary.
 
     Split out from the subprocess call so the mapping can be tested against
     real recorded payloads without a binary, which matters because the
     interesting cases here are the ones that are awkward to reproduce on
     demand.
+
+    `window` is the second half of the answer and comes from a different
+    source — see `read_credential_window`. It is optional so that the many
+    cases where it says nothing (an API key, a signed-out machine) read the
+    same as they did before.
     """
     method = str(payload.get("authMethod") or "").strip()
     account = payload.get("email") or payload.get("orgName") or None
 
     if method == "claude.ai":
         who = account or "this account"
+        window = window or CredentialWindow()
+
+        if window.renewal_lapsed():
+            # The case this file could not see before, and the one that
+            # actually happened: `auth status` still reports a perfectly good
+            # claude.ai login, every run fails at authentication, and nothing
+            # on the machine says the two are the same fact.
+            return CredentialStatus(
+                backend=BACKEND_NAME,
+                logged_in=False,
+                method=CREDENTIAL_SUBSCRIPTION,
+                account=account,
+                detail=(
+                    f"The subscription login for {who} expired and can no longer renew "
+                    "itself, so every run now fails to authenticate. Signing in again is "
+                    "the only fix."
+                ),
+                login_command=_login_command(cli),
+                expires_at=window.expires_at,
+                renewable_until=window.renewable_until,
+            )
+
         return CredentialStatus(
             backend=BACKEND_NAME,
             logged_in=True,
@@ -490,6 +597,8 @@ def read_credential(payload: dict[str, Any], cli: str | None = None) -> Credenti
             account=account,
             detail=f"Signed in as {who}, billing a Claude subscription.",
             login_command=_login_command(cli),
+            expires_at=window.expires_at,
+            renewable_until=window.renewable_until,
         )
 
     if method == "api_key":
@@ -587,7 +696,7 @@ class ClaudeBackend:
 
         if not isinstance(payload, dict):
             return _unknown_credential("The Claude CLI did not report a readable status.")
-        return read_credential(payload, cli)
+        return read_credential(payload, cli, read_credential_window())
 
     async def run(self, request: AgentRequest) -> AgentStream:
         """Drive the conversation on one persistent connection, turn by turn.

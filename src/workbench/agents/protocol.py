@@ -14,6 +14,7 @@ has seen the outcome has, by construction, already seen every event before it.
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -213,6 +214,25 @@ class CredentialStatus:
     #: doctor that spelled out `claude auth login` would be a second place
     #: that knows which vendor answered.
     login_command: tuple[str, ...] = ()
+
+    #: When the credential in hand stops being accepted, or None when the
+    #: backend cannot say. Note that this expiring is *not* by itself a
+    #: problem: a backend that can renew unattended does so on its next run,
+    #: which is why this is reported separately from `renewable_until` rather
+    #: than folded into `logged_in`.
+    expires_at: datetime | None = None
+
+    #: The last moment the backend can get itself working again without a
+    #: person, or None when it cannot say. Past this there is no unattended
+    #: recovery — someone has to log in against an account no script can know
+    #: about, which is the whole reason this field is worth carrying up.
+    #:
+    #: Deliberately not derived from `expires_at`. The two came apart on this
+    #: machine: a subscription login renews an eight-hour token from a window
+    #: that is anchored to the original browser login and is *not* extended by
+    #: renewing, so a server can be renewing happily and still be days from
+    #: needing a human.
+    renewable_until: datetime | None = None
 
 
 @runtime_checkable
