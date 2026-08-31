@@ -446,6 +446,15 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
     if run.phase is RunPhase.CONVERSATION:
         return _record_conversation(db, run, ending)
 
+    # Both fields are written by a *different* process — the web tier, through
+    # the outcome API, while this one was streaming events — and the session
+    # factory sets `expire_on_commit=False`. So this object still holds what
+    # they were when the run started, which is None, and every guard below
+    # would read that instead of what the agent actually reported. Expired
+    # rather than refreshed: these two are the only attributes here that
+    # anything outside this process writes, and the rest are ours.
+    db.expire(run, ["agent_outcome", "outcome_detail"])
+
     task = run.task
     if task is None:
         # Should not happen — only a conversation lacks a task, and that
