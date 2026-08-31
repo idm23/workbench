@@ -94,8 +94,13 @@
   <p class="empty" id="no-events">Nothing recorded yet.</p>
 {% endif %}
 
-{% if not run.status.is_terminal %}
-  {# Rendered for any run that has not finished, and hidden until it is
+{% if run.phase.value == 'conversation' and not run.status.is_terminal %}
+  {# A conversation only. A plan or execute run ends the moment the agent is
+     done rather than listening for five minutes, so a box on one of those
+     would take a message nothing would ever read — to talk to a finished
+     run, continue it below.
+
+     Rendered for a conversation that has not finished, and hidden until it is
      actually running — rather than rendered only when running.
 
      The distinction is the whole fix. Starting a conversation redirects here
@@ -114,6 +119,19 @@
     <textarea id="body" name="body" rows="2"
               placeholder="Type a message to send into this run…"></textarea>
     <button type="submit">Send</button>
+  </form>
+{% endif %}
+
+{% if run.status.is_terminal and run.resume_token and task %}
+  {# The other half of ending promptly. A plan or execute run stops as soon
+     as the agent is done, so this is how a dialog gets started — when one is
+     actually wanted, rather than every run waiting on the chance of it.
+
+     Needs a session to resume into: without `resume_token` this would answer
+     from no context at all, which looks identical from the outside and is
+     much worse. #}
+  <form method="post" action="/runs/{{ run.id }}/continue" style="margin-top: 1.25rem;">
+    <button type="submit" class="secondary">Continue this conversation</button>
   </form>
 {% endif %}
 

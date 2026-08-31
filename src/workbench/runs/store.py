@@ -59,6 +59,28 @@ def create_conversation(db: Session, project: Project, backend: str) -> Run:
     return run
 
 
+def create_task_conversation(db: Session, task: Task, backend: str) -> Run:
+    """Talk to the agent that just worked a task, in the worktree it worked in.
+
+    A conversation like `create_conversation`, but scoped to a task rather
+    than a project, because that is what makes resuming possible at all: a
+    backend's session token is keyed to the directory it ran in, so
+    continuing a plan means running in that plan's worktree.
+
+    Deliberately leaves `project_id` unset even though the project is
+    reachable through the task. `active_run_for_project` selects on that
+    column to find "the project's standing conversation", and this is not
+    one — it belongs to a single task, and offering it as the project's
+    would send someone talking about one task into a worktree for another.
+    """
+    run = Run(
+        task_id=task.id, phase=RunPhase.CONVERSATION, backend=backend, status=RunStatus.QUEUED
+    )
+    db.add(run)
+    db.commit()
+    return run
+
+
 def next_seq(db: Session, run_id: int) -> int:
     """The next sequence number for a run's log, starting at 1.
 

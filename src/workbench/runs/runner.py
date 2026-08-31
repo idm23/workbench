@@ -30,7 +30,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from workbench.agents.prompts import conversation_prompt, prompt_for
+from workbench.agents.prompts import continuation_prompt, conversation_prompt, prompt_for
 from workbench.agents.protocol import (
     AgentEvent,
     AgentFailed,
@@ -158,7 +158,8 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
     skipping all three is what makes its first message faster than a task
     run's, on top of never needing them again after that.
     """
-    project = run.project
+    task = run.task
+    project = run.project or (task.project if task is not None else None)
     if project is None:
         return NotPrepared(f"Run {run.id} has no project to talk to.")
 
@@ -171,6 +172,30 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
     backend = get_backend(run.backend)
     if isinstance(backend, UnknownBackend):
         return NotPrepared(backend.message)
+
+    if task is not None:
+        # Continuing one task's finished run. It must run in *that* worktree:
+        # a session token is keyed to the directory it was issued in, so
+        # resuming anywhere else silently starts cold instead.
+        if task.worktree_path is None:
+            return NotPrepared(f"{task.title!r} has no worktree to continue in.")
+        worktree = Path(task.worktree_path)
+        if not worktree.is_dir():
+            return NotPrepared(f"{task.title!r} no longer has a worktree at {worktree}.")
+
+        return Prepared(
+            backend=backend,
+            request=AgentRequest(
+                worktree=worktree,
+                phase=RunPhase.CONVERSATION,
+                prompt=continuation_prompt(task.title),
+                resume_token=resume_token_for(db, task, run.backend),
+                model=run.model,
+                run_id=run.id,
+                task_id=task.id,
+                project_id=project.id,
+            ),
+        )
 
     return Prepared(
         backend=backend,
@@ -334,13 +359,26 @@ async def drive(db: Session, run_id: int, prepared: Prepared) -> Ending:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, on_signal, sig.name)
 
+    # Only a conversation waits for someone to type. A plan or execute run
+    # has delivered its result — a structured plan, or a reported outcome —
+    # and there is nobody expected to say anything back, so listening for
+    # five more minutes bought nothing and cost a great deal: the run stayed
+    # `running` long after it was done, held one of two concurrency slots,
+    # and delayed the pull request by the length of the window.
+    #
+    # It also could not have worked. `request.inputs` is only pulled from
+    # *between* turns, so nothing typed during a plan run reaches the agent
+    # anyway; the window only ever offered a follow-up after the fact, which
+    # is what continuing the run deliberately now does instead.
+    #
     # A long tool-call loop with nothing typed into it must not let the idle
-    # clock expire mid-turn — every event touches it, not only new input.
+    # clock expire mid-turn — every event touches `activity`, not only new
+    # input.
     activity = _Activity()
-    request = replace(
-        prepared.request,
-        inputs=_watch_for_input(db, run_id, activity, input_idle_seconds()),
-    )
+    inputs = None
+    if prepared.request.phase is RunPhase.CONVERSATION:
+        inputs = _watch_for_input(db, run_id, activity, input_idle_seconds())
+    request = replace(prepared.request, inputs=inputs)
 
     outcome: AgentOutcome | None = None
     try:
@@ -403,7 +441,21 @@ def _publish(
     if worktree is None:
         return None
 
-    if not has_commits(worktree, base_branch):
+    committed = has_commits(worktree, base_branch)
+    if isinstance(committed, GitFailed):
+        # Not the same as "nothing to push", and saying so is the whole point.
+        # This branch reported no commits for a run that had made one, because
+        # the base ref would not resolve — so the work existed, the message
+        # said it did not, and nobody had a reason to look.
+        _notice(
+            db,
+            run,
+            f"Could not tell whether there is anything to push, so nothing was: "
+            f"{committed.message} {committed.stderr}".strip(),
+        )
+        return None
+
+    if not committed:
         # Not a failure: an agent that correctly concluded nothing needed
         # changing is the open question in CLAUDE.md, and an empty pull
         # request would be the worst possible answer to it.

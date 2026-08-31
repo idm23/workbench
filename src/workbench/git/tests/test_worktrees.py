@@ -459,3 +459,70 @@ def test_a_remote_that_is_not_github_is_refused_rather_than_guessed_at(cloned_re
 
     assert isinstance(result, GitFailed)
     assert "not a GitHub remote" in result.message
+
+
+# --- A base that exists only on the remote ------------------------------------
+#
+# A clone has a local branch for the one it checked out and no other, so a task
+# branched from `staging` has only `origin/staging` to measure against.
+# `ensure_worktree` always knew that; `has_commits` and `diffstat` did not, and
+# the first task ever branched from staging reported no commits for a run that
+# had made one.
+
+
+@pytest.fixture
+def branched_from_staging(cloned_repo):
+    """A worktree cut from a base the checkout has no local branch for."""
+    origin, checkout = cloned_repo
+
+    def git(*args: str, cwd) -> None:
+        subprocess.run(("git", *args), cwd=cwd, check=True, capture_output=True)
+
+    git("branch", "staging", cwd=origin)
+    git("fetch", "origin", cwd=checkout)
+    # Config is not cloned, and CI runners have no global identity — without
+    # this the commits below fail there while passing on a developer's box.
+    git("config", "user.email", "test@example.com", cwd=checkout)
+    git("config", "user.name", "Test", cwd=checkout)
+
+    result = ensure_worktree(checkout, 34, "a task", "staging")
+    assert isinstance(result, WorktreeReady)
+    return checkout, result.path
+
+
+def test_a_local_branch_for_the_base_does_not_exist(branched_from_staging):
+    """The precondition. If this ever stops being true the tests below stop
+    testing anything."""
+    checkout, _ = branched_from_staging
+
+    probe = subprocess.run(
+        ("git", "rev-parse", "--verify", "staging"), cwd=checkout, capture_output=True
+    )
+
+    assert probe.returncode != 0
+
+
+def test_has_commits_measures_against_the_remote_base(branched_from_staging):
+    _, worktree = branched_from_staging
+    (worktree / "new.py").write_text("x = 1\n")
+    subprocess.run(("git", "add", "."), cwd=worktree, check=True, capture_output=True)
+    subprocess.run(("git", "commit", "-m", "work"), cwd=worktree, check=True, capture_output=True)
+
+    assert has_commits(worktree, "staging") is True
+
+
+def test_diffstat_measures_against_the_remote_base(branched_from_staging):
+    _, worktree = branched_from_staging
+    (worktree / "new.py").write_text("x = 1\n")
+    subprocess.run(("git", "add", "."), cwd=worktree, check=True, capture_output=True)
+    subprocess.run(("git", "commit", "-m", "work"), cwd=worktree, check=True, capture_output=True)
+
+    assert "new.py" in diffstat(worktree, "staging")
+
+
+def test_a_base_that_resolves_to_nothing_is_reported_not_assumed_empty(branched_from_staging):
+    """The failure that made this expensive: `no commits` and `could not ask`
+    are different answers, and only one of them means there is no work."""
+    _, worktree = branched_from_staging
+
+    assert isinstance(has_commits(worktree, "no-such-branch"), GitFailed)
