@@ -193,6 +193,7 @@ def finish_run(
     num_turns: int | None = None,
     outcome_detail: str | None = None,
     proposed_subtasks: dict | None = None,
+    pr_url: str | None = None,
 ) -> Run:
     """Record how a run ended, whatever the ending was.
 
@@ -225,6 +226,8 @@ def finish_run(
         run.outcome_detail = outcome_detail
     if proposed_subtasks is not None:
         run.proposed_subtasks = proposed_subtasks
+    if pr_url is not None:
+        run.pr_url = pr_url
     run.finished_at = datetime.now(UTC)
     # The job is over either way, and a stale handle is worse than none: a pid
     # will eventually belong to something else entirely, and a unit name will

@@ -21,6 +21,21 @@ from workbench.tasks.store import branch_choices_for, task_id_from_origin_value,
 PROD = "main"
 DEV = "staging"
 
+#: What the picker offers first, and therefore what most runs branch from.
+#:
+#: Dev, because of where the work ends up rather than where it starts. A run's
+#: pull request targets whatever its worktree was cut from, and this project
+#: promotes dev into prod with a merge commit — so a branch cut from prod and
+#: aimed at dev carries every promotion merge prod has had since, and the
+#: pull request lists them as though they were part of the change.
+#:
+#: Deliberately not `resolve_origin`'s fallback for an *unset* origin, which
+#: stays on prod: this is the default for a person choosing in the UI, on a
+#: project they know has a dev branch, whereas an unset origin means a task
+#: created through the JSON API or before any of this existed, on a project
+#: that may well have nothing called `staging` at all.
+DEFAULT = DEV
+
 
 @dataclass(frozen=True)
 class InvalidOrigin:
@@ -31,7 +46,7 @@ class InvalidOrigin:
 
 def origin_choices(task: Task) -> list[tuple[str, str]]:
     """(value, label) pairs for the dropdown shown when starting a task's first run."""
-    choices = [(PROD, "main (prod)"), (DEV, "staging (dev)")]
+    choices = [(DEV, "staging (dev)"), (PROD, "main (prod)")]
     choices += [
         (task_origin_value(other), f"{other.title} ({other.branch})")
         for other in branch_choices_for(task)
