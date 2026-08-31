@@ -16,6 +16,7 @@ docstring on `ClaudeBackend.run`.
 
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,13 @@ from claude_agent_sdk import (
 )
 
 from workbench.agents import claude as backend_module
-from workbench.agents.claude import ClaudeBackend, read_credential, translate
+from workbench.agents.claude import (
+    ClaudeBackend,
+    CredentialWindow,
+    read_credential,
+    read_credential_window,
+    translate,
+)
 from workbench.agents.protocol import (
     CREDENTIAL_API_KEY,
     CREDENTIAL_NONE,
@@ -1028,6 +1035,123 @@ API_KEY = {
     "apiProvider": "firstParty",
     "apiKeySource": "ANTHROPIC_API_KEY",
 }
+
+
+# --- The renewal window -------------------------------------------------------
+#
+# `auth status` reports which account and by what method, and both stay true
+# for weeks after the credential itself has stopped working. The window below
+# is the other half, and the reason it is read at all: on the real server a
+# perfectly good `claude.ai` report sat next to every run failing on a 401.
+
+
+def a_credentials_file(home: Path, **oauth: Any) -> Path:
+    directory = home / ".claude"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / ".credentials.json"
+    path.write_text(json.dumps({"claudeAiOauth": oauth}))
+    return path
+
+
+def in_hours(hours: float) -> int:
+    """A moment, in the milliseconds the credential file actually stores."""
+    return int((datetime.now(UTC) + timedelta(hours=hours)).timestamp() * 1000)
+
+
+def test_the_window_is_read_from_the_file_in_milliseconds(tmp_path):
+    """Milliseconds, unlike the seconds the SDK reports for rate limits. Both
+    numbers are plausible-looking epochs, so reading one as the other is a
+    mistake that shows up as a date a thousand-fold wrong rather than a crash."""
+    a_credentials_file(tmp_path, expiresAt=in_hours(8), refreshTokenExpiresAt=in_hours(300))
+
+    window = read_credential_window(tmp_path)
+
+    assert window.expires_at is not None
+    assert timedelta(hours=7) < window.expires_at - datetime.now(UTC) < timedelta(hours=9)
+    assert not window.renewal_lapsed()
+
+
+def test_a_missing_credential_file_has_no_opinion(tmp_path):
+    """An API key, a long-lived token, or a machine nobody has signed in on.
+    None of those are a lapsed window, and reporting one would be a false
+    alarm on a machine that is working."""
+    window = read_credential_window(tmp_path)
+
+    assert window == CredentialWindow()
+    assert not window.renewal_lapsed()
+
+
+def test_an_unreadable_credential_file_has_no_opinion(tmp_path):
+    """The file belongs to the vendor and may gain a shape tomorrow. Silence
+    is the honest answer; a guess would be a deadline nobody stated."""
+    a_credentials_file(tmp_path)
+    (tmp_path / ".claude" / ".credentials.json").write_text("not json at all")
+
+    assert read_credential_window(tmp_path) == CredentialWindow()
+
+
+def test_a_window_with_nonsense_timestamps_has_no_opinion(tmp_path):
+    a_credentials_file(tmp_path, expiresAt="soon", refreshTokenExpiresAt=None)
+
+    assert read_credential_window(tmp_path) == CredentialWindow()
+
+
+def test_an_expired_token_that_can_still_renew_is_a_working_login():
+    """The distinction the whole change turns on.
+
+    The access token expiring is routine — every run past the eight-hour mark
+    hits it, and the backend renews itself without anyone noticing. Calling
+    that a failure would put a red banner on a machine with nothing wrong.
+    """
+    window = CredentialWindow(
+        expires_at=datetime.now(UTC) - timedelta(hours=2),
+        renewable_until=datetime.now(UTC) + timedelta(days=9),
+    )
+
+    status = read_credential(SIGNED_IN, window=window)
+
+    assert status.logged_in
+    assert status.method == CREDENTIAL_SUBSCRIPTION
+
+
+def test_a_lapsed_renewal_window_is_not_a_working_login():
+    """What actually happened on the server, and what nothing could see.
+
+    `auth status` still answers `claude.ai` with the right email on it, so
+    every check above this one passed while every run failed to authenticate.
+    """
+    window = CredentialWindow(
+        expires_at=datetime.now(UTC) - timedelta(hours=9),
+        renewable_until=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    status = read_credential(SIGNED_IN, cli="/opt/claude", window=window)
+
+    assert not status.logged_in
+    # Still a subscription: which vendor and which billing mode are not in
+    # doubt, only whether the credential works.
+    assert status.method == CREDENTIAL_SUBSCRIPTION
+    assert status.login_command == ("/opt/claude", "auth", "login", "--claudeai")
+    assert "renew" in status.detail
+
+
+def test_the_window_is_carried_up_even_when_nothing_is_wrong():
+    """The doctor decides how close is too close, not this file."""
+    renewable_until = datetime.now(UTC) + timedelta(days=9)
+
+    status = read_credential(SIGNED_IN, window=CredentialWindow(renewable_until=renewable_until))
+
+    assert status.renewable_until == renewable_until
+
+
+def test_a_login_read_without_a_window_reports_no_deadline():
+    """Every caller that cannot supply one — and every recorded payload in the
+    tests above — must read exactly as it did before."""
+    status = read_credential(SIGNED_IN)
+
+    assert status.logged_in
+    assert status.expires_at is None
+    assert status.renewable_until is None
 
 
 def test_a_subscription_login_is_what_workbench_wants():

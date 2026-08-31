@@ -40,6 +40,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -67,6 +68,15 @@ NETWORK_TIMEOUT_SECONDS = 30
 #: Groups that would give the service account root by another name. The whole
 #: security claim of a dedicated account is that it has no sudo.
 PRIVILEGED_GROUPS = ("sudo", "admin", "wheel", "root")
+
+#: How long before a credential's renewal window closes this starts saying so.
+#: The window measured on this machine is about a fortnight, so three days is
+#: several chances to notice it on a phone while still being rare enough that
+#: the banner does not become wallpaper.
+#:
+#: A warning rather than a failure on purpose: nothing is broken yet, runs
+#: still work, and the only cost of ignoring it is that it becomes a failure.
+RENEWAL_WARNING = timedelta(days=3)
 
 
 class CheckState(StrEnum):
@@ -254,6 +264,19 @@ def check_agent_credential() -> Check:
     fix = " ".join(status.login_command) or None
 
     if status.logged_in:
+        closing = _renewal_closing(status.renewable_until)
+        if closing is not None:
+            return Check(
+                key="agent-credential",
+                title=title,
+                state=CheckState.WARN,
+                detail=(
+                    f"{status.detail} That login stops being renewable in {closing}, and "
+                    "renewing does not extend it — after that every run fails to "
+                    "authenticate until someone signs in again."
+                ),
+                fix=fix,
+            )
         return Check(
             key="agent-credential",
             title=title,
@@ -269,6 +292,39 @@ def check_agent_credential() -> Check:
         detail=status.detail,
         fix=fix,
     )
+
+
+def _renewal_closing(renewable_until: datetime | None) -> str | None:
+    """How long is left to renew unattended, once that is worth saying.
+
+    None both when there is nothing to report and when the backend had no
+    opinion — an API key has no window, and neither does a probe that could
+    not read one. Silence is the right answer to both: this check already has
+    a way to say "signed out", and inventing a deadline nobody told us about
+    would be worse than saying nothing.
+    """
+    if renewable_until is None:
+        return None
+    remaining = renewable_until - datetime.now(UTC)
+    if remaining > RENEWAL_WARNING:
+        return None
+    return _remaining(remaining)
+
+
+def _remaining(delta: timedelta) -> str:
+    """A duration in the roughest unit that is still useful.
+
+    Hours are rounded before the unit is chosen rather than after, so a
+    deadline two days out reads "2 days" instead of "47 hours" — the boundary
+    is otherwise decided by the microseconds between reading the credential
+    and phrasing the sentence.
+    """
+    hours = round(delta.total_seconds() / 3600)
+    if hours <= 0:
+        return "under an hour"
+    if hours < 48:
+        return f"{hours} hours"
+    return f"{hours // 24} days"
 
 
 def check_agent_state() -> Check:
