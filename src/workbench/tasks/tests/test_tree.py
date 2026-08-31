@@ -89,6 +89,19 @@ def test_a_leaf_has_no_progress():
     assert build_tree([make(1)])[0].progress is None
 
 
+def test_progress_percent_matches_the_fraction():
+    tasks = [make(1, title="parent"), make(2, parent=1), make(3, parent=1), make(4, parent=1)]
+    tasks[1].status = TaskStatus.DONE
+
+    roots = build_tree(tasks)
+
+    assert roots[0].progress_percent == 33
+
+
+def test_a_leaf_has_no_progress_percent():
+    assert build_tree([make(1)])[0].progress_percent is None
+
+
 def test_self_parenting_task_does_not_recurse():
     """Corrupt data must render, not hang."""
     roots = build_tree([make(1, parent=1, title="loop")])

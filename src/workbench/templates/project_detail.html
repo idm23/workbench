@@ -32,12 +32,13 @@
 {% endif %}
 
 {% if nodes %}
-  <ul class="tree">
+  <ul class="tree" id="task-tree">
     {% for node in nodes %}
       {% set busy = activity.get(node.task.id) %}
       {% set effective_status = node.effective_status %}
-      <li style="padding-left: {{ node.depth * 1.25 }}rem;">
-        <div class="task {{ 'done' if effective_status == 'done' }} {{ 'busy' if busy }}">
+      <li data-depth="{{ node.depth }}"
+          style="padding-left: {{ node.depth * 1.25 }}rem; --depth: {{ node.depth }};">
+        <div class="task {{ 'done' if effective_status == 'done' }} {{ 'busy' if busy }} {{ 'parent' if not node.is_leaf }}">
           <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
             <input type="hidden" name="new_status"
                    value="{{ 'open' if effective_status == 'done' else 'done' }}">
@@ -45,14 +46,29 @@
                     aria-label="{{ 'Reopen' if effective_status == 'done' else 'Mark done' }}"
             >{{ '✓' if effective_status == 'done' else '' }}</button>
           </form>
+          {% if not node.is_leaf %}
+            {# Collapses the whole subtree — see the script at the bottom of
+               the page. A task with children describes work rather than
+               being work, so this is the control that actually matters once
+               a project has more than a handful of tasks. #}
+            <button type="button" class="twist" aria-expanded="true" aria-label="Collapse subtasks">&rsaquo;</button>
+          {% endif %}
 
           <div class="task-body">
             <div class="task-title">{{ node.task.title }}</div>
 
             {% if node.task.body %}<div class="task-note">{{ node.task.body }}</div>{% endif %}
 
+            {% if node.progress %}
+              <div class="task-note">{{ node.progress }} done</div>
+              <span class="meter" role="meter" aria-valuenow="{{ node.progress_percent }}"
+                    aria-valuemin="0" aria-valuemax="100"
+                    aria-label="{{ node.progress }} subtasks done">
+                <span style="width: {{ node.progress_percent }}%;"></span>
+              </span>
+            {% endif %}
+
             <div class="task-note">
-              {% if node.progress %}{{ node.progress }} done&nbsp;·&nbsp;{% endif %}
               {% if busy %}
                 {# The dot reads at a glance; the word is what carries the
                    meaning for anyone the colour does not reach. #}
@@ -165,4 +181,48 @@
   {% endif %}
   <button type="submit">Add task</button>
 </form>
+
+{% if nodes %}
+<script>
+  // Collapsing a parent hides its whole subtree — the contiguous run of
+  // later <li>s at a greater depth, since `flatten()` renders the tree
+  // depth-first. Expanding only reveals direct children: a grandchild
+  // collapsed on its own stays collapsed rather than an ancestor's toggle
+  // forcing it back open.
+  (function () {
+    var tree = document.getElementById("task-tree");
+    if (!tree) return;
+
+    tree.addEventListener("click", function (event) {
+      var toggle = event.target.closest(".twist");
+      if (!toggle) return;
+      var item = toggle.closest("li");
+      var depth = Number(item.dataset.depth);
+      var wasExpanded = toggle.getAttribute("aria-expanded") !== "false";
+      toggle.setAttribute("aria-expanded", wasExpanded ? "false" : "true");
+      toggle.setAttribute("aria-label", wasExpanded ? "Expand subtasks" : "Collapse subtasks");
+
+      var skipBelow = null;
+      var sibling = item.nextElementSibling;
+      while (sibling && Number(sibling.dataset.depth) > depth) {
+        var siblingDepth = Number(sibling.dataset.depth);
+        if (wasExpanded) {
+          sibling.hidden = true;
+        } else if (skipBelow !== null && siblingDepth > skipBelow) {
+          // Left as-is: still under a nested toggle that is its own
+          // "collapsed", which this ancestor's expansion does not override.
+        } else {
+          skipBelow = null;
+          sibling.hidden = false;
+          var innerToggle = sibling.querySelector(".twist");
+          if (innerToggle && innerToggle.getAttribute("aria-expanded") === "false") {
+            skipBelow = siblingDepth;
+          }
+        }
+        sibling = sibling.nextElementSibling;
+      }
+    });
+  })();
+</script>
+{% endif %}
 {% endblock %}
