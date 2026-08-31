@@ -258,6 +258,14 @@
   .task.done { opacity: .72; }
   .task.done .task-title { color: var(--muted); text-decoration: line-through; }
   .task-note { color: var(--muted); font-size: .9rem; margin-top: .15rem; }
+  /* A folded body: the disclosure triangle is replaced with a "more"/"less"
+     word, since the triangle alone reads as a bullet on a phone rather than
+     as something to tap. */
+  .task-note summary { cursor: pointer; list-style: none; }
+  .task-note summary::-webkit-details-marker { display: none; }
+  .task-note summary::after { content: "more"; color: var(--accent); font-weight: 600; margin-left: .3rem; }
+  .task-note[open] summary::after { content: "less"; }
+  .task-note-rest { margin-top: .3rem; }
   .task-body .meter { max-width: 12rem; margin-top: .35rem; }
   .task-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
   .task-actions form { border: none; padding: 0; margin: 0; }
