@@ -574,6 +574,15 @@
   .ev.input .ev-kind { color: var(--accent); }
   .ev.input .ev-body { font-weight: 650; color: var(--fg); }
 
+  /* A folded event body — same "more"/"less" recipe as .task-note (PR #61),
+     kept as its own rule rather than applied directly: .task-note's own
+     font-size/color/margin would fight the per-kind .ev-body rules above. */
+  .ev-fold summary { cursor: pointer; list-style: none; }
+  .ev-fold summary::-webkit-details-marker { display: none; }
+  .ev-fold summary::after { content: "more"; color: var(--accent); font-weight: 600; margin-left: .3rem; }
+  .ev-fold[open] summary::after { content: "less"; }
+  .ev-body-rest { margin-top: .3rem; }
+
   .live-dot { font-size: .65rem; letter-spacing: .06em; color: var(--accent); font-weight: 700; }
   .live-dot.on::before {
     content: "";

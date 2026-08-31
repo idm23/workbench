@@ -83,9 +83,22 @@
 
 <ul class="events" id="events">
   {% for event in events %}
+    {# A run doing real work emits dozens of these, and one Read's worth of
+       file content should not bury everything around it on a phone. Folding
+       is a per-kind decision — see runs/render.py — reusing the same
+       <details>/<summary> pattern long task bodies already fold behind
+       (PR #61, project_detail.html) rather than inventing a second one. #}
+    {% set body = event_body(event.kind, event.payload) %}
     <li class="ev {{ event.kind }}" data-seq="{{ event.seq }}">
       <span class="ev-kind">{{ event.kind }}</span>
-      <div class="ev-body">{{ event.payload.get('name') or event.payload.get('text') or event.payload.get('status') or '' }}</div>
+      {% if body.rest %}
+        <details class="ev-body ev-fold">
+          <summary>{{ body.preview }}&hellip;</summary>
+          <div class="ev-body-rest">{{ body.rest }}</div>
+        </details>
+      {% else %}
+        <div class="ev-body">{{ body.preview }}</div>
+      {% endif %}
     </li>
   {% endfor %}
 </ul>
@@ -148,6 +161,43 @@
     var reply = document.getElementById("reply");
     var source = new EventSource("/runs/{{ run.id }}/events?after={{ last_seq }}");
 
+    // The JS twin of runs/render.py's event_body — same preview/fold rule,
+    // hand-kept in sync because this half of the page has no Jinja to share
+    // it through. Skipping this would fold replayed events (server-rendered)
+    // while leaving live ones (SSE) unfolded, which is the trap this page's
+    // two rendering halves always carry: change one, forget the other.
+    var PREVIEW_LINES = 6;
+    var PREVIEW_CHARS = 480;
+    var FOLDABLE_KINDS = { tool_use: true, tool_result: true, notice: true };
+
+    function bodyText(kind, data) {
+      if (kind === "tool_use") {
+        var name = data.name || "";
+        var input = data.input && Object.keys(data.input).length
+          ? JSON.stringify(data.input, null, 2) : "";
+        return input ? (name ? name + "\n" + input : input) : name;
+      }
+      if (kind === "notice") {
+        var text = data.text || "";
+        // rate_limit is left out on purpose — it already has its own panel
+        // on every page, so repeating it here would just be noise.
+        var extra = data.data ? JSON.stringify(data.data, null, 2) : "";
+        return extra ? (text ? text + "\n" + extra : extra) : text;
+      }
+      return data.text || data.status || "";
+    }
+
+    function splitBody(kind, data) {
+      var text = bodyText(kind, data);
+      if (!FOLDABLE_KINDS[kind]) { return [text, null]; }
+      var lines = text.split("\n");
+      var head = lines.slice(0, PREVIEW_LINES).join("\n");
+      if (head.length > PREVIEW_CHARS) { head = head.slice(0, PREVIEW_CHARS); }
+      if (head.length >= text.length) { return [text, null]; }
+      var rest = text.slice(head.length).replace(/^\n+/, "");
+      return [head, rest || null];
+    }
+
     function add(kind, data) {
       if (empty) { empty.remove(); empty = null; }
       var item = document.createElement("li");
@@ -155,12 +205,29 @@
       var label = document.createElement("span");
       label.className = "ev-kind";
       label.textContent = kind;
-      var body = document.createElement("div");
-      body.className = "ev-body";
-      // textContent, never innerHTML: this is model output and tool results.
-      body.textContent = data.name || data.text || data.status || "";
       item.appendChild(label);
-      item.appendChild(body);
+
+      var split = splitBody(kind, data);
+      var preview = split[0];
+      var rest = split[1];
+      // textContent, never innerHTML: this is model output and tool results.
+      if (rest) {
+        var details = document.createElement("details");
+        details.className = "ev-body ev-fold";
+        var summary = document.createElement("summary");
+        summary.textContent = preview + "…";
+        var restEl = document.createElement("div");
+        restEl.className = "ev-body-rest";
+        restEl.textContent = rest;
+        details.appendChild(summary);
+        details.appendChild(restEl);
+        item.appendChild(details);
+      } else {
+        var body = document.createElement("div");
+        body.className = "ev-body";
+        body.textContent = preview;
+        item.appendChild(body);
+      }
       list.appendChild(item);
     }
 

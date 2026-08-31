@@ -62,6 +62,7 @@ from workbench.runs.lifecycle import (
     start_run,
 )
 from workbench.runs.rate_limits import latest_readings
+from workbench.runs.render import event_body
 from workbench.runs.store import append_event, append_input
 from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.services import active_shells, running_services
@@ -80,6 +81,12 @@ from workbench.tasks.origin import DEFAULT as DEFAULT_ORIGIN
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, origin_choices, resolve_origin
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+# Called from run_detail.html's event loop, not the route — the page needs
+# a per-kind preview/fold decision for whatever a run said, and the route
+# itself has no reason to know that. See runs/render.py's module docstring
+# for why the SSE-driven half of that same page has to make this decision
+# again, on its own, in JavaScript.
+templates.env.globals["event_body"] = event_body
 
 app = FastAPI(title="Workbench")
 

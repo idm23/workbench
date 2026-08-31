@@ -936,6 +936,57 @@ def test_a_run_page_renders_what_happened(client, session):
     assert "a.py" in page
 
 
+def test_a_short_tool_result_is_shown_in_full(client, session):
+    from workbench.database.models import RunEventKind, RunPhase
+    from workbench.runs.store import append_event, create_run
+
+    run = create_run(session, a_task(session), RunPhase.EXECUTE, backend="claude")
+    append_event(session, run.id, RunEventKind.TOOL_RESULT, {"text": "ok", "is_error": False})
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "ok" in page
+    assert "<details" not in page
+
+
+def test_a_long_tool_result_is_folded_behind_a_toggle(client, session):
+    """The bug this task fixes: run 13's plan page put ~40 lines of a Read's
+    result inline, on a phone that buries everything around it. The
+    "more"/"less" affordance itself is CSS `content`, invisible to a
+    server-rendered response — what the page actually has to emit is the
+    <details>/<summary> pair a browser turns into that toggle, the same
+    contract long task bodies already use (PR #61, project_detail.html)."""
+    from workbench.database.models import RunEventKind, RunPhase
+    from workbench.runs.store import append_event, create_run
+
+    run = create_run(session, a_task(session), RunPhase.EXECUTE, backend="claude")
+    text = "\n".join(f"line {i} of api.py" for i in range(200))
+    append_event(session, run.id, RunEventKind.TOOL_RESULT, {"text": text, "is_error": False})
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert '<details class="ev-body ev-fold">' in page
+    assert "<summary>" in page
+    assert "line 0 of api.py" in page
+
+
+def test_text_and_thinking_are_never_folded(client, session):
+    """The agent talking, as distinct from tool plumbing — stays open
+    regardless of length."""
+    from workbench.database.models import RunEventKind, RunPhase
+    from workbench.runs.store import append_event, create_run
+
+    run = create_run(session, a_task(session), RunPhase.EXECUTE, backend="claude")
+    long_text = "This matters. " * 100
+    append_event(session, run.id, RunEventKind.TEXT, {"text": long_text})
+    append_event(session, run.id, RunEventKind.THINKING, {"text": long_text})
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert page.count(long_text) == 2
+    assert "<details" not in page
+
+
 def test_the_page_renders_without_the_stream(client, session):
     """A run read back a week later has no stream to open."""
     run = a_finished_run(session)
