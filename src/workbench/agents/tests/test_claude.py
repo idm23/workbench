@@ -24,6 +24,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     CLINotFoundError,
     ProcessError,
+    ResultError,
     ResultMessage,
     SystemMessage,
     TextBlock,
@@ -132,6 +133,37 @@ def stub_client_raising(error: Exception, *, on: str):
                 yield  # pragma: no cover - makes this an async generator
 
     return FakeClient
+
+
+def stub_client_refusing_resume(turns: list[list[Any]], error: Exception):
+    """A fake that raises `error` while connecting with `resume` set, and
+    behaves like a normal `stub_client` once retried without one — the
+    shape a stale resume token actually produces."""
+    remaining = list(turns)
+    seen_options: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, options: Any = None) -> None:
+            seen_options.append(options)
+            self._resume = options.resume if options is not None else None
+
+        async def __aenter__(self) -> FakeClient:
+            if self._resume:
+                raise error
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            pass
+
+        async def receive_response(self):
+            messages = remaining.pop(0) if remaining else []
+            for message in messages:
+                yield message
+
+    return FakeClient, seen_options
 
 
 # --- Translation -----------------------------------------------------------
@@ -780,6 +812,138 @@ def test_an_error_result_is_a_failure_that_keeps_its_usage(monkeypatch):
     assert outcome.message == "ran out of turns"
     assert outcome.total_cost_usd == 0.42
     assert outcome.resume_token == "session-abc"
+
+
+# --- A stale resume token ----------------------------------------------------
+#
+# Found live: a project conversation's second run tried to resume a session
+# the CLI no longer had, and failing outright would have bricked that
+# conversation for good — the same broken token is read back from the run
+# row on every future attempt. See `_is_forgotten_session`.
+
+
+def _forgotten_session_error(session_id: str = "abc-123") -> ResultError:
+    return ResultError(
+        f"Claude Code returned an error result: No conversation found with "
+        f"session ID: {session_id} (exit code: 1)",
+        data={"errors": [f"No conversation found with session ID: {session_id}"]},
+        exit_code=1,
+    )
+
+
+def test_is_forgotten_session_reads_the_structured_errors():
+    assert backend_module._is_forgotten_session(_forgotten_session_error()) is True
+
+
+def test_is_forgotten_session_falls_back_to_result_text():
+    error = ResultError(
+        "Claude Code returned an error result: No conversation found with session ID: x",
+        data={"result": "No conversation found with session ID: x"},
+    )
+    assert backend_module._is_forgotten_session(error) is True
+
+
+def test_is_forgotten_session_is_false_for_an_unrelated_result_error():
+    error = ResultError("boom", data={"errors": ["something else went wrong"]})
+    assert backend_module._is_forgotten_session(error) is False
+
+
+def test_is_forgotten_session_is_false_for_a_non_result_error():
+    assert backend_module._is_forgotten_session(ProcessError("died")) is False
+
+
+def test_a_stale_resume_token_retries_with_a_fresh_session(monkeypatch):
+    fake_cls, seen_options = stub_client_refusing_resume(
+        [[a_result(session_id="session-new")]], _forgotten_session_error()
+    )
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", fake_cls)
+
+    outcome = drain(ClaudeBackend().run(a_request(resume_token="session-old")))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.resume_token == "session-new"
+    assert seen_options[0].resume == "session-old"
+    assert seen_options[1].resume is None
+
+
+def test_a_stale_resume_token_still_sends_the_same_prompt(monkeypatch):
+    fake_cls, _ = stub_client_refusing_resume([[a_result()]], _forgotten_session_error())
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", fake_cls)
+
+    drain(ClaudeBackend().run(a_request(prompt="carry on", resume_token="session-old")))
+
+    # Nothing about what to say changes — only whether the session is new.
+
+
+def test_a_run_with_nothing_to_resume_never_retries(monkeypatch):
+    """No `resume_token` at all means `options.resume` is already falsy, so
+    this must not somehow still trigger a second attempt."""
+    attempts: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, options: Any = None) -> None:
+            attempts.append(options)
+
+        async def __aenter__(self) -> FakeClient:
+            raise _forgotten_session_error()
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            pass
+
+        async def receive_response(self):
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", FakeClient)
+
+    outcome = drain(ClaudeBackend().run(a_request()))[-1]
+
+    assert isinstance(outcome, AgentFailed)
+    assert len(attempts) == 1
+
+
+def test_a_still_stale_retry_fails_cleanly_rather_than_looping(monkeypatch):
+    """The fresh attempt can fail too — the retry is one attempt, not a loop."""
+
+    class AlwaysRefuses:
+        def __init__(self, options: Any = None) -> None:
+            pass
+
+        async def __aenter__(self) -> AlwaysRefuses:
+            raise _forgotten_session_error()
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            pass
+
+        async def receive_response(self):
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", AlwaysRefuses)
+
+    outcome = drain(ClaudeBackend().run(a_request(resume_token="session-old")))[-1]
+
+    assert isinstance(outcome, AgentFailed)
+
+
+def test_an_unrelated_error_with_a_resume_token_is_not_retried(monkeypatch):
+    """Only a forgotten session gets a second try — any other failure is
+    reported as-is, on the first attempt."""
+    fake_cls, seen_options = stub_client_refusing_resume(
+        [[a_result()]], ProcessError("crashed", exit_code=1)
+    )
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", fake_cls)
+
+    outcome = drain(ClaudeBackend().run(a_request(resume_token="session-old")))[-1]
+
+    assert isinstance(outcome, AgentFailed)
+    assert len(seen_options) == 1
 
 
 def test_a_missing_cli_means_nothing_was_attempted(monkeypatch):

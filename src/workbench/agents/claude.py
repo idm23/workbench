@@ -18,6 +18,7 @@ import logging
 import shutil
 import subprocess
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from claude_agent_sdk import (
     CLINotFoundError,
     PermissionMode,
     RateLimitEvent,
+    ResultError,
     ResultMessage,
     ServerToolResultBlock,
     ServerToolUseBlock,
@@ -359,6 +361,23 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(**options)
 
 
+def _is_forgotten_session(exc: ClaudeSDKError) -> bool:
+    """Whether a resume was refused because the CLI has no memory of that
+    session, rather than some other execution failure.
+
+    `ResultError` carries the CLI's own error text structurally
+    (`.errors`, falling back to `.result`) rather than only inside the
+    formatted message a caller sees, so this reads those instead of pattern-
+    matching the human-readable string — the one piece of this that is
+    genuinely fragile, since it depends on wording the CLI does not promise
+    to keep, but there is no typed alternative to key off.
+    """
+    if not isinstance(exc, ResultError):
+        return False
+    text = " ".join(exc.errors) if exc.errors else (exc.result or "")
+    return "no conversation found" in text.lower()
+
+
 def _stopped_early(result: ResultMessage) -> bool:
     """Whether the CLI cut the turn short itself, rather than the agent
     choosing to stop. Distinct from an outright error: this is still a
@@ -602,8 +621,9 @@ class ClaudeBackend:
                 for event in translate(message):
                     yield event
 
-        try:
-            async with ClaudeSDKClient(options=_options(request)) as client:
+        async def drive(options: ClaudeAgentOptions) -> AsyncIterator[AgentEvent]:
+            nonlocal last_result
+            async with ClaudeSDKClient(options=options) as client:
                 await client.query(request.prompt)
                 async for event in turn(client):
                     yield event
@@ -624,6 +644,11 @@ class ClaudeBackend:
                         async for event in turn(client):
                             yield event
 
+        options = _options(request)
+        try:
+            async for event in drive(options):
+                yield event
+
         except CLINotFoundError as exc:
             # Nothing was attempted: the wheel's bundled CLI is missing or
             # unrunnable, which is an install problem rather than a run that
@@ -633,12 +658,36 @@ class ClaudeBackend:
             return
 
         except ClaudeSDKError as exc:
-            # Everything else the SDK raises — a dropped connection, a crashed
-            # subprocess, undecodable output. The agent may well have committed
-            # work before this, so it is a failure rather than unavailability.
-            logger.exception("Claude run failed.")
-            yield AgentFailed(f"The agent failed: {exc}", model=model)
-            return
+            if options.resume and _is_forgotten_session(exc):
+                # The CLI has no memory of a session this run was told to
+                # resume — found live, on the very first project conversation
+                # to outlive its first session. Failing outright would brick
+                # this task's or project's conversation for good: the resume
+                # token is read back from the same run row on every future
+                # attempt, so nothing would ever un-stick it. One retry with a
+                # fresh session, forgetting the old conversation but working
+                # again, is what a person would do by hand anyway.
+                logger.warning("Resume token %r is stale, starting fresh.", options.resume)
+                last_result = None
+                try:
+                    async for event in drive(replace(options, resume=None)):
+                        yield event
+                except CLINotFoundError as retry_exc:
+                    logger.exception("Claude CLI unavailable on retry.")
+                    yield AgentUnavailable(f"The Claude CLI could not be started: {retry_exc}")
+                    return
+                except ClaudeSDKError as retry_exc:
+                    logger.exception("Claude run failed even after starting fresh.")
+                    yield AgentFailed(f"The agent failed: {retry_exc}", model=model)
+                    return
+            else:
+                # Everything else the SDK raises — a dropped connection, a
+                # crashed subprocess, undecodable output. The agent may well
+                # have committed work before this, so it is a failure rather
+                # than unavailability.
+                logger.exception("Claude run failed.")
+                yield AgentFailed(f"The agent failed: {exc}", model=model)
+                return
 
         if last_result is None:
             # The stream ended without the SDK's final message for its last
