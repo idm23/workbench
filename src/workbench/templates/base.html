@@ -221,8 +221,24 @@
 
   /* The task tree. Indentation is a left margin driven by depth rather than
      nested <ul>s, so the template iterates one flat list and there is no
-     recursive Jinja macro to read. */
+     recursive Jinja macro to read — collapsing (see the page's own script)
+     works the same way, by hiding a contiguous run of later list items
+     rather than by hiding a DOM subtree. */
   ul.tree { list-style: none; margin: 0 0 1.75rem; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+  /* A thin guide line at the parent's own indent level, so a nested task
+     visibly branches from something rather than just sitting further right.
+     `--depth` is set inline alongside the padding it already needs. */
+  ul.tree li[data-depth]:not([data-depth="0"]) { position: relative; }
+  ul.tree li[data-depth]:not([data-depth="0"])::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: -.6rem;
+    left: calc(1.25rem * (var(--depth) - 1) + .7rem);
+    width: 2px;
+    background: var(--rule);
+  }
+  ul.tree li[data-depth]:not([data-depth="0"]):last-child::before { bottom: 0; }
   .task {
     display: flex;
     gap: .75rem;
@@ -234,11 +250,15 @@
     box-shadow: 0 1px 2px var(--shadow-soft);
     transition: border-color .15s ease, box-shadow .15s ease;
   }
+  /* A parent describes work rather than being work, so it reads as a
+     quieter container rather than another actionable card. */
+  .task.parent { background: var(--panel-2); }
   .task-body { flex: 1; min-width: 0; }
   .task-title { font-weight: 650; overflow-wrap: anywhere; }
   .task.done { opacity: .72; }
   .task.done .task-title { color: var(--muted); text-decoration: line-through; }
   .task-note { color: var(--muted); font-size: .9rem; margin-top: .15rem; }
+  .task-body .meter { max-width: 12rem; margin-top: .35rem; }
   .task-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
   .task-actions form { border: none; padding: 0; margin: 0; }
   /* A run in flight gets a warm border rather than only the pip inside —
@@ -248,6 +268,29 @@
     box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .task.busy .task-title { font-weight: 700; }
+
+  /* Collapses a parent's whole subtree — sized like `.tick` since it sits
+     right next to it, but a plain chevron rather than a filled control,
+     since it changes what is visible rather than the task itself. */
+  .twist {
+    appearance: none;
+    flex: 0 0 auto;
+    width: 1.5rem; height: 1.5rem;
+    margin-top: .05rem;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0;
+    min-height: 0;
+    box-shadow: none;
+    transform: rotate(90deg);
+    transition: transform .15s ease, color .15s ease;
+  }
+  .twist:hover { color: var(--accent); }
+  .twist[aria-expanded="false"] { transform: rotate(0deg); }
 
   /* A checkbox that posts a form. Sized as a tap target first: this is the
      control used most often, and always from a phone. Circular rather than

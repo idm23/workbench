@@ -44,6 +44,13 @@ class TaskNode:
         return f"{self.done_count}/{len(self.children)}"
 
     @property
+    def progress_percent(self) -> int | None:
+        """`progress` as a 0-100 int, for a meter bar rather than only text."""
+        if not self.children:
+            return None
+        return round(100 * self.done_count / len(self.children))
+
+    @property
     def effective_status(self) -> TaskStatus:
         """The status to render, deriving from children once there are any.
 
