@@ -278,7 +278,10 @@ setting again.
 - **Protect `staging`:** require the three CI checks, but *not* `staging-acceptance` — that status
   is produced by deploying staging, so requiring it there is circular.
 - A fine-grained PAT in `/etc/workbench/env` as `WORKBENCH_GITHUB_TOKEN` (mode 0600), scoped to
-  this repository with **Contents: Read** and **Commit statuses: Read and write**.
+  this repository with **Contents: Read and write**, **Pull requests: Read and write**, and
+  **Commit statuses: Read and write**. The last is what reports staging acceptance; the first two
+  are what let a run open its pull request. `python -m workbench.doctor` says whether it is
+  installed, whether GitHub still accepts it, and when it expires.
 
 Requiring `staging-acceptance` on `main` is what enforces the flow, and it means a hotfix cannot
 skip staging without an admin override. That is deliberate, but worth knowing before you need it at
