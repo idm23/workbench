@@ -138,6 +138,33 @@ def test_the_polkit_rule_grants_only_this_instances_units(staging):
     assert "workbench-run@" not in monkeypatch_free_rule
 
 
+def test_a_run_can_read_the_token_that_opens_pull_requests():
+    """The two halves of publishing use different credentials, and only one of
+    them is a secret. Pushing rides the service account's deploy key, which the
+    account simply has; opening the pull request needs WORKBENCH_GITHUB_TOKEN
+    through the API, which reaches the process only from this file.
+
+    Without it `_publish` pushes, finds no token, and leaves a notice saying it
+    is not set in /etc/workbench/env — on a machine where it is set correctly,
+    because the deployer was the only unit reading that file. The failure is
+    quiet by design: publishing never fails a run, so the symptom is pull
+    requests that never appear and a run that still says it succeeded.
+    """
+    unit = render_unit("workbench-run@.service.template")
+
+    assert "EnvironmentFile=-/etc/workbench/env" in directives(unit)
+
+
+def test_the_token_is_optional_rather_than_required():
+    """The leading `-`. A fresh install has no /etc/workbench/env at all, and a
+    unit that demanded one would fail to start every run on a machine that is
+    otherwise working — turning a missing pull request into a missing run.
+    """
+    for line in directives(render_unit("workbench-run@.service.template")):
+        if line.startswith("EnvironmentFile="):
+            assert line.startswith("EnvironmentFile=-"), line
+
+
 def test_the_app_runs_unprivileged(rendered):
     """The whole security posture rests on this one line."""
     unit = rendered[f"{SERVICE_NAME}.service"]
