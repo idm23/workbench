@@ -558,43 +558,9 @@ than no list at all.
   separate summarizer, the agent writes its own summary while it still has the context,
   and only the diffstat is stored — bounded by file count rather than change size.
 
-## Deferred
+## Backlog
 
-### Pipeline polish
-
-Wanted, not urgent. Grouped because they are one change to how promotion works.
-
-- **The `staging` → `main` pull request should open itself** once `staging-acceptance`
-  goes green, with merging still a human action. The trigger is GitHub Actions' `on:
-  status` event, which in this repository only ever fires for that status — Actions
-  publishes check runs, not statuses. A pull request opened by `GITHUB_TOKEN` gets no
-  fresh workflow runs, but its head is `staging`'s tip, which already carries passing
-  checks from the push, and required checks are evaluated against the head commit.
-  Belongs in Actions rather than in `staging_acceptance.py`: opening a pull request needs
-  `pull_requests: write`, and the server's token is readable by any agent running there.
-  Note `on: status` workflows only run from the *default branch's* copy of the file.
-- **`main` should refuse anything not from `staging`.** Rulesets cannot express "only
-  from branch X", but a required check that fails when the head is not `staging` gets
-  there, and fails with a legible reason rather than sitting on a `staging-acceptance`
-  that will never arrive.
-- **Squash-merge into `staging`**, so each pull request is one commit there — but
-  **promote to `main` with a merge commit**, never a squash or a rebase. Only a merge
-  commit leaves `staging` an ancestor of `main`, which is what advances the merge base.
-  Measured after the first squash promotion: the next pull request would have shown 16
-  files and 1,419 lines when 12 files and 1,071 lines actually differed, and that gap
-  compounds each cycle. See `docs/learning-notes.md`.
-- **Keep `staging` realigned with `main`.** Mostly falls out of the point above: once
-  promotion uses a merge commit, `staging` is always an ancestor of `main`, so catching
-  it up is a fast-forward rather than a force push. Automating even that would need a
-  bypass actor on the `staging` ruleset, because its `pull_request` rule blocks direct
-  pushes from workflows too — a lot of machinery for something the merge method gives
-  away free. Probably not worth it.
-
-### Later
-
-- Recurring tasks and scheduled agents. The original motivation, but it needs the
-  task/run loop working first. Lean toward an in-process scheduler over systemd timers —
-  the app is always-on anyway, and a timer would need to reach back in over HTTP to hit
-  the same "start a run" code path.
-- Cross-project "what should I work on next" view.
-- Optional GitHub Issues sync.
+Work items — anything with a concrete piece of work someone could pick up — live in
+Workbench's own task tree for this project, not here. This file keeps decisions and the
+reasoning behind them, plus the open questions above; a backlog kept in two places
+drifts.
