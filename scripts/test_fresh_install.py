@@ -188,6 +188,13 @@ def run_test(image: str, from_github: bool, container: str) -> None:
     if "auth login" not in install_output:
         raise TestFailureError("the install did not tell anyone how to authenticate the agent")
 
+    # The same bargain, third instance. Minting a fine-grained PAT is a browser
+    # login too, and without it a run commits, pushes, and then opens no pull
+    # request while still reporting success — the quietest failure this project
+    # has, and the one that cost a debugging session to find.
+    if "personal-access-tokens" not in install_output:
+        raise TestFailureError("the install did not say how to get the pull request token")
+
     step("Confirming the deployment moved, and belongs to its own account")
     _expect(container, f"id {ACCOUNT}", "the service account was not created")
     _expect(

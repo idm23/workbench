@@ -279,6 +279,17 @@ in `docs/server-conventions.md`.
   split rather than switched, because requiring a key to *read* would mean a key just to
   add a public project. Doing it at push time rather than clone time is what repairs the
   clones that already exist, since nothing re-clones them.
+- **The doctor knows about the pull request token, because nothing else did.** Whether
+  `WORKBENCH_GITHUB_TOKEN` is installed is checked without a network, so it reaches the
+  page banner too; whether GitHub still accepts it, and when it expires, needs one and so
+  does not. The check reads `/etc/workbench/env` rather than its own environment — the
+  token lives in a *unit's* environment, and a person running the doctor by hand has no
+  such thing, so reading `os.environ` alone would report it missing on a machine where it
+  is configured perfectly. A file it cannot read is `unknown`, never `fail`: mode 0600
+  owned by the service account is the correct state, and a person running as themselves
+  must not be told their token is gone. The expiry warning exists for the same reason the
+  agent credential's does — a fine-grained PAT lasts 90 days by default, and the failure
+  when it lapses is pull requests quietly not appearing on runs that report success.
 - The service user needs its own SSH deploy key and `user.name`/`user.email`, or
   unattended pushes and agent commits will fail. Prefer per-repo deploy keys or a
   fine-grained PAT over an account-wide key, which would grant push to every repo.
