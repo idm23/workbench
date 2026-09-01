@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -51,7 +51,7 @@ from workbench.git.worktrees import (
     local_checkout,
     sync_worktree,
 )
-from workbench.runs.activity import activity_by_task
+from workbench.runs.activity import activity_by_task, pr_url_by_task
 from workbench.runs.lifecycle import (
     NotCancellable,
     active_run_for_project,
@@ -67,11 +67,13 @@ from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.services import active_shells, running_services
 from workbench.tasks import (
     WrongProject,
+    archive_task,
     build_tree,
     create_subtask,
     create_task,
     flatten,
     set_status,
+    unarchive_task,
 )
 from workbench.tasks import (
     delete_task as delete_task_and_children,
@@ -291,8 +293,15 @@ def show_project(
     project = _get_project_or_404(db, project_id)
 
     tasks = db.scalars(
-        select(Task).where(Task.project_id == project.id).order_by(Task.position, Task.id)
+        select(Task)
+        .where(Task.project_id == project.id, Task.archived_at.is_(None))
+        .order_by(Task.position, Task.id)
     ).all()
+    archived_count = db.scalar(
+        select(func.count())
+        .select_from(Task)
+        .where(Task.project_id == project.id, Task.archived_at.is_not(None))
+    )
 
     return templates.TemplateResponse(
         request,
@@ -301,9 +310,13 @@ def show_project(
             **_shared(db),
             "project": project,
             "nodes": flatten(build_tree(list(tasks))),
+            "archived_count": archived_count,
             # One query for the whole tree. Asking per node is how a page that
             # felt instant stops being one.
             "activity": activity_by_task(db, project.id),
+            # A finished task's pull request, if one was opened — surfaced
+            # directly on the tree rather than only on the run that opened it.
+            "pr_urls": pr_url_by_task(db, project.id),
             # The project's own standing conversation, if one is in flight —
             # what lets the page offer "Continue" instead of "Talk to this
             # project" without a second click to find out.
@@ -677,3 +690,51 @@ def delete_task(db: DbSession, task_id: int) -> RedirectResponse:
 
     title = delete_task_and_children(db, task)
     return _redirect(target, notice=f"Deleted {title!r}.")
+
+
+@app.post("/tasks/{task_id}/archive")
+def archive_task_route(db: DbSession, task_id: int) -> RedirectResponse:
+    """Take a finished task off the tree without deleting it.
+
+    Nothing here checks that the task is actually finished — the button
+    offering this only renders for one that is, and a task archived by
+    mistake is one `Unarchive` away from back exactly where it was.
+    """
+    task = _get_task_or_404(db, task_id)
+    target = f"/projects/{task.project_id}"
+
+    title = archive_task(db, task)
+    return _redirect(target, notice=f"Archived {title!r}.")
+
+
+@app.post("/tasks/{task_id}/unarchive")
+def unarchive_task_route(db: DbSession, task_id: int) -> RedirectResponse:
+    task = _get_task_or_404(db, task_id)
+    target = f"/projects/{task.project_id}/archive"
+
+    title = unarchive_task(db, task)
+    return _redirect(target, notice=f"Restored {title!r}.")
+
+
+@app.get("/projects/{project_id}/archive", response_class=HTMLResponse)
+def show_archive(request: Request, db: DbSession, project_id: int) -> HTMLResponse:
+    """Everything archived out of this project's tree, so putting a task away
+    is never the same thing as losing track of it."""
+    project = _get_project_or_404(db, project_id)
+
+    tasks = db.scalars(
+        select(Task)
+        .where(Task.project_id == project.id, Task.archived_at.is_not(None))
+        .order_by(Task.position, Task.id)
+    ).all()
+
+    return templates.TemplateResponse(
+        request,
+        "project_archive.html",
+        {
+            **_shared(db),
+            "project": project,
+            "nodes": flatten(build_tree(list(tasks))),
+            "pr_urls": pr_url_by_task(db, project.id),
+        },
+    )

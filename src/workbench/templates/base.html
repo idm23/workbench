@@ -218,6 +218,26 @@
   }
   button.danger:hover { background: var(--danger-bg); border-color: var(--danger); box-shadow: none; }
   button.slim { width: auto; min-height: 2.3rem; padding: .4rem .9rem; font-size: .85rem; border-radius: .55rem; }
+  /* A link styled to sit in the same action row as the slim buttons above —
+     "View PR" leaves the app, so it is an <a> rather than a form button, but
+     it should not look like a different kind of control for that reason. */
+  a.slim {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    min-height: 2.3rem;
+    padding: .4rem .9rem;
+    font-size: .85rem;
+    font-weight: 650;
+    border-radius: .55rem;
+    text-decoration: none;
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--rule);
+    transition: border-color .15s ease, color .15s ease;
+  }
+  a.slim:hover { border-color: var(--accent); color: var(--accent); }
 
   /* The task tree. Indentation is a left margin driven by depth rather than
      nested <ul>s, so the template iterates one flat list and there is no
