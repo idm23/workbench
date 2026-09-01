@@ -25,6 +25,19 @@ Environment=WORKBENCH_DB=__REPO__/data/workbench.db
 Environment=WORKBENCH_INSTANCE=__INSTANCE__
 Environment=PYTHONDONTWRITEBYTECODE=1
 
+# The pull request half of a run. The agent commits, this process pushes over
+# the deploy key and then opens the pull request over the API — and only the
+# second of those needs a secret, which lives here rather than in the unit
+# because it is one. Optional, hence the `-`: a machine without it still runs
+# agents and still pushes, and `_publish` leaves a notice saying why the pull
+# request did not appear.
+#
+# The deployer had this and runs did not, which is exactly the wrong way round.
+# That unit wants the token for staging acceptance; this one is where the token
+# is spent. A run would push, reach for it, find nothing, and report a missing
+# token that was configured correctly all along.
+EnvironmentFile=-/etc/workbench/env
+
 # A run still going after this is stuck rather than slow. Independent of the
 # backend's turn limit: turns bound what the agent chooses to do, this bounds
 # the process whatever the reason — a hung network call, a build that waits for

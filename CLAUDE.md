@@ -249,7 +249,15 @@ in `docs/server-conventions.md`.
   with pre-approved permissions executes model-authored shell commands; the separate
   account bounds the blast radius to files recoverable from GitHub.
 - Secrets in `/etc/workbench/env` (mode 0600, owned by the service user), loaded via
-  `EnvironmentFile`. Alternatively authenticate the bundled CLI once as that user to
+  `EnvironmentFile` — **by every unit that spends one, which for a while meant the wrong
+  unit**. The deployer read that file and the run unit did not, so `WORKBENCH_GITHUB_TOKEN`
+  reached the process that reports staging acceptance and not the process that opens pull
+  requests. A correctly configured machine pushed every branch and then reported the token
+  as unset. Nothing looked broken, because publishing is deliberately not allowed to fail a
+  run: the symptom was pull requests that never arrived on runs that said they succeeded.
+  Granting it is one line, and it is `EnvironmentFile=-` rather than `EnvironmentFile=` —
+  a fresh install has no such file, and a unit that insisted on one would turn a missing
+  pull request into a missing run. Alternatively authenticate the bundled CLI once as that user to
   bill against a Claude subscription instead of the API — which is what this install
   does: `sudo -iu workbench <venv>/bin/python -m workbench.doctor --login`. Either way
   the credential is readable by model-authored shell commands running as that user —
