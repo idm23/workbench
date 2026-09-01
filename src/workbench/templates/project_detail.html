@@ -31,6 +31,12 @@
   {% endif %}
 {% endif %}
 
+{% if archived_count %}
+  <p class="sub">
+    <a href="/projects/{{ project.id }}/archive">{{ archived_count }} task{{ 's' if archived_count != 1 }} archived</a>
+  </p>
+{% endif %}
+
 {% if nodes %}
   <ul class="tree" id="task-tree">
     {% for node in nodes %}
@@ -94,6 +100,10 @@
             </div>
 
             <div class="task-actions">
+              {% set pr_url = pr_urls.get(node.task.id) %}
+              {% if pr_url %}
+                <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
+              {% endif %}
               {% if busy and busy.needs_attention and busy.phase == 'plan' %}
                 {# A plan a person has not yet acted on. What approving does
                    depends on what the plan decided: decompose, or carry out
@@ -157,6 +167,14 @@
                    since the route itself refuses rather than reconciling. #}
                 <form method="post" action="/tasks/{{ node.task.id }}/sync">
                   <button class="slim secondary" type="submit">Sync</button>
+                </form>
+              {% endif %}
+              {% if effective_status in ('done', 'cancelled') %}
+                {# Off the tree, not deleted — see the archive page linked
+                   above. Only offered once a task is actually finished, so
+                   this is never how open work quietly disappears. #}
+                <form method="post" action="/tasks/{{ node.task.id }}/archive">
+                  <button class="slim secondary" type="submit">Archive</button>
                 </form>
               {% endif %}
               <form method="post" action="/tasks/{{ node.task.id }}/delete">

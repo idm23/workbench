@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session
 
 from workbench.database.db import make_engine
 from workbench.database.models import Base, Project, Task, TaskStatus, User
-from workbench.tasks import WrongProject, create_task, delete_task, set_status
+from workbench.tasks import (
+    WrongProject,
+    archive_task,
+    create_task,
+    delete_task,
+    set_status,
+    unarchive_task,
+)
 from workbench.tasks.store import branch_choices_for, descendants
 
 
@@ -142,6 +149,55 @@ def test_descendants_is_depth_first_and_includes_the_task(session, project):
     assert [task.title for task in descendants(parent)] == ["parent", "child", "grandchild"]
 
 
+# --- Archiving ----------------------------------------------------------
+
+
+def test_archiving_returns_the_title_and_sets_a_timestamp(session, project):
+    task = create_task(session, project, title="Ship it")
+    assert isinstance(task, Task)
+
+    assert archive_task(session, task) == "Ship it"
+    assert task.archived_at is not None
+
+
+def test_archiving_takes_the_whole_subtree(session, project):
+    parent = create_task(session, project, title="parent")
+    assert isinstance(parent, Task)
+    child = create_task(session, project, title="child", parent_id=parent.id)
+    assert isinstance(child, Task)
+    session.refresh(parent)
+
+    archive_task(session, parent)
+
+    assert parent.archived_at is not None
+    assert child.archived_at is not None
+
+
+def test_archiving_does_not_touch_status(session, project):
+    """Archiving is orthogonal to status — it changes what the project page
+    shows, not what the task's own state is."""
+    task = create_task(session, project, title="x")
+    assert isinstance(task, Task)
+    set_status(session, task, TaskStatus.DONE)
+
+    archive_task(session, task)
+
+    assert task.status is TaskStatus.DONE
+
+
+def test_unarchiving_restores_the_same_subtree(session, project):
+    parent = create_task(session, project, title="parent")
+    assert isinstance(parent, Task)
+    child = create_task(session, project, title="child", parent_id=parent.id)
+    assert isinstance(child, Task)
+    session.refresh(parent)
+    archive_task(session, parent)
+
+    assert unarchive_task(session, parent) == "parent"
+    assert parent.archived_at is None
+    assert child.archived_at is None
+
+
 # --- Branch choices for the origin picker -----------------------------------
 
 
@@ -188,3 +244,18 @@ def test_branch_choices_ignores_a_different_tree(session, project):
     session.commit()
 
     assert branch_choices_for(task) == []
+
+
+def test_branch_choices_excludes_an_archived_task(session, project):
+    """Archiving means putting a task away; offering its branch as a place
+    for new work to start undoes exactly that."""
+    parent = create_task(session, project, title="parent")
+    assert isinstance(parent, Task)
+    sibling = create_task(session, project, title="sibling", parent_id=parent.id)
+    other = create_task(session, project, title="other", parent_id=parent.id)
+    assert isinstance(sibling, Task) and isinstance(other, Task)
+    other.branch = "workbench/task-2-other"
+    session.commit()
+    archive_task(session, other)
+
+    assert branch_choices_for(sibling) == []
