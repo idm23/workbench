@@ -297,6 +297,13 @@ class Task(Base):
         default=None,
     )
 
+    # Set when a person archives a finished task: off the tree, but not
+    # deleted — the branch, runs, and events all survive under it. Orthogonal
+    # to `status` on purpose, so archiving never has to invent a new status
+    # (and a re-opened task keeps whatever status it had). Null is "on the
+    # tree", which is every task before this existed.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

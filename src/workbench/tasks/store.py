@@ -11,6 +11,7 @@ in another project — not something exceptional.
 """
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
@@ -117,18 +118,50 @@ def descendants(task: Task) -> list[Task]:
     return collected
 
 
+def archive_task(db: Session, task: Task) -> str:
+    """Take a task off the tree without deleting it. Returns the title.
+
+    Archives the whole subtree together, so a parent leaving the tree never
+    orphans children still sitting on it. Orthogonal to `status` on purpose —
+    archiving does not change what a task's status *is*, only whether the
+    project page shows it, so unarchiving needs no re-derivation and a done
+    task stays done. The branch, runs, and events are all untouched; only the
+    worktree's disposition is unaffected too, since the task might still be
+    reopened.
+    """
+    now = datetime.now(UTC)
+    for member in descendants(task):
+        member.archived_at = now
+    db.commit()
+    return task.title
+
+
+def unarchive_task(db: Session, task: Task) -> str:
+    """Undo `archive_task`, restoring the same subtree it archived."""
+    for member in descendants(task):
+        member.archived_at = None
+    db.commit()
+    return task.title
+
+
 def branch_choices_for(task: Task) -> list[Task]:
     """Other tasks in the same tree that already have a branch to build on.
 
     A task that depends on unmerged sibling work should be able to start from
     that sibling's branch directly, rather than only from main or staging.
     Walks up to the root first because the sibling in question need not be
-    directly related to `task` — only in the same tree.
+    directly related to `task` — only in the same tree. Archived tasks are
+    excluded: archiving means "put this away", and offering its branch as
+    somewhere new work should build from undoes exactly that.
     """
     root = task
     while root.parent is not None:
         root = root.parent
-    return [other for other in descendants(root) if other.id != task.id and other.branch]
+    return [
+        other
+        for other in descendants(root)
+        if other.id != task.id and other.branch and other.archived_at is None
+    ]
 
 
 def task_origin_value(task: Task) -> str:

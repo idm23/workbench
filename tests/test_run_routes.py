@@ -695,6 +695,46 @@ def test_a_needs_replanning_execute_run_offers_to_plan_again(client, session, cl
     assert f"/runs/{run.id}/approve" not in page
 
 
+def test_a_task_with_an_opened_pull_request_links_to_it(client, session, cloned):
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, run, RunStatus.SUCCEEDED, summary="done")
+    run.pr_url = "https://github.com/idm23/workbench/pull/7"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert 'href="https://github.com/idm23/workbench/pull/7"' in page
+    assert ">View PR<" in page
+
+
+def test_a_task_with_no_pull_request_offers_no_link(client, session, cloned):
+    page = client.get(f"/projects/{a_task(session).project_id}").text
+
+    assert ">View PR<" not in page
+
+
+def test_the_most_recent_pull_request_wins_over_an_earlier_run(client, session, cloned):
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    first = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, first, RunStatus.SUCCEEDED, summary="done")
+    first.pr_url = "https://github.com/idm23/workbench/pull/1"
+    session.commit()
+    second = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, second, RunStatus.SUCCEEDED, summary="done again")
+    second.pr_url = "https://github.com/idm23/workbench/pull/2"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert 'href="https://github.com/idm23/workbench/pull/2"' in page
+    assert 'href="https://github.com/idm23/workbench/pull/1"' not in page
+
+
 def test_a_done_task_is_not_offered_another_run(client, session, cloned):
     """The project's other seeded task is still open, so a Plan button
     remains on the page — just not on this one."""
@@ -1105,3 +1145,101 @@ def test_a_project_scoped_run_page_renders_without_a_task(client, session, execu
     assert f"{project.owner}/{project.repo}" in page
     assert f"/projects/{project.id}" in page
     assert ">Send<" in page
+
+
+# --- Archiving finished tasks -------------------------------------------------
+
+
+def test_a_done_task_offers_to_archive(client, session, cloned):
+    task = a_task(session)
+    task.status = TaskStatus.DONE
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f'action="/tasks/{task.id}/archive"' in page
+    assert ">Archive<" in page
+
+
+def test_an_open_task_does_not_offer_to_archive(client, session, cloned):
+    page = client.get(f"/projects/{a_task(session).project_id}").text
+
+    assert ">Archive<" not in page
+
+
+def test_archiving_takes_a_task_off_the_tree(client, session, cloned):
+    task = a_task(session)
+    task.status = TaskStatus.DONE
+    session.commit()
+
+    client.post(f"/tasks/{task.id}/archive")
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert task.title not in page
+
+
+def test_archiving_shows_a_count_and_a_link_on_the_project_page(client, session, cloned):
+    task = a_task(session)
+    task.status = TaskStatus.DONE
+    session.commit()
+    client.post(f"/tasks/{task.id}/archive")
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "1 task archived" in page
+    assert f'href="/projects/{task.project_id}/archive"' in page
+
+
+def test_the_archive_page_shows_what_was_put_away(client, session, cloned):
+    task = a_task(session)
+    task.status = TaskStatus.DONE
+    session.commit()
+    client.post(f"/tasks/{task.id}/archive")
+
+    page = client.get(f"/projects/{task.project_id}/archive").text
+
+    assert task.title in page
+    assert f'action="/tasks/{task.id}/unarchive"' in page
+
+
+def test_an_empty_archive_says_so(client, session, cloned):
+    page = client.get(f"/projects/{a_task(session).project_id}/archive").text
+
+    assert "Nothing archived yet." in page
+
+
+def test_unarchiving_returns_a_task_to_the_tree(client, session, cloned):
+    task = a_task(session)
+    task.status = TaskStatus.DONE
+    session.commit()
+    client.post(f"/tasks/{task.id}/archive")
+
+    client.post(f"/tasks/{task.id}/unarchive")
+
+    page = client.get(f"/projects/{task.project_id}").text
+    assert task.title in page
+
+
+def test_archiving_a_parent_takes_its_children_too(client, session, cloned):
+    parent = a_task(session)
+    parent.status = TaskStatus.DONE
+    session.commit()
+    child = Task(
+        project_id=parent.project_id, parent_id=parent.id, title="child", status=TaskStatus.DONE
+    )
+    session.add(child)
+    session.commit()
+
+    client.post(f"/tasks/{parent.id}/archive")
+
+    page = client.get(f"/projects/{parent.project_id}").text
+    assert parent.title not in page
+    assert ">child<" not in page
+
+
+def test_archiving_a_missing_task_is_a_404(client, session):
+    assert client.post("/tasks/9999/archive").status_code == 404
+
+
+def test_the_archive_page_of_a_missing_project_is_a_404(client, session):
+    assert client.get("/projects/9999/archive").status_code == 404

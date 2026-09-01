@@ -134,11 +134,17 @@ Settings → Developer settings → Personal access tokens → **Fine-grained to
 
 Repository permissions:
 
-- **Contents** → **Read-only**
+- **Contents** → **Read and write**
+- **Pull requests** → **Read and write**
 - **Commit statuses** → **Read and write**
 
-Everything else stays *No access*. The agent slice will later want **Contents: Write** and
-**Pull requests: Write**; add them when that lands, not now.
+Everything else stays *No access*.
+
+Commit statuses is the one staging acceptance needs; the other two are what let a run open its
+own pull request. That was deferred once, and this file said to add them "when that lands, not
+now" long after it had landed — so a correctly followed runbook produced a token that pushed
+branches and opened nothing. `python -m workbench.doctor` now answers this directly rather than
+leaving it to a document to stay accurate.
 
 On the server:
 

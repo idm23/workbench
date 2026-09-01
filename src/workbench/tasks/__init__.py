@@ -12,11 +12,13 @@ build_tree` without caring which half it came from.
 from workbench.tasks.store import (
     TaskNotFound,
     WrongProject,
+    archive_task,
     branch_choices_for,
     create_subtask,
     create_task,
     delete_task,
     set_status,
+    unarchive_task,
 )
 from workbench.tasks.tree import TaskNode, build_tree, flatten, would_create_cycle
 
@@ -24,6 +26,7 @@ __all__ = [
     "TaskNode",
     "TaskNotFound",
     "WrongProject",
+    "archive_task",
     "branch_choices_for",
     "build_tree",
     "create_subtask",
@@ -31,5 +34,6 @@ __all__ = [
     "delete_task",
     "flatten",
     "set_status",
+    "unarchive_task",
     "would_create_cycle",
 ]

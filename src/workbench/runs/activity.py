@@ -101,3 +101,24 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
         )
         for run_id, task_id, phase, status, proposed_subtasks in rows
     }
+
+
+def pr_url_by_task(db: Session, project_id: int) -> dict[int, str]:
+    """The most recent pull request opened for each of a project's tasks.
+
+    `run_detail.html` already shows a run's own `pr_url`, but that means
+    digging into the specific run that opened it. This is what lets the task
+    tree itself link straight to the code — the actual "menu action" a
+    finished task is missing. A task can accumulate several runs, and where
+    more than one opened a pull request the newest wins, exactly like
+    `activity_by_task` above; one query for the whole tree for the same
+    reason.
+    """
+    rows = db.execute(
+        select(Run.task_id, Run.pr_url)
+        .join(Task, Task.id == Run.task_id)
+        .where(Task.project_id == project_id, Run.pr_url.is_not(None))
+        .order_by(Run.id)
+    ).all()
+
+    return {task_id: pr_url for task_id, pr_url in rows}  # noqa: C416

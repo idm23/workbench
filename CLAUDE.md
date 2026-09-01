@@ -249,7 +249,15 @@ in `docs/server-conventions.md`.
   with pre-approved permissions executes model-authored shell commands; the separate
   account bounds the blast radius to files recoverable from GitHub.
 - Secrets in `/etc/workbench/env` (mode 0600, owned by the service user), loaded via
-  `EnvironmentFile`. Alternatively authenticate the bundled CLI once as that user to
+  `EnvironmentFile` — **by every unit that spends one, which for a while meant the wrong
+  unit**. The deployer read that file and the run unit did not, so `WORKBENCH_GITHUB_TOKEN`
+  reached the process that reports staging acceptance and not the process that opens pull
+  requests. A correctly configured machine pushed every branch and then reported the token
+  as unset. Nothing looked broken, because publishing is deliberately not allowed to fail a
+  run: the symptom was pull requests that never arrived on runs that said they succeeded.
+  Granting it is one line, and it is `EnvironmentFile=-` rather than `EnvironmentFile=` —
+  a fresh install has no such file, and a unit that insisted on one would turn a missing
+  pull request into a missing run. Alternatively authenticate the bundled CLI once as that user to
   bill against a Claude subscription instead of the API — which is what this install
   does: `sudo -iu workbench <venv>/bin/python -m workbench.doctor --login`. Either way
   the credential is readable by model-authored shell commands running as that user —
@@ -279,6 +287,17 @@ in `docs/server-conventions.md`.
   split rather than switched, because requiring a key to *read* would mean a key just to
   add a public project. Doing it at push time rather than clone time is what repairs the
   clones that already exist, since nothing re-clones them.
+- **The doctor knows about the pull request token, because nothing else did.** Whether
+  `WORKBENCH_GITHUB_TOKEN` is installed is checked without a network, so it reaches the
+  page banner too; whether GitHub still accepts it, and when it expires, needs one and so
+  does not. The check reads `/etc/workbench/env` rather than its own environment — the
+  token lives in a *unit's* environment, and a person running the doctor by hand has no
+  such thing, so reading `os.environ` alone would report it missing on a machine where it
+  is configured perfectly. A file it cannot read is `unknown`, never `fail`: mode 0600
+  owned by the service account is the correct state, and a person running as themselves
+  must not be told their token is gone. The expiry warning exists for the same reason the
+  agent credential's does — a fine-grained PAT lasts 90 days by default, and the failure
+  when it lapses is pull requests quietly not appearing on runs that report success.
 - The service user needs its own SSH deploy key and `user.name`/`user.email`, or
   unattended pushes and agent commits will fail. Prefer per-repo deploy keys or a
   fine-grained PAT over an account-wide key, which would grant push to every repo.

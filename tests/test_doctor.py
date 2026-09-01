@@ -282,6 +282,201 @@ def test_a_missing_key_names_the_command_that_makes_one(monkeypatch, tmp_path):
     assert check.fix is not None and check.fix.startswith("ssh-keygen")
 
 
+# --- The token that opens pull requests ---------------------------------------
+
+
+def env_file(monkeypatch, tmp_path, content: str | None):
+    """Point the checks at a throwaway /etc/workbench/env."""
+    path = tmp_path / "env"
+    if content is not None:
+        path.write_text(content)
+    monkeypatch.setattr(doctor, "ENV_FILE", path)
+    monkeypatch.delenv("WORKBENCH_GITHUB_TOKEN", raising=False)
+    return path
+
+
+def test_a_token_only_in_the_env_file_is_found(monkeypatch, tmp_path):
+    """The regression this check exists to avoid being useless.
+
+    A person runs the doctor as themselves; the token lives in a *unit's*
+    environment. Reading only os.environ would report it missing on a machine
+    where it is installed perfectly, which is worse than not checking at all.
+    """
+    env_file(monkeypatch, tmp_path, "WORKBENCH_GITHUB_TOKEN=github_pat_abc\n")
+
+    assert doctor.check_github_token().state is CheckState.OK
+
+
+def test_a_token_in_the_environment_is_found_without_the_file(monkeypatch, tmp_path):
+    """Inside a run unit systemd has already loaded it, and the file itself may
+    not even be readable by then."""
+    env_file(monkeypatch, tmp_path, None)
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN", "github_pat_abc")
+
+    assert doctor.check_github_token().state is CheckState.OK
+
+
+def test_the_token_value_never_reaches_the_report(monkeypatch, tmp_path):
+    """The doctor prints to a terminal and to the journal, and its JSON is
+    served to every page. A secret has no business in any of them."""
+    env_file(monkeypatch, tmp_path, "WORKBENCH_GITHUB_TOKEN=github_pat_supersecret\n")
+
+    check = doctor.check_github_token()
+
+    assert "github_pat_supersecret" not in f"{check.detail}{check.fix}"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "WORKBENCH_OTHER=1\n",
+        "WORKBENCH_GITHUB_TOKEN=\n",
+        "  WORKBENCH_GITHUB_TOKEN=   \n",
+    ],
+    ids=["empty", "unrelated", "assigned-nothing", "assigned-whitespace"],
+)
+def test_a_file_without_a_usable_token_fails(monkeypatch, tmp_path, content):
+    env_file(monkeypatch, tmp_path, content)
+
+    assert doctor.check_github_token().state is CheckState.FAIL
+
+
+def test_a_missing_file_fails_with_something_to_run(monkeypatch, tmp_path):
+    env_file(monkeypatch, tmp_path, None)
+
+    check = doctor.check_github_token()
+
+    assert check.state is CheckState.FAIL
+    assert check.fix
+    assert "personal-access-tokens" in check.detail
+
+
+def test_leading_whitespace_does_not_hide_the_token(monkeypatch, tmp_path):
+    """Written from an indented heredoc, which is how it actually happened."""
+    env_file(monkeypatch, tmp_path, "  WORKBENCH_GITHUB_TOKEN=github_pat_abc\n")
+
+    assert doctor.check_github_token().state is CheckState.OK
+
+
+def test_a_quoted_value_is_unwrapped(monkeypatch, tmp_path):
+    env_file(monkeypatch, tmp_path, 'WORKBENCH_GITHUB_TOKEN="github_pat_abc"\n')
+
+    assert doctor.configured_github_token() == "github_pat_abc"
+
+
+def test_a_file_this_account_cannot_read_is_unknown_not_failed(monkeypatch, tmp_path):
+    """Mode 0600 owned by the service account is the *correct* state. Telling a
+    person running as themselves that their token is missing would be wrong,
+    and would train them to ignore the check that is right."""
+    path = env_file(monkeypatch, tmp_path, "WORKBENCH_GITHUB_TOKEN=github_pat_abc\n")
+    path.chmod(0o000)
+
+    try:
+        state = doctor.check_github_token().state
+    finally:
+        path.chmod(0o600)
+
+    assert state is CheckState.UNKNOWN
+
+
+# --- Whether GitHub still accepts it ------------------------------------------
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, headers: dict[str, str] | None = None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+def github_answers(monkeypatch, response):
+    def get(*_args, **_kwargs):
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(doctor.httpx, "get", get)
+
+
+def usable_token(monkeypatch, tmp_path):
+    env_file(monkeypatch, tmp_path, "WORKBENCH_GITHUB_TOKEN=github_pat_abc\n")
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_rejected_token_fails(monkeypatch, tmp_path, status):
+    usable_token(monkeypatch, tmp_path)
+    github_answers(monkeypatch, FakeResponse(status))
+
+    assert doctor.check_github_token_works().state is CheckState.FAIL
+
+
+def test_an_unreachable_github_is_unknown_not_failed(monkeypatch, tmp_path):
+    """Being offline is not a misconfiguration. Same rule as the deploy key."""
+    usable_token(monkeypatch, tmp_path)
+    github_answers(monkeypatch, doctor.httpx.ConnectError("no route"))
+
+    assert doctor.check_github_token_works().state is CheckState.UNKNOWN
+
+
+def test_no_token_at_all_is_unknown_here_rather_than_a_second_failure(monkeypatch, tmp_path):
+    """check_github_token already reported it. Two failures for one cause reads
+    as two problems."""
+    env_file(monkeypatch, tmp_path, None)
+
+    assert doctor.check_github_token_works().state is CheckState.UNKNOWN
+
+
+def expiring_in(days: int) -> FakeResponse:
+    when = datetime.now(UTC) + timedelta(days=days)
+    return FakeResponse(
+        200, {"github-authentication-token-expiration": when.strftime("%Y-%m-%d %H:%M:%S UTC")}
+    )
+
+
+def test_a_token_with_months_left_says_so_without_warning(monkeypatch, tmp_path):
+    usable_token(monkeypatch, tmp_path)
+    github_answers(monkeypatch, expiring_in(60))
+
+    assert doctor.check_github_token_works().state is CheckState.OK
+
+
+def test_a_token_about_to_expire_warns_while_it_still_works(monkeypatch, tmp_path):
+    """The trap the agent credential already taught this project: a clock
+    nothing was watching, everything reporting healthy until it stopped."""
+    usable_token(monkeypatch, tmp_path)
+    github_answers(monkeypatch, expiring_in(3))
+
+    check = doctor.check_github_token_works()
+
+    assert check.state is CheckState.WARN
+    assert "expires on" in check.detail
+
+
+def test_an_expired_token_fails_rather_than_warns(monkeypatch, tmp_path):
+    usable_token(monkeypatch, tmp_path)
+    github_answers(monkeypatch, expiring_in(-1))
+
+    assert doctor.check_github_token_works().state is CheckState.FAIL
+
+
+def test_a_token_reporting_no_expiry_is_not_treated_as_expiring(monkeypatch, tmp_path):
+    """The header is only sent for a token that has one. Silence about an expiry
+    is not evidence of an imminent one."""
+    usable_token(monkeypatch, tmp_path)
+    github_answers(monkeypatch, FakeResponse(200))
+
+    assert doctor.check_github_token_works().state is CheckState.OK
+
+
+def test_an_unreadable_expiry_does_not_condemn_a_working_token(monkeypatch, tmp_path):
+    usable_token(monkeypatch, tmp_path)
+    github_answers(
+        monkeypatch, FakeResponse(200, {"github-authentication-token-expiration": "next Tuesday"})
+    )
+
+    assert doctor.check_github_token_works().state is CheckState.OK
+
+
 # --- What the agent has to be able to write -----------------------------------
 
 
@@ -343,19 +538,34 @@ def test_a_check_that_crashes_becomes_unknown_rather_than_a_traceback(monkeypatc
     assert not results[0].failed
 
 
-def test_offline_skips_the_only_check_that_needs_a_network(monkeypatch):
+def test_offline_skips_the_checks_that_need_a_network(monkeypatch):
     monkeypatch.setattr(doctor, "check_deploy_key", lambda: pytest.fail("the network was reached"))
+    monkeypatch.setattr(
+        doctor, "check_github_token_works", lambda: pytest.fail("the network was reached")
+    )
     monkeypatch.setattr(doctor, "CHECKS", (doctor.check_snapshot_source,))
 
     assert doctor.run_checks(network=False)
 
 
-def test_offline_drops_the_network_check_from_the_report(monkeypatch, tmp_path):
+def test_offline_drops_the_network_checks_from_the_report(monkeypatch, tmp_path):
     monkeypatch.setattr(doctor, "running_account", lambda: _account(tmp_path))
 
     keys = {check.key for check in doctor.run_checks(network=False)}
 
     assert "deploy-key" not in keys
+    assert "github-token-works" not in keys
+
+
+def test_whether_the_token_exists_survives_offline(monkeypatch, tmp_path):
+    """The page banner probes with --offline. A machine that cannot open pull
+    requests has to say so there, not only to whoever runs the doctor by hand —
+    which is the whole reason this check does no network I/O."""
+    monkeypatch.setattr(doctor, "running_account", lambda: _account(tmp_path))
+
+    keys = {check.key for check in doctor.run_checks(network=False)}
+
+    assert "github-token" in keys
 
 
 # --- The command line ---------------------------------------------------------

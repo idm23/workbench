@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Archive — {{ project.owner }}/{{ project.repo }} — Workbench{% endblock %}
+
+{% block back %}<a class="back" href="/projects/{{ project.id }}">&lsaquo; {{ project.owner }}/{{ project.repo }}</a>{% endblock %}
+
+{% block content %}
+<h1 class="mono" style="font-size: clamp(1.3rem, 6vw, 1.8rem);">Archive</h1>
+<p class="sub">
+  Tasks put away from {{ project.owner }}/{{ project.repo }}'s tree. Nothing here was
+  deleted — branches, runs, and events all survive underneath.
+</p>
+
+{% if nodes %}
+  <ul class="tree">
+    {% for node in nodes %}
+      {% set effective_status = node.effective_status %}
+      <li data-depth="{{ node.depth }}"
+          style="padding-left: {{ node.depth * 1.25 }}rem; --depth: {{ node.depth }};">
+        <div class="task {{ 'done' if effective_status == 'done' }} {{ 'parent' if not node.is_leaf }}">
+          <div class="task-body">
+            <div class="task-title">{{ node.task.title }}</div>
+
+            {% if node.body_rest %}
+              <details class="task-note">
+                <summary>{{ node.body_preview }}&hellip;</summary>
+                <div class="task-note-rest">{{ node.body_rest }}</div>
+              </details>
+            {% elif node.body_preview %}
+              <div class="task-note">{{ node.body_preview }}</div>
+            {% endif %}
+
+            <div class="task-note">
+              <span class="status {{ effective_status }}">{{ effective_status }}</span>
+              {% if node.task.branch %}
+                <span class="mono">&nbsp;{{ node.task.branch }}</span>
+              {% endif %}
+            </div>
+
+            <div class="task-actions">
+              {% set pr_url = pr_urls.get(node.task.id) %}
+              {% if pr_url %}
+                <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
+              {% endif %}
+              <form method="post" action="/tasks/{{ node.task.id }}/unarchive">
+                <button class="slim secondary" type="submit">Unarchive</button>
+              </form>
+              <form method="post" action="/tasks/{{ node.task.id }}/delete">
+                <button class="slim danger" type="submit">Delete</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">Nothing archived yet.</p>
+{% endif %}
+{% endblock %}

@@ -45,6 +45,8 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
+import httpx
+
 from workbench.config import (
     deployment_root,
     instance,
@@ -68,6 +70,18 @@ NETWORK_TIMEOUT_SECONDS = 30
 #: Groups that would give the service account root by another name. The whole
 #: security claim of a dedicated account is that it has no sudo.
 PRIVILEGED_GROUPS = ("sudo", "admin", "wheel", "root")
+
+#: Where systemd reads the units' secrets from. Named here rather than taken
+#: from the environment because that is the point: the token is in a *unit's*
+#: environment, and a person running the doctor by hand has no such thing.
+ENV_FILE = Path("/etc/workbench/env")
+
+#: How long before a fine-grained PAT expires this starts saying so. Longer
+#: than RENEWAL_WARNING because the remedy is different in kind: the agent's
+#: credential is renewed by one browser login, a token has to be minted, scoped,
+#: and installed on the server, and it is the sort of thing that gets noticed on
+#: a phone and actioned a week later at a desk.
+TOKEN_EXPIRY_WARNING = timedelta(days=14)
 
 #: How long before a credential's renewal window closes this starts saying so.
 #: The window measured on this machine is about a fortnight, so three days is
@@ -540,6 +554,233 @@ def check_snapshot_source() -> Check:
     )
 
 
+@dataclass(frozen=True)
+class TokenUnreadable:
+    """The env file exists but this account cannot read it.
+
+    Distinct from absent, and the distinction is the whole value of this type:
+    mode 0600 owned by the service account is the *correct* state, so a person
+    running the doctor as themselves gets this and must not be told their token
+    is missing.
+    """
+
+    message: str
+
+
+type ConfiguredToken = str | TokenUnreadable | None
+
+
+def configured_github_token() -> ConfiguredToken:
+    """The token as a *unit* would see it, not as this process happens to.
+
+    Reads the environment first and the file second, in that order, because
+    those are two different questions and only one of them is answerable from
+    both places. Inside a run unit the variable is set and the file may not even
+    be readable; run by hand it is the other way round. Checking only
+    `os.environ` — which is what `config.github_token()` does, correctly, for
+    its own purpose — would report a missing token on a machine where it is
+    configured perfectly, which is a worse failure than the one being checked.
+
+    Parsed rather than sourced. systemd reads this file itself; it does not run
+    a shell over it, so neither does this.
+    """
+    from_environment = os.environ.get("WORKBENCH_GITHUB_TOKEN", "").strip()
+    if from_environment:
+        return from_environment
+
+    if not ENV_FILE.exists():
+        return None
+
+    try:
+        content = ENV_FILE.read_text()
+    except OSError as error:
+        return TokenUnreadable(f"{ENV_FILE} could not be read: {error.strerror}.")
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        name, separator, value = stripped.partition("=")
+        if separator and name.strip() == "WORKBENCH_GITHUB_TOKEN":
+            return value.strip().strip("\"'") or None
+
+    return None
+
+
+def check_github_token() -> Check:
+    """Whether the credential that opens pull requests is installed.
+
+    The second half of publishing, and the only half that is a secret. A run
+    pushes with the service account's deploy key and then opens the pull
+    request over the API, so a machine with a key and no token pushes every
+    branch and opens nothing.
+
+    That failure is silent by construction: `runner._publish` is documented
+    never to turn a successful run into a failed one, because by then the agent
+    has done the work and committed it. So the run says it succeeded, the
+    branch is on GitHub, and the explanation is a notice partway down a page
+    nobody opens. This check is the thing that says it out loud instead.
+    """
+    key = "github-token"
+    title = "Pull requests can be opened"
+    token = configured_github_token()
+
+    if isinstance(token, TokenUnreadable):
+        return Check(key=key, title=title, state=CheckState.UNKNOWN, detail=token.message)
+
+    if token is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL,
+            detail=(
+                f"No WORKBENCH_GITHUB_TOKEN in {ENV_FILE}. Runs will commit and push, "
+                "then stop without opening a pull request.\n"
+                "          Mint a fine-grained token for "
+                f"{_repository_slug()} with Contents: Read and write,\n"
+                "          Pull requests: Read and write, and Commit statuses: Read and "
+                "write, at\n"
+                "          https://github.com/settings/personal-access-tokens/new"
+            ),
+            fix=f"sudo install -m 600 -o {service_account()} -g {service_account()} "
+            f"/dev/null {ENV_FILE}",
+        )
+
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=f"WORKBENCH_GITHUB_TOKEN is set ({len(token)} characters).",
+    )
+
+
+def check_github_token_works() -> Check:
+    """Whether GitHub still accepts that token, and for how much longer.
+
+    Two failures, one probe. A token can be present and wrong — scoped without
+    Pull requests, pointed at the wrong repository, revoked — and a token can be
+    right and about to expire, which is the same trap the agent credential
+    already taught this project: a clock nothing was watching, everything
+    reporting healthy until the day it stopped.
+
+    A fine-grained PAT expires within a year and 90 days is the usual choice, so
+    this is not a hypothetical. GitHub reports the date in a response header;
+    when it does not, that is silence about the expiry rather than evidence of
+    the absence of one, so the check stays OK and says so.
+    """
+    key = "github-token-works"
+    title = "GitHub accepts the pull request token"
+    token = configured_github_token()
+
+    if isinstance(token, TokenUnreadable):
+        return Check(key=key, title=title, state=CheckState.UNKNOWN, detail=token.message)
+
+    if token is None:
+        # Already reported by check_github_token, and reporting it twice would
+        # be two failures for one cause. Nothing is wrong with this token.
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="There is no token to check.",
+        )
+
+    slug = _repository_slug()
+    try:
+        response = httpx.get(
+            f"https://api.github.com/repos/{slug}/pulls",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "workbench",
+            },
+            timeout=NETWORK_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as error:
+        # Being offline is not a misconfiguration. Same rule as the deploy key.
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail=f"Could not reach GitHub: {error}",
+        )
+
+    if response.status_code in (401, 403, 404):
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL,
+            detail=(
+                f"GitHub returned {response.status_code} for {slug}. The token is expired, "
+                "revoked, or not scoped to this repository.\n"
+                "          Runs will push and then fail to open a pull request.\n"
+                "          https://github.com/settings/personal-access-tokens"
+            ),
+        )
+
+    if response.status_code != 200:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail=f"GitHub returned {response.status_code} for {slug}.",
+        )
+
+    return _token_expiry(key, title, response.headers.get("github-authentication-token-expiration"))
+
+
+def _token_expiry(key: str, title: str, header: str | None) -> Check:
+    """Turn GitHub's expiry header into a check, tolerating its absence.
+
+    The header is only sent for a token that has an expiry, and its format is
+    documented loosely enough to be worth parsing defensively — an unreadable
+    date must not become a failure, because the token it describes is working.
+    """
+    accepted = "GitHub accepts the token."
+    if not header:
+        return Check(key=key, title=title, state=CheckState.OK, detail=accepted)
+
+    # Seen as "2026-11-30 15:22:33 UTC". Normalised rather than matched exactly,
+    # so a trailing zone name or an ISO spelling both land.
+    text = header.strip().removesuffix(" UTC").replace(" ", "T", 1)
+    try:
+        expires = datetime.fromisoformat(text).replace(tzinfo=UTC)
+    except ValueError:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail=f"{accepted} It reports an expiry of {header!r}, which could not be read.",
+        )
+
+    remaining = expires - datetime.now(UTC)
+    when = expires.date().isoformat()
+
+    if remaining <= timedelta(0):
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL,
+            detail=f"The token expired on {when}.",
+        )
+
+    days = remaining.days
+    if remaining <= TOKEN_EXPIRY_WARNING:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                f"{accepted} It expires on {when}, in {days} day{'s' * (days != 1)}.\n"
+                "          Mint a replacement before then — pull requests stop the day it "
+                "goes.\n"
+                "          https://github.com/settings/personal-access-tokens"
+            ),
+        )
+
+    return Check(
+        key=key, title=title, state=CheckState.OK, detail=f"{accepted} It expires on {when}."
+    )
+
+
 def check_tailscale_serve() -> Check:
     """Whether this instance is actually published on the tailnet.
 
@@ -626,11 +867,18 @@ CHECKS = (
     check_git_identity,
     check_snapshot_source,
     check_deploy_key,
+    check_github_token,
+    check_github_token_works,
     check_tailscale_serve,
 )
 
 #: The checks that need to reach the network, skipped by `--offline`.
-NETWORK_CHECKS = frozenset({"deploy-key"})
+#:
+#: `github-token` is deliberately not here. Whether the token is installed at
+#: all is answerable from the filesystem, and it needs to be, because the page
+#: banner probes with `--offline` — a machine that cannot open pull requests
+#: should say so on every page, not only to whoever thinks to run the doctor.
+NETWORK_CHECKS = frozenset({"deploy-key", "github-token-works"})
 
 
 def run_checks(*, network: bool = True) -> list[Check]:
