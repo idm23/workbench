@@ -1,0 +1,84 @@
+name: Promote staging to main
+
+# Fires on GitHub's classic Commit Status API, not on Checks — CI's own
+# results are check runs and never trigger this. The only thing in this
+# repository that posts a classic status is scripts/staging_acceptance.py,
+# via the `staging-acceptance` context, so in practice this only ever fires
+# for that.
+#
+# `on: status` workflows run only from the *default branch's* copy of the
+# file (main here), regardless of which branch the status was posted for.
+# So this starts firing once it is merged to main, not before, and cannot be
+# exercised from a feature branch.
+on:
+  status
+
+# Nothing here needs the checked-out code — it only calls the pull request
+# API — so this is the only scope granted. Deliberately not contents: read.
+permissions:
+  pull-requests: write
+
+# A second status landing while this is mid-run should not race it.
+concurrency:
+  group: promote-staging-to-main
+  cancel-in-progress: false
+
+jobs:
+  open-pr:
+    name: Open staging → main pull request
+    runs-on: ubuntu-latest
+    # Every classic commit status in this repo except this one is
+    # irrelevant; cheaper to filter here than to spend a job on it.
+    if: github.event.context == 'staging-acceptance' && github.event.state == 'success'
+    steps:
+      - name: Open it, unless one is already open or there is nothing to promote
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // The payload's own sha is not necessarily staging's current tip —
+            // `branches` lists which branches point at it right now, which is
+            // what actually matters here.
+            const branches = (context.payload.branches || []).map((b) => b.name);
+            if (!branches.includes('staging')) {
+              core.info(`${context.payload.sha} is not staging's current tip; skipping.`);
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+
+            const open = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              base: 'main',
+              head: `${owner}:staging`,
+            });
+            if (open.data.length > 0) {
+              core.info(`#${open.data[0].number} is already open; nothing to do.`);
+              return;
+            }
+
+            try {
+              const pr = await github.rest.pulls.create({
+                owner,
+                repo,
+                base: 'main',
+                head: 'staging',
+                title: 'Promote staging to main',
+                body:
+                  `Opened automatically: \`staging-acceptance\` passed on ${context.payload.sha}.\n\n` +
+                  'Merge with a merge commit, not squash or rebase — CLAUDE.md: only a ' +
+                  'merge commit keeps `staging` an ancestor of `main`, which is what lets ' +
+                  'the next promotion be a fast-forward instead of a force push.',
+              });
+              core.info(`Opened #${pr.data.number}`);
+            } catch (error) {
+              // 422 here means main and staging already have no commits
+              // between them — e.g. a second success event for a commit
+              // that was just promoted. Converged state, not a failure.
+              if (error.status === 422) {
+                core.info(`Nothing to promote (${error.message}).`);
+                return;
+              }
+              throw error;
+            }

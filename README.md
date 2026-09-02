@@ -272,9 +272,11 @@ setting again.
 ### What GitHub needs
 
 - A `staging` branch.
-- **Protect `main`:** require a pull request; require these checks, with branches up to date —
-  `Lint, types, and tests`, `Fresh install on clean Ubuntu`, `Deploy cycle on systemd`, and
-  `staging-acceptance`. Block force pushes.
+- **Protect `main`:** require a pull request; require these checks —
+  `Lint, types, and tests`, `Fresh install on clean Ubuntu`, `Deploy cycle on systemd`,
+  `staging-acceptance`, and `Only staging may merge into main`. Leave *Require branches to be
+  up to date before merging* unticked — see `CLAUDE.md` for why that's safe here. Block force
+  pushes.
 - **Protect `staging`:** require the three CI checks, but *not* `staging-acceptance` — that status
   is produced by deploying staging, so requiring it there is circular.
 - A fine-grained PAT in `/etc/workbench/env` as `WORKBENCH_GITHUB_TOKEN` (mode 0600), scoped to
@@ -283,9 +285,10 @@ setting again.
   are what let a run open its pull request. `python -m workbench.doctor` says whether it is
   installed, whether GitHub still accepts it, and when it expires.
 
-Requiring `staging-acceptance` on `main` is what enforces the flow, and it means a hotfix cannot
-skip staging without an admin override. That is deliberate, but worth knowing before you need it at
-2am.
+Requiring `staging-acceptance` on `main` is what enforces that a commit was actually tested on
+staging; `Only staging may merge into main` enforces that it came from staging at all — a hotfix
+cannot skip either without an admin override. That is deliberate, but worth knowing before you
+need it at 2am.
 
 **[`docs/deployment-setup.md`](docs/deployment-setup.md) is the click-level runbook** — the order
 these have to happen in, the exact ruleset fields, and the two chicken-and-egg problems that decide
