@@ -72,6 +72,7 @@ from workbench.tasks import (
     create_subtask,
     create_task,
     flatten,
+    ready_to_execute,
     set_status,
     unarchive_task,
 )
@@ -303,28 +304,37 @@ def show_project(
         .where(Task.project_id == project.id, Task.archived_at.is_not(None))
     )
 
+    nodes = flatten(build_tree(list(tasks)))
+    # One query for the whole tree. Asking per node is how a page that felt
+    # instant stops being one.
+    activity = activity_by_task(db, project.id)
+    # A finished task's pull request, if one was opened — surfaced directly on
+    # the tree rather than only on the run that opened it.
+    pr_urls = pr_url_by_task(db, project.id)
+    # Derived, not stored. This database is copied between instances — staging
+    # restores production's snapshot on every deploy — so a stored path would
+    # arrive pointing at the other machine's disk.
+    checkout = local_checkout(project.owner, project.repo)
+
     return templates.TemplateResponse(
         request,
         "project_detail.html",
         {
             **_shared(db),
             "project": project,
-            "nodes": flatten(build_tree(list(tasks))),
+            "nodes": nodes,
             "archived_count": archived_count,
-            # One query for the whole tree. Asking per node is how a page that
-            # felt instant stops being one.
-            "activity": activity_by_task(db, project.id),
-            # A finished task's pull request, if one was opened — surfaced
-            # directly on the tree rather than only on the run that opened it.
-            "pr_urls": pr_url_by_task(db, project.id),
+            "activity": activity,
+            "pr_urls": pr_urls,
+            # Tasks one click away from starting or continuing execution —
+            # promoted above the tree so the thing most worth doing on the
+            # page is the first thing it offers, not something to scroll for.
+            "ready": ready_to_execute(nodes, activity, pr_urls, checkout=bool(checkout)),
             # The project's own standing conversation, if one is in flight —
             # what lets the page offer "Continue" instead of "Talk to this
             # project" without a second click to find out.
             "conversation": active_run_for_project(db, project.id),
-            # Derived, not stored. This database is copied between instances —
-            # staging restores production's snapshot on every deploy — so a
-            # stored path would arrive pointing at the other machine's disk.
-            "checkout": local_checkout(project.owner, project.repo),
+            "checkout": checkout,
             # Only worth computing for a task that would actually show the
             # picker: one with no worktree yet has nothing to choose between.
             # The option the picker preselects for a task that has never been

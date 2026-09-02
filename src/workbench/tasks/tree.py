@@ -7,7 +7,8 @@ layer loads rows; this decides what they look like.
 
 from dataclasses import dataclass, field
 
-from workbench.database.models import Task, TaskStatus
+from workbench.database.models import RunPhase, Task, TaskStatus
+from workbench.runs.activity import TaskActivity
 
 #: Guards against a parent cycle rendering forever. Nothing legitimate nests
 #: anywhere near this deep; hitting it means the data is corrupt.
@@ -180,3 +181,93 @@ def would_create_cycle(task: Task, new_parent: Task) -> bool:
             return True
         current = current.parent
     return True
+
+
+@dataclass(frozen=True)
+class ReadyTask:
+    """A leaf task one click away from running code.
+
+    Two cases produce one of these: a plan run is `awaiting_review` with
+    nothing left to decide — approving it starts execute directly, or creates
+    the subtasks it proposed — or a task has never run at all but a parent's
+    plan already marked it `entry_phase=execute`, fully specified with
+    nothing left to plan. Both already have a one-click button in the tree;
+    this is what promotes them to the top of the page.
+    """
+
+    node: TaskNode
+    #: Set only for the "approve a plan" case — posts to `/runs/{id}/approve`.
+    #: `None` for the "never run, already specified" case, which instead
+    #: posts to `/tasks/{id}/runs`.
+    run_id: int | None
+    #: `Run.plan` for the approval case, or the task's own body — the closest
+    #: thing to a plan a never-run task has — for the other.
+    plan_text: str | None
+    proposed_subtask_count: int
+
+    @property
+    def plan_preview(self) -> str | None:
+        """`plan_text`, cut to a skimmable length — mirrors `body_preview`."""
+        if not self.plan_text:
+            return None
+        if len(self.plan_text) <= BODY_PREVIEW_CHARS:
+            return self.plan_text
+        return _truncate_at_word(self.plan_text, BODY_PREVIEW_CHARS)
+
+    @property
+    def plan_rest(self) -> str | None:
+        """Whatever `plan_preview` left out — mirrors `body_rest`."""
+        text = self.plan_text
+        preview = self.plan_preview
+        if not text or preview is None or len(text) <= BODY_PREVIEW_CHARS:
+            return None
+        return text[len(preview) :].lstrip()
+
+
+def ready_to_execute(
+    nodes: list[TaskNode],
+    activity: dict[int, TaskActivity],
+    pr_urls: dict[int, str],
+    checkout: bool,
+) -> list[ReadyTask]:
+    """Leaf tasks a single click away from starting or continuing execution.
+
+    Deliberately narrower than "every task with a run button": a task that
+    still needs its first *plan* is ready to be planned, not ready to
+    execute, so it is left out even though the tree also offers it a button.
+    A task with anything else in flight (queued, running, or failed) is left
+    out too — something is already happening, or a different action (retry)
+    applies, neither of which is "one click starts execution".
+    """
+    ready: list[ReadyTask] = []
+    for node in nodes:
+        if not node.is_leaf:
+            continue
+        if node.effective_status in (TaskStatus.DONE, TaskStatus.CANCELLED):
+            continue
+        if pr_urls.get(node.task.id):
+            continue
+
+        busy = activity.get(node.task.id)
+        if busy is not None:
+            if busy.needs_attention and busy.phase is RunPhase.PLAN:
+                ready.append(
+                    ReadyTask(
+                        node=node,
+                        run_id=busy.run_id,
+                        plan_text=busy.plan,
+                        proposed_subtask_count=busy.proposed_subtask_count,
+                    )
+                )
+            continue
+
+        if checkout and node.task.entry_phase is RunPhase.EXECUTE:
+            ready.append(
+                ReadyTask(
+                    node=node,
+                    run_id=None,
+                    plan_text=node.task.body,
+                    proposed_subtask_count=0,
+                )
+            )
+    return ready
