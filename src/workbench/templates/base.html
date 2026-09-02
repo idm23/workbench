@@ -619,5 +619,35 @@
   {% include "_rate_limits.html" %}
   {% block content %}{% endblock %}
 </div>
+<script>
+  // Every mutating action on this app is a plain <form method="post"> whose
+  // route ends the request with a 303 redirect back to the same page (see
+  // `_redirect` in app.py) — a fresh top-level GET, which means the browser
+  // has no scroll position of its own to restore. This restores one by hand,
+  // keyed on the path a form was submitted from and read back on the next
+  // load of that same path.
+  //
+  // Global (not page-specific) because the same POST/redirect/GET pattern is
+  // used by every form in the app, not just the task tree.
+  (function () {
+    history.scrollRestoration = "manual";
+
+    document.addEventListener("submit", function () {
+      // The query string is excluded on purpose: `_redirect` appends
+      // `?notice=...`/`?error=...` to the same path the form was on, and the
+      // saved offset should still be found when that lands back here.
+      sessionStorage.setItem("scrollY:" + location.pathname, String(window.scrollY));
+    });
+
+    var key = "scrollY:" + location.pathname;
+    var saved = sessionStorage.getItem(key);
+    if (saved !== null) {
+      // Removed immediately so a later, unrelated visit to the same path
+      // (not preceded by a form submit) doesn't reuse a stale offset.
+      sessionStorage.removeItem(key);
+      window.scrollTo(0, Number(saved));
+    }
+  })();
+</script>
 </body>
 </html>
