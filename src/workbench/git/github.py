@@ -201,6 +201,36 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
+def _validation_detail(payload: object) -> str:
+    """A readable explanation from a 422's body.
+
+    GitHub's `errors` entries carry a `message` for some failures (a
+    duplicate pull request) and only `field`/`code` for others (an invalid
+    base branch) — this reads whichever is there rather than assuming the
+    shape that happens to matter for the one case already handled.
+    """
+    if not isinstance(payload, dict):
+        return "GitHub did not explain why."
+    message = payload.get("message") or ""
+    raw_errors = payload.get("errors")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    parts = [
+        error.get("message") or f"{error.get('field', '?')}: {error.get('code', '?')}"
+        for error in errors
+        if isinstance(error, dict)
+    ]
+    detail = "; ".join(parts)
+    combined = f"{message} {detail}".strip()
+    return combined or "GitHub did not explain why."
+
+
+def _is_duplicate_pull_request(detail: str) -> bool:
+    """Whether a 422's explanation is GitHub's own wording for "this pull
+    request already exists" rather than something else — an invalid base
+    branch, most commonly, which reads as pure prose with no such phrase."""
+    return "already exists" in detail.lower()
+
+
 def _existing_pull_request(ref: RepoRef, head: str, token: str) -> PullRequestResult:
     """The open pull request for a branch, when one is already there.
 
@@ -263,8 +293,16 @@ def open_pull_request(
     if response.status_code == 422:
         # Either a duplicate, or something genuinely wrong with the request —
         # a base branch that does not exist, most likely. Only the first is
-        # recoverable, and asking is how they are told apart.
-        return _existing_pull_request(ref, head, token)
+        # recoverable, and reading GitHub's own explanation is how they are
+        # told apart, rather than assuming every 422 is the recoverable one:
+        # that assumption is what once turned "the base branch was never
+        # pushed" into a notice claiming a duplicate PR existed when none did.
+        detail = _validation_detail(response.json())
+        if _is_duplicate_pull_request(detail):
+            return _existing_pull_request(ref, head, token)
+        return PullRequestFailed(
+            f"GitHub rejected the pull request for {head} onto {base}: {detail}"
+        )
 
     if response.status_code in (401, 403):
         return PullRequestFailed(
