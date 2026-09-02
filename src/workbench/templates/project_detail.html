@@ -134,10 +134,15 @@
                 <form method="post" action="/runs/{{ busy.run_id }}/cancel">
                   <button class="slim secondary" type="submit">Stop run</button>
                 </form>
-              {% elif node.is_leaf and checkout and effective_status not in ('done', 'cancelled') %}
+              {% elif node.is_leaf and checkout and not pr_url and effective_status not in ('done', 'cancelled') %}
                 {# Only leaves: a task with children describes work rather than
                    being work, so an agent pointed at one has nothing single to
-                   do. And nothing can run before there is a checkout. #}
+                   do. And nothing can run before there is a checkout.
+                   And not once a PR exists: a task can be ticked back to
+                   `open` after being marked `done`, which would otherwise
+                   reoffer a fresh run next to a branch already out for
+                   review — `pr_url` outlives that toggle because it is never
+                   cleared, so it is checked here independently of status. #}
                 <form method="post" action="/tasks/{{ node.task.id }}/runs"
                       style="display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;">
                   <input type="hidden" name="phase" value="{{ node.task.entry_phase or 'plan' }}">

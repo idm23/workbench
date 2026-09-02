@@ -735,6 +735,46 @@ def test_the_most_recent_pull_request_wins_over_an_earlier_run(client, session, 
     assert 'href="https://github.com/idm23/workbench/pull/1"' not in page
 
 
+def test_a_task_with_an_open_pull_request_offers_no_new_run(client, session, cloned):
+    """The button `test_a_task_with_an_opened_pull_request_links_to_it` doesn't
+    check: once a run has opened a PR, the branch is out for review and a
+    fresh run against it would be redundant, not helpful."""
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, run, RunStatus.SUCCEEDED, summary="done")
+    run.pr_url = "https://github.com/idm23/workbench/pull/9"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert ">View PR<" in page
+    assert f'action="/tasks/{task.id}/runs"' not in page
+
+
+def test_reopening_a_task_with_a_pull_request_still_offers_no_new_run(client, session, cloned):
+    """The status tick toggles `open`<->`done`, but `pr_url` is never cleared
+    by that — so the `done`/`cancelled` guard alone would let the button
+    reappear next to a branch that already has an open PR. This is the actual
+    bug the `pr_url` check on the button closes off."""
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, run, RunStatus.SUCCEEDED, summary="done")
+    run.pr_url = "https://github.com/idm23/workbench/pull/9"
+    task.status = TaskStatus.DONE
+    session.commit()
+    task.status = TaskStatus.OPEN
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert ">View PR<" in page
+    assert f'action="/tasks/{task.id}/runs"' not in page
+
+
 def test_a_done_task_is_not_offered_another_run(client, session, cloned):
     """The project's other seeded task is still open, so a Plan button
     remains on the page — just not on this one."""
