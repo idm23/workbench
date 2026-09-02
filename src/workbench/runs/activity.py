@@ -38,6 +38,11 @@ class TaskActivity:
     #: rather than fetched separately so the page can decide "Execute" vs
     #: "Approve & create N subtasks" without a second query per row.
     proposed_subtasks: dict | None = None
+    #: A plan run's own output text, when it has finished one. Carried here for
+    #: the same reason as `proposed_subtasks`: the "ready to execute" summary
+    #: at the top of the page needs to show it, and this is the query that
+    #: already visits every marked run once per page load.
+    plan: str | None = None
 
     @property
     def proposed_subtask_count(self) -> int:
@@ -88,7 +93,7 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
     state the page is describing.
     """
     rows = db.execute(
-        select(Run.id, Run.task_id, Run.phase, Run.status, Run.proposed_subtasks)
+        select(Run.id, Run.task_id, Run.phase, Run.status, Run.proposed_subtasks, Run.plan)
         .join(Task, Task.id == Run.task_id)
         .where(Task.project_id == project_id, Run.status.in_(MARKED_STATUSES))
         .order_by(Run.id)
@@ -97,9 +102,13 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
     # Ascending, so a later row overwrites an earlier one and the newest wins.
     return {
         task_id: TaskActivity(
-            run_id=run_id, phase=phase, status=status, proposed_subtasks=proposed_subtasks
+            run_id=run_id,
+            phase=phase,
+            status=status,
+            proposed_subtasks=proposed_subtasks,
+            plan=plan,
         )
-        for run_id, task_id, phase, status, proposed_subtasks in rows
+        for run_id, task_id, phase, status, proposed_subtasks, plan in rows
     }
 
 
