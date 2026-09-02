@@ -233,7 +233,10 @@ def test_a_ready_subtask_sets_entry_phase_to_execute(client):
         assert child.entry_phase is RunPhase.EXECUTE
 
 
-def test_a_subtask_defaults_its_origin_to_the_parents_branch(client):
+def test_a_subtask_defaults_its_origin_to_staging(client):
+    """Not the parent's own branch — see `create_subtask`'s docstring: the
+    usual reason to spin off a subtask is independent work that should land
+    in staging on its own, not a continuation of the parent's branch."""
     parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
     with _db() as db:
         _task(db, parent["id"]).branch = "workbench/task-1-parent"
@@ -243,17 +246,17 @@ def test_a_subtask_defaults_its_origin_to_the_parents_branch(client):
 
     with _db() as db:
         child = db.query(Task).filter_by(title="child").one()
-        assert child.origin_ref == f"task:{parent['id']}"
+        assert child.origin_ref == "staging"
 
 
-def test_a_subtask_under_an_unbranched_parent_has_no_origin_set(client):
+def test_a_subtask_under_an_unbranched_parent_still_defaults_to_staging(client):
     parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
 
     client.post(f"/api/tasks/{parent['id']}/subtasks", json={"title": "child"})
 
     with _db() as db:
         child = db.query(Task).filter_by(title="child").one()
-        assert child.origin_ref is None
+        assert child.origin_ref == "staging"
 
 
 def test_a_subtask_of_a_missing_task_is_404(client):

@@ -11,6 +11,12 @@ watching, and its interesting cases — a duplicate, a bad base branch, a token
 that lost its scope — are all ones where getting the answer wrong means a run
 that claims a pull request nobody can find, or a traceback where a notice
 should have been.
+
+Telling a duplicate apart from a bad base branch — both arrive as a bare 422 —
+is the one piece with real logic in this module, and it is worth pinning
+precisely: a run once reported "duplicate pull request" for a base branch
+that had simply never been pushed to GitHub, because every 422 was assumed to
+mean the same thing.
 """
 
 import pytest
@@ -167,12 +173,68 @@ def test_a_duplicate_returns_the_pull_request_that_already_exists(monkeypatch):
     assert seen["get"]["params"]["head"] == "idm23:workbench/task-16"
 
 
+def test_an_invalid_base_branch_is_reported_as_such_not_as_a_duplicate(monkeypatch):
+    """GitHub's real shape for "this base branch does not exist": a bare
+    field/code pair with no `message`, distinct from the duplicate case's
+    prose. Conflating the two is the actual bug this pins — a subtask whose
+    base was never pushed to GitHub once got told its pull request was a
+    duplicate when none had ever existed, because every 422 was assumed to
+    mean that."""
+    seen = _answers(
+        monkeypatch,
+        post=_Response(
+            422,
+            {
+                "message": "Validation Failed",
+                "errors": [{"resource": "PullRequest", "field": "base", "code": "invalid"}],
+            },
+        ),
+    )
+
+    result = _open()
+
+    assert isinstance(result, PullRequestFailed)
+    assert "base: invalid" in result.message
+    assert "staging" in result.message  # names which base was rejected
+    assert "get" not in seen  # never looks up an "existing" PR that isn't one
+
+
+def test_a_duplicate_named_only_in_an_error_entry_is_still_recognised(monkeypatch):
+    """GitHub's real shape for a duplicate: the top-level `message` is the
+    generic "Validation Failed", and the actual "already exists" wording is
+    nested in one of the `errors` entries instead."""
+    seen = _answers(
+        monkeypatch,
+        post=_Response(
+            422,
+            {
+                "message": "Validation Failed",
+                "errors": [
+                    {
+                        "resource": "PullRequest",
+                        "code": "custom",
+                        "message": "A pull request already exists for idm23:workbench/task-16.",
+                    }
+                ],
+            },
+        ),
+        get=_Response(200, [{"html_url": "https://gh/pr/7"}]),
+    )
+
+    result = _open()
+
+    assert result == PullRequestOpened(url="https://gh/pr/7", created=False)
+    assert "get" in seen
+
+
 def test_a_422_with_nothing_open_is_a_failure_not_a_silent_success(monkeypatch):
-    """The other thing 422 means: a base branch that does not exist. Reporting
-    that as success would leave a run claiming a pull request nobody can find."""
+    """A message that does say "already exists" is still trusted as a
+    duplicate — but one with nothing actually open for it is a failure, not a
+    silent success. Reporting that as success would leave a run claiming a
+    pull request nobody can find."""
     _answers(
         monkeypatch,
-        post=_Response(422, {"message": "Invalid base"}),
+        post=_Response(422, {"message": "A pull request already exists, apparently"}),
         get=_Response(200, []),
     )
 
