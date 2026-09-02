@@ -379,8 +379,21 @@ exposing the server — GitHub cannot ask how staging went, so the server tells 
 no-ingress constraint that forced polling shapes this too. Branch protection on `main`
 requires that status, so a commit that never ran on staging cannot be promoted.
 
-**Merging is deliberately a human action.** The status goes green on its own; nothing
-merges itself. This tool's purpose is running agents that write code, and agent-authored
+**The `staging` → `main` pull request now opens itself**, in
+`.github/workflows/promote.yml`, triggered by GitHub Actions' `on: status` event — which
+in this repository only ever fires for `staging-acceptance`, since that is the only thing
+that posts a classic commit status here; CI's own results are check runs, a different
+mechanism, and never trigger it. The workflow opens the PR (or leaves an already-open one
+alone) once that status goes green, using the run's own scoped `GITHUB_TOKEN` rather than
+`WORKBENCH_GITHUB_TOKEN` — opening a pull request needs `pull_requests: write`, and the
+server's token is readable by any agent running there, so this belongs in Actions and not
+on the box. One thing worth knowing before touching that file: `on: status` workflows run
+only from the *default branch's* copy, so a change to it does nothing until it reaches
+`main`, whatever branch the status itself was posted for.
+
+**Merging is deliberately a human action.** The status goes green and the pull request
+opens on its own; nothing merges itself. This tool's purpose is running agents that write
+code, and agent-authored
 changes will be the main thing flowing through this pipeline — a person looking before it
 reaches the machine they depend on is worth the click. Auto-merge is one GitHub setting
 away once the acceptance suite has earned that trust.
@@ -583,15 +596,6 @@ than no list at all.
 
 Wanted, not urgent. Grouped because they are one change to how promotion works.
 
-- **The `staging` → `main` pull request should open itself** once `staging-acceptance`
-  goes green, with merging still a human action. The trigger is GitHub Actions' `on:
-  status` event, which in this repository only ever fires for that status — Actions
-  publishes check runs, not statuses. A pull request opened by `GITHUB_TOKEN` gets no
-  fresh workflow runs, but its head is `staging`'s tip, which already carries passing
-  checks from the push, and required checks are evaluated against the head commit.
-  Belongs in Actions rather than in `staging_acceptance.py`: opening a pull request needs
-  `pull_requests: write`, and the server's token is readable by any agent running there.
-  Note `on: status` workflows only run from the *default branch's* copy of the file.
 - **`main` should refuse anything not from `staging`.** Rulesets cannot express "only
   from branch X", but a required check that fails when the head is not `staging` gets
   there, and fails with a legible reason rather than sitting on a `staging-acceptance`
