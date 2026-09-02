@@ -391,6 +391,28 @@ on the box. One thing worth knowing before touching that file: `on: status` work
 only from the *default branch's* copy, so a change to it does nothing until it reaches
 `main`, whatever branch the status itself was posted for.
 
+**`main` refuses anything that is not from `staging`**, via
+`.github/workflows/guard-main.yml`, a required check named
+`Only staging may merge into main` that fails immediately, with a legible reason, when a
+pull request into `main` has any other head branch. Before this existed such a PR didn't
+fail — it sat forever waiting on `staging-acceptance`, a status that is only ever posted
+for `staging`'s own commits, so the actual problem never surfaced as anything but
+silence. Ruleset required-check syntax cannot express "only from branch X" directly,
+which is why this needed its own job rather than a ruleset setting.
+
+This is also what lets *Require branches to be up to date before merging* stay off.
+That setting exists to stop a PR merging against a base it was never actually tested
+against — which matters when multiple PRs can race to change the same base branch. Once
+the guard check is required, exactly one branch can ever reach `main` through a pull
+request, and nothing else lands there without an admin's deliberate bypass, so there is
+no second PR to race. Turning the setting on would instead reintroduce a version of the
+`staging-acceptance` chicken-and-egg: GitHub's "Update branch" button makes a synthetic
+merge commit that is never itself deployed as `staging` and so can never earn a
+`staging-acceptance` status — permanently blocking the very merge it was meant to
+unblock, the moment `main` and `staging` drift by even one commit (an admin bypass
+hotfix, say). Leaving it off avoids that trap without giving up anything the guard check
+doesn't already cover.
+
 **Merging is deliberately a human action.** The status goes green and the pull request
 opens on its own; nothing merges itself. This tool's purpose is running agents that write
 code, and agent-authored
@@ -596,10 +618,6 @@ than no list at all.
 
 Wanted, not urgent. Grouped because they are one change to how promotion works.
 
-- **`main` should refuse anything not from `staging`.** Rulesets cannot express "only
-  from branch X", but a required check that fails when the head is not `staging` gets
-  there, and fails with a legible reason rather than sitting on a `staging-acceptance`
-  that will never arrive.
 - **Squash-merge into `staging`**, so each pull request is one commit there — but
   **promote to `main` with a merge commit**, never a squash or a rebase. Only a merge
   commit leaves `staging` an ancestor of `main`, which is what advances the merge base.

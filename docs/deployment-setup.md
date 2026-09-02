@@ -44,7 +44,8 @@ Rules to enable:
 - **Require a pull request before merging**, with *Required approvals* set to **0**. You are
   the only reviewer; leaving it at 1 means never being able to merge your own work.
 - **Require status checks to pass**, with *Require branches to be up to date before merging*
-  ticked. Then **Add checks** and type each of these exactly, pressing `+` after each:
+  left **unticked** — see step 3a for why, once the check that makes it safe exists. Then
+  **Add checks** and type each of these exactly, pressing `+` after each:
   - `Lint, types, and tests`
   - `Fresh install on clean Ubuntu`
   - `Deploy cycle on systemd`
@@ -53,7 +54,10 @@ Rules to enable:
 > Renaming a job there silently stops the required check from ever matching, and the pull
 > request waits forever on something that will never report. Change them together.
 
-Do **not** add `staging-acceptance` yet — see step 5.
+Do **not** add `staging-acceptance` yet — see step 5. Do **not** add
+`Only staging may merge into main` yet either: `staging` doesn't exist yet, and the
+deployment pipeline pull request this step ends by merging is not from `staging` — see
+step 3a, right after `staging` exists.
 
 **On the bypass list:** add yourself as admin. Without it, a genuine 2am hotfix means editing
 the ruleset under pressure. With it, bypassing is a deliberate act you can see you took.
@@ -92,6 +96,26 @@ Rules: **Block force pushes**, **Require a pull request before merging** (0 appr
 
 > **Do not require `staging-acceptance` here.** That status is produced *by* deploying
 > staging. Requiring it on staging is circular and deadlocks the branch.
+
+## Step 3a — Require the staging-only guard
+
+Now that `staging` exists, go back to the `main` ruleset (Settings → Rules → Rulesets →
+`main`) → Require status checks → **Add checks** → type `Only staging may merge into main`
+exactly → `+` → **Save**.
+
+Unlike `staging-acceptance`, this one needs no "prove it's been posted" wait: it's a pure
+git-metadata check from `.github/workflows/guard-main.yml` that runs, and reports, on every
+pull request into `main` regardless of whether it's required yet — so it's already reporting
+by the time you get here.
+
+Leave *Require branches to be up to date before merging* unticked. This check is what makes
+that safe: with it required, `staging` is the only branch that can ever reach `main` through
+a pull request, so there's no second PR racing to change the base out from under this one —
+the thing that setting exists to prevent. Turning it on would instead reintroduce the
+`staging-acceptance` chicken-and-egg: GitHub's "Update branch" button makes a synthetic merge
+commit that can never itself be deployed as `staging`, so it can never earn a
+`staging-acceptance` status either — permanently deadlocking promotion the moment `main` and
+`staging` drift by even one commit. See `CLAUDE.md` for the full reasoning.
 
 ## Step 4 — Install staging on the server
 
