@@ -1,0 +1,27 @@
+name: Guard main
+
+# main must only ever be reached from staging — CLAUDE.md, "main refuses anything
+# that is not from staging". Rulesets can require named status checks but cannot
+# express "only from branch X" directly, so this job does: it fails, with a
+# legible reason, whenever a pull request into main has any head branch but
+# staging. Without it such a PR doesn't fail — it sits forever waiting on
+# staging-acceptance, a status that can only ever be posted for staging's own
+# commits, so the real problem never surfaces as anything but silence.
+on:
+  pull_request:
+    branches: [main]
+
+# Reads only event context; never checks out the repository.
+permissions: {}
+
+jobs:
+  guard:
+    name: Only staging may merge into main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse anything that is not staging
+        run: |
+          if [ "${{ github.head_ref }}" != "staging" ]; then
+            echo "::error::main only accepts pull requests from staging (this one is from '${{ github.head_ref }}')."
+            exit 1
+          fi
