@@ -821,7 +821,7 @@ def test_ready_to_execute_shows_a_plan_awaiting_review(client, session, cloned):
 
 def test_ready_to_execute_shows_a_decomposing_plans_subtask_count(client, session, cloned):
     task = a_task(session)
-    run = _plan_awaiting_review(
+    _plan_awaiting_review(
         session, task=task, proposed_subtasks={"subtasks": [{"title": "a"}, {"title": "b"}]}
     )
 
