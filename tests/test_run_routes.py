@@ -382,7 +382,11 @@ def test_approving_a_decomposed_plan_creates_its_subtasks_instead(client, sessio
     assert children[1].entry_phase is None
 
 
-def test_a_decomposed_subtask_defaults_its_origin_to_the_parent(client, session, executor):
+def test_a_decomposed_subtask_defaults_its_origin_to_staging(client, session, executor):
+    """Not the parent's own branch: the usual reason to decompose is a
+    handful of independent pieces that should each land in staging on their
+    own, and the parent's branch may never even be pushed (a plan that only
+    decomposes never publishes)."""
     task = a_task(session)
     task.branch = "workbench/task-1-write-the-runner"
     session.commit()
@@ -393,7 +397,7 @@ def test_a_decomposed_subtask_defaults_its_origin_to_the_parent(client, session,
     client.post(f"/runs/{run.id}/approve")
 
     child = session.query(Task).filter_by(title="x").one()
-    assert child.origin_ref == f"task:{task.id}"
+    assert child.origin_ref == "staging"
 
 
 def test_approving_a_run_that_is_not_awaiting_review_is_refused(client, session, executor):
