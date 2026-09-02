@@ -37,6 +37,58 @@
   </p>
 {% endif %}
 
+{% if ready %}
+  {# Tasks one click away from starting or continuing execution: a plan
+     nobody has approved yet, or a task a plan's own decomposition already
+     judged fully specified. Both already have a one-click button further
+     down in the tree — this is what promotes them above it, plan text and
+     all, so the thing most worth doing on the page isn't something to
+     scroll for. #}
+  <h2 class="section">Ready to execute</h2>
+  <ul class="tree" style="margin-bottom: 1.75rem;">
+    {% for item in ready %}
+      <li>
+        <div class="task">
+          <div class="task-body">
+            <div class="task-title">{{ item.node.task.title }}</div>
+            {% if item.plan_rest %}
+              <details class="task-note">
+                <summary>{{ item.plan_preview }}&hellip;</summary>
+                <div class="task-note-rest">{{ item.plan_rest }}</div>
+              </details>
+            {% elif item.plan_preview %}
+              <div class="task-note">{{ item.plan_preview }}</div>
+            {% endif %}
+            <div class="task-actions">
+              {% if item.run_id %}
+                <form method="post" action="/runs/{{ item.run_id }}/approve">
+                  <button class="slim" type="submit">{% if item.proposed_subtask_count %}Approve ({{ item.proposed_subtask_count }} subtask{{ 's' if item.proposed_subtask_count != 1 }}){% else %}Execute{% endif %}</button>
+                </form>
+              {% else %}
+                <form method="post" action="/tasks/{{ item.node.task.id }}/runs"
+                      style="display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;">
+                  <input type="hidden" name="phase" value="execute">
+                  {% set choices = origin_choices.get(item.node.task.id) %}
+                  {% if choices %}
+                    <select name="origin" style="width: auto; margin-bottom: 0;" aria-label="Branch from">
+                      {% for value, label in choices %}
+                        <option value="{{ value }}"
+                          {{ 'selected' if value == (item.node.task.origin_ref or default_origin) }}
+                        >{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  {% endif %}
+                  <button class="slim" type="submit">Execute</button>
+                </form>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
 {% if nodes %}
   <ul class="tree" id="task-tree">
     {% for node in nodes %}
