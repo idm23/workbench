@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -89,6 +90,13 @@ app = FastAPI(title="Workbench")
 # Mounted rather than defined here: the JSON routes are a second face on the
 # same operations, not a second implementation of them.
 app.include_router(api_router)
+
+# The site icon (favicons, apple-touch-icon, manifest icons) and its
+# manifest — everything else is inline in base.html, so this is the app's
+# only static asset directory. Read straight from the checkout via
+# `__file__`, same as `templates` above, so it works under the editable
+# install `uv sync` produces without any packaging step.
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 #: A run with more events than this is read in pages by the stream rather
