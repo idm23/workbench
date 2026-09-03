@@ -195,9 +195,10 @@ def continue_run(
     db: Session,
     source: Run,
     *,
+    message: str | None = None,
     executor: str | None = None,
 ) -> StartResult | NotContinuable:
-    """Reopen a finished run as a conversation, because someone asked to.
+    """Reopen a run as a conversation, because someone asked to.
 
     The counterpart to plan and execute runs ending the moment the agent is
     done. Ending promptly is only reasonable if picking the thread back up is
@@ -209,13 +210,24 @@ def continue_run(
     of what happened and stays that way — its events, its cost, its outcome —
     and continuing it would rewrite history that something else may already
     have reported on.
+
+    `message` seeds the new run's opening line — free text from the Discuss
+    dialog, or one of the Split/Check CI shortcuts — instead of the generic
+    "someone is here" a plain continue uses. See `create_task_conversation`.
+
+    A source that is `awaiting_review`, not only one that is terminal, may be
+    continued. That is deliberate: a plan sitting in `awaiting_review` is the
+    normal state of an "executable plan" nobody has approved yet, which is
+    exactly when Discuss and Split are meant to be usable — waiting for it to
+    become terminal would mean waiting for a decision that is the very thing
+    being discussed.
     """
     reap(db)
 
     task = source.task
     if task is None:
         return NotContinuable("Only a run that belongs to a task can be continued.")
-    if not source.status.is_terminal:
+    if not (source.status.is_terminal or source.status is RunStatus.AWAITING_REVIEW):
         return NotContinuable("That run has not finished yet.")
     if source.resume_token is None:
         # Nothing to resume into. Starting cold would look identical from
@@ -234,7 +246,7 @@ def continue_run(
 
     # The source run's backend, never the project's current default: the token
     # is opaque and means nothing to any backend but the one that issued it.
-    run = create_task_conversation(db, task, backend=source.backend)
+    run = create_task_conversation(db, task, backend=source.backend, seed_message=message)
     return _launch(db, run, executor)
 
 

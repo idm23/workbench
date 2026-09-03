@@ -118,6 +118,33 @@ def continuation_prompt(title: str) -> str:
     )
 
 
+def seeded_conversation_prompt(title: str, message: str) -> str:
+    """Reopening a finished (or awaiting-review) run with something specific
+    to say, rather than `continuation_prompt`'s generic "someone is here."
+
+    Used for the Discuss dialog's free text and the Split/Check CI shortcuts
+    alike — the seed message is the only thing that differs between them, so
+    this is the one place that framing is written. Deliberately does not say
+    the source run is "finished": a plan a person has not approved yet is a
+    legitimate source too, and that claim would be false for it.
+
+    Same reasoning as `continuation_prompt` for everything else: the session
+    is resumed, so the agent already has the task, the codebase, and its own
+    earlier work in context — restating any of it would only invite it to
+    redo what it already did.
+    """
+    return (
+        f"Someone is picking the conversation about {title!r} back up to say "
+        "the following. Do not restate, redo, or 'improve' the earlier work "
+        "unless the message actually asks for that.\n"
+        "\n"
+        f"{message}\n"
+        "\n"
+        "This conversation stays open for a while: reply, then wait for the "
+        "next message rather than assuming you are finished."
+    )
+
+
 def prompt_for(phase: RunPhase, title: str, body: str | None = None) -> str:
     """The prompt for a task phase, so callers switch on the enum in one
     place. `CONVERSATION` is not a task phase — see `conversation_prompt`."""
