@@ -566,6 +566,52 @@
     overflow-wrap: anywhere;
   }
 
+  /* Rendered Markdown — a run's plan, summary, and its own prose events, via
+     the `markdown` Jinja filter (see rendering.py). Layered onto `.block` or
+     `.ev-body`, both of which set `white-space: pre-wrap` for the plain text
+     they show elsewhere (a diffstat, a tool result); this rule has to win
+     that fight, since HTML already carries its own line breaks and
+     preserving the source's whitespace on top would double them up. Beyond
+     that this borrows the page's existing rhythm — heading weight, muted
+     code background — rather than a separate typographic scale, since
+     nothing rendered here is more than a few paragraphs long. */
+  .prose { white-space: normal; }
+  .prose > :first-child { margin-top: 0; }
+  .prose > :last-child { margin-bottom: 0; }
+  .prose p, .prose ul, .prose ol, .prose blockquote, .prose pre { margin: 0 0 .75em; }
+  .prose ul, .prose ol { padding-left: 1.3em; }
+  .prose li + li { margin-top: .25em; }
+  .prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+    margin: 1em 0 .4em;
+    font-weight: 700;
+    line-height: 1.25;
+  }
+  .prose h1 { font-size: 1.3em; }
+  .prose h2 { font-size: 1.15em; }
+  .prose h3, .prose h4, .prose h5, .prose h6 { font-size: 1.05em; }
+  .prose code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .9em;
+    background: var(--panel-2);
+    border-radius: .3em;
+    padding: .1em .35em;
+  }
+  .prose pre {
+    background: var(--panel-2);
+    border: 1px solid var(--rule);
+    border-radius: .6em;
+    padding: .7em .85em;
+    overflow-x: auto;
+  }
+  .prose pre code { background: none; padding: 0; }
+  .prose blockquote {
+    border-left: 3px solid var(--rule);
+    padding-left: .85em;
+    color: var(--muted);
+  }
+  .prose a { color: var(--accent); text-decoration: underline; text-underline-offset: .15em; }
+  .prose hr { border: none; border-top: 1px solid var(--rule); margin: 1em 0; }
+
   /* The event log, as a stack of cards rather than a divided list — closer
      to a chat transcript, which is what a project conversation actually is.
      The left border is each kind's whole identity; the background only
