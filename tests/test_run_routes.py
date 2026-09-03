@@ -1136,6 +1136,123 @@ def test_continuing_a_run_that_never_finished_is_refused(client, session):
     assert "not+finished" in response.headers["location"]
 
 
+# --- Discussing (Discuss / Split / Check CI) --------------------------------
+
+
+def _awaiting_review_plan(session, *, resume_token="session-abc") -> Run:
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run, finish_run
+
+    run = create_run(session, a_task(session), RunPhase.PLAN, backend="claude")
+    finish_run(
+        session,
+        run,
+        RunStatus.AWAITING_REVIEW,
+        plan="## Plan\n\nDo the thing.",
+        resume_token=resume_token,
+    )
+    return run
+
+
+def test_discussing_a_finished_run_seeds_the_new_conversation(client, session, executor):
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    response = client.post(f"/runs/{run.id}/discuss", data={"message": "please double check X"})
+
+    started = session.query(Run).order_by(Run.id.desc()).first()
+    assert started is not None and started.id != run.id
+    assert started.phase is RunPhase.CONVERSATION
+    assert started.seed_message == "please double check X"
+    assert response.headers["location"] == f"/runs/{started.id}"
+
+
+def test_discuss_requires_a_message(client, session):
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    response = client.post(f"/runs/{run.id}/discuss", data={"message": "   "})
+
+    assert response.headers["location"] == f"/runs/{run.id}?error=Type+something+first."
+    assert session.query(Run).count() == 1
+
+
+def test_discussing_an_awaiting_review_plan_is_allowed(client, session, executor):
+    """The normal state of an "executable plan" nobody has approved yet —
+    the primary use case for Split, so it must not require a finished run."""
+    run = _awaiting_review_plan(session)
+
+    response = client.post(
+        f"/runs/{run.id}/discuss", data={"message": "split this plan into subtasks"}
+    )
+
+    started = session.query(Run).filter(Run.id != run.id).one()
+    assert started.phase is RunPhase.CONVERSATION
+    assert started.seed_message == "split this plan into subtasks"
+    assert response.headers["location"] == f"/runs/{started.id}"
+
+
+def test_discussing_a_run_that_never_finished_is_refused(client, session):
+    run = _running_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    response = client.post(f"/runs/{run.id}/discuss", data={"message": "anything"})
+
+    assert "not+finished" in response.headers["location"]
+    assert session.query(Run).count() == 1
+
+
+def test_an_awaiting_review_plan_offers_discuss_and_split(client, session):
+    run = _awaiting_review_plan(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert f'action="/runs/{run.id}/discuss"' in page
+    assert "Discuss" in page
+    assert ">Split<" in page
+    assert 'value="split this plan into subtasks"' in page
+
+
+def test_a_finished_execute_run_with_a_pr_offers_discuss_and_check_ci(client, session):
+    from workbench.runs.store import finish_run
+
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    finish_run(
+        session, run, RunStatus.SUCCEEDED, pr_url="https://github.com/idm23/workbench/pull/1"
+    )
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert ">Check CI<" in page
+    assert 'value="check the CI status of your pull request and report back"' in page
+
+
+def test_a_finished_execute_run_with_no_pr_offers_no_check_ci_shortcut(client, session):
+    """Discuss is still worth offering — Check CI is not, because there is
+    no pull request to check."""
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert ">Discuss<" in page
+    assert "Check CI" not in page
+
+
+def test_a_run_with_no_session_offers_no_discuss_buttons(client, session):
+    run = a_finished_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "/discuss" not in page
+    assert "discuss-dialog" not in page
+
+
 # --- Reading a run back ----------------------------------------------------
 
 
