@@ -192,7 +192,9 @@ def test_the_route_serves_the_same_value_the_page_rendered_with(client, session)
 def test_the_route_reflects_a_change_after_the_page_was_rendered(client, session):
     project = _project(session)
     page = client.get(f"/projects/{project.id}").text
-    initial = re.search(r'data-activity-version="([^"]*)"', page).group(1)
+    rendered = re.search(r'data-activity-version="([^"]*)"', page)
+    assert rendered is not None
+    initial = rendered.group(1)
 
     task = session.query(Task).one()
     task.title = "Renamed"

@@ -158,9 +158,7 @@ def project_activity_fingerprint(db: Session, project_id: int) -> str:
       `Run`'s own columns — which has no `updated_at` to read instead.
     """
     task_count, task_max_updated = db.execute(
-        select(func.count(Task.id), func.max(Task.updated_at)).where(
-            Task.project_id == project_id
-        )
+        select(func.count(Task.id), func.max(Task.updated_at)).where(Task.project_id == project_id)
     ).one()
 
     event_max_id = db.scalar(
