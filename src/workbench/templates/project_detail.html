@@ -51,13 +51,14 @@
         <div class="task">
           <div class="task-body">
             <div class="task-title">{{ item.node.task.title }}</div>
-            {% if item.plan_rest %}
-              <details class="task-note">
-                <summary>{{ item.plan_preview }}&hellip;</summary>
-                <div class="task-note-rest">{{ item.plan_rest }}</div>
+            {% if item.plan_text %}
+              {# The whole plan, rendered, then clipped by CSS — this is the
+                 page a plan is actually read on, so it gets the same
+                 Markdown the run's own page does. #}
+              <details class="task-note foldable">
+                <summary></summary>
+                <div class="prose">{{ item.plan_text | markdown }}</div>
               </details>
-            {% elif item.plan_preview %}
-              <div class="task-note">{{ item.plan_preview }}</div>
             {% endif %}
             <div class="task-actions">
               {% if item.run_id %}
@@ -115,15 +116,14 @@
           <div class="task-body">
             <div class="task-title">{{ node.task.title }}</div>
 
-            {% if node.body_rest %}
-              {# Long enough to be worth folding — a planning note written
-                 for an agent, not a person skimming from a phone. #}
-              <details class="task-note">
-                <summary>{{ node.body_preview }}&hellip;</summary>
-                <div class="task-note-rest">{{ node.body_rest }}</div>
+            {% if node.task.body %}
+              {# A planning note written for an agent, not a person skimming
+                 from a phone — so it is folded, and it is Markdown like
+                 everything else the model writes. #}
+              <details class="task-note foldable">
+                <summary></summary>
+                <div class="prose">{{ node.task.body | markdown }}</div>
               </details>
-            {% elif node.body_preview %}
-              <div class="task-note">{{ node.body_preview }}</div>
             {% endif %}
 
             {% if node.progress %}

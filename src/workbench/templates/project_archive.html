@@ -21,13 +21,11 @@
           <div class="task-body">
             <div class="task-title">{{ node.task.title }}</div>
 
-            {% if node.body_rest %}
-              <details class="task-note">
-                <summary>{{ node.body_preview }}&hellip;</summary>
-                <div class="task-note-rest">{{ node.body_rest }}</div>
+            {% if node.task.body %}
+              <details class="task-note foldable">
+                <summary></summary>
+                <div class="prose">{{ node.task.body | markdown }}</div>
               </details>
-            {% elif node.body_preview %}
-              <div class="task-note">{{ node.body_preview }}</div>
             {% endif %}
 
             <div class="task-note">

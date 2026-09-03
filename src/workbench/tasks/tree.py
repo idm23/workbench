@@ -14,21 +14,14 @@ from workbench.runs.activity import TaskActivity
 #: anywhere near this deep; hitting it means the data is corrupt.
 MAX_DEPTH = 20
 
-#: How much of a task's body the tree shows before truncating. Long enough
-#: for a sentence or two of context, short enough that a planning note
-#: written for an agent — which can run to several paragraphs — does not
-#: dominate a page meant to be scanned from a phone.
-BODY_PREVIEW_CHARS = 220
-
-
-def _truncate_at_word(text: str, limit: int) -> str:
-    """`text` cut to at most `limit` characters, backing up to the last
-    space so a preview never ends mid-word."""
-    cut = text[:limit]
-    last_space = cut.rfind(" ")
-    if last_space > 0:
-        cut = cut[:last_space]
-    return cut
+# Task bodies and plans used to be split here into a `_preview` and a `_rest`
+# at a character count, so a long one could be folded behind a disclosure
+# triangle. That split is gone, and deliberately: both are Markdown, and
+# cutting Markdown at an arbitrary offset hands the renderer two fragments
+# that are not valid documents — a code fence opened in one half and closed
+# in the other, a list chopped mid-item. Whatever bounds the height of a long
+# plan on the page is a presentational question, so it is answered in CSS
+# (see `.foldable` in base.html) against the whole rendered document.
 
 
 @dataclass
@@ -66,28 +59,6 @@ class TaskNode:
         if not self.children:
             return None
         return round(100 * self.done_count / len(self.children))
-
-    @property
-    def body_preview(self) -> str | None:
-        """The task's body, cut to a skimmable length — or all of it, when
-        it already fits. `None` when there is no body at all."""
-        body = self.task.body
-        if not body:
-            return None
-        if len(body) <= BODY_PREVIEW_CHARS:
-            return body
-        return _truncate_at_word(body, BODY_PREVIEW_CHARS)
-
-    @property
-    def body_rest(self) -> str | None:
-        """Whatever `body_preview` left out, for a "show more" toggle to
-        reveal — `None` when nothing was cut, which is also the page's cue
-        that there is nothing to expand."""
-        body = self.task.body
-        preview = self.body_preview
-        if not body or preview is None or len(body) <= BODY_PREVIEW_CHARS:
-            return None
-        return body[len(preview) :].lstrip()
 
     @property
     def effective_status(self) -> TaskStatus:
@@ -204,24 +175,6 @@ class ReadyTask:
     #: thing to a plan a never-run task has — for the other.
     plan_text: str | None
     proposed_subtask_count: int
-
-    @property
-    def plan_preview(self) -> str | None:
-        """`plan_text`, cut to a skimmable length — mirrors `body_preview`."""
-        if not self.plan_text:
-            return None
-        if len(self.plan_text) <= BODY_PREVIEW_CHARS:
-            return self.plan_text
-        return _truncate_at_word(self.plan_text, BODY_PREVIEW_CHARS)
-
-    @property
-    def plan_rest(self) -> str | None:
-        """Whatever `plan_preview` left out — mirrors `body_rest`."""
-        text = self.plan_text
-        preview = self.plan_preview
-        if not text or preview is None or len(text) <= BODY_PREVIEW_CHARS:
-            return None
-        return text[len(preview) :].lstrip()
 
 
 def ready_to_execute(
