@@ -551,29 +551,33 @@ def test_a_parent_task_shows_a_progress_meter(client, session, cloned):
     assert 'aria-valuenow="100"' in page
 
 
-def test_a_short_task_body_is_shown_in_full(client, session, cloned):
+def test_a_task_body_is_rendered_as_markdown(client, session, cloned):
+    """The tree shows the same rendered Markdown a run's own page does —
+    it used to show the raw `##` because the preview it displayed was a
+    character-truncated fragment that could not safely be rendered."""
     task = a_task(session)
-    task.body = "A short note."
+    task.body = "## A heading\n\nWith `code` in it."
     session.commit()
 
     page = client.get(f"/projects/{task.project_id}").text
 
-    assert "A short note." in page
-    assert "<details" not in page
+    assert "<h2>A heading</h2>" in page
+    assert "<code>code</code>" in page
+    assert "## A heading" not in page
 
 
-def test_a_long_task_body_is_folded_behind_a_toggle(client, session, cloned):
-    """The "more"/"less" affordance itself is CSS `content`, invisible to a
-    server-rendered response — what the page actually has to emit is the
-    `<details>`/`<summary>` pair a browser turns into that toggle."""
+def test_a_task_body_is_rendered_whole_rather_than_split(client, session, cloned):
+    """Folding is CSS clipping over the entire rendered document, so even a
+    long body arrives complete — nothing is cut at a character offset, which
+    is what used to hand the renderer two invalid halves."""
     task = a_task(session)
-    task.body = "word " * 100
+    task.body = "word " * 100  # 500 characters, far past the old 220 cut
     session.commit()
 
     page = client.get(f"/projects/{task.project_id}").text
 
-    assert '<details class="task-note">' in page
-    assert "<summary>" in page
+    assert '<details class="task-note foldable">' in page
+    assert page.count("word") >= 100
 
 
 def test_a_runnable_task_offers_an_origin_picker(client, session, cloned):
@@ -871,10 +875,23 @@ def test_ready_to_execute_includes_an_execute_ready_task(client, session, cloned
     assert page.count(f'action="/tasks/{task.id}/runs"') == 2  # summary, and its own row
 
 
-def test_a_long_plan_is_folded_behind_a_show_more_toggle(client, session, cloned):
-    """Mirrors `test_a_long_task_body_is_folded_behind_a_toggle` — the plan
-    text gets the same truncate-at-word "show more" treatment as a task
-    body, not a second, different one."""
+def test_a_plan_on_the_tree_is_rendered_as_markdown(client, session, cloned):
+    """The actual bug this fixed: the Ready-to-execute panel is where a plan
+    is most often read, and it was the one place still printing raw `##`
+    while the run's own page rendered it."""
+    task = a_task(session)
+    run = _plan_awaiting_review(session, task=task)
+    run.plan = "## Context\n\nSomething with `code`."
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "<h2>Context</h2>" in page
+    assert "<code>code</code>" in page
+    assert "## Context" not in page
+
+
+def test_a_long_plan_is_folded_whole_rather_than_split(client, session, cloned):
     task = a_task(session)
     run = _plan_awaiting_review(session, task=task)
     run.plan = "word " * 100
@@ -882,8 +899,8 @@ def test_a_long_plan_is_folded_behind_a_show_more_toggle(client, session, cloned
 
     page = client.get(f"/projects/{task.project_id}").text
 
-    assert '<details class="task-note">' in page
-    assert "<summary>" in page
+    assert '<details class="task-note foldable">' in page
+    assert page.count("word") >= 100
 
 
 def test_ready_to_execute_omits_a_task_still_needing_its_first_plan(client, session, cloned):
