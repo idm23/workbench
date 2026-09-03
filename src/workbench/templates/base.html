@@ -300,6 +300,25 @@
   .task-body .meter { max-width: 12rem; margin-top: .35rem; }
   .task-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
   .task-actions form { border: none; padding: 0; margin: 0; }
+
+  /* The Discuss dialog on a run's page — the one place this app opens a real
+     modal rather than a plain form. A native <dialog> rather than anything
+     hand-rolled: it gets focus-trapping, Escape-to-close, and a backdrop for
+     free, and needs only `showModal()`/`close()` to drive, in keeping with
+     the rest of the app's small, framework-free scripts. */
+  dialog {
+    width: min(28rem, 90vw);
+    padding: 1.25rem;
+    border: 1px solid var(--rule);
+    border-radius: .85rem;
+    background: var(--panel);
+    color: var(--fg);
+    box-shadow: 0 8px 24px var(--shadow-soft);
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  dialog form { border: none; padding: 0; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  .dialog-actions button { width: auto; min-height: 2.3rem; padding: .4rem .9rem; font-size: .85rem; border-radius: .55rem; }
   /* A run in flight gets a warm border rather than only the pip inside —
      legible even to someone scanning the whole tree at a glance. */
   .task.busy {

@@ -30,7 +30,12 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from workbench.agents.prompts import continuation_prompt, conversation_prompt, prompt_for
+from workbench.agents.prompts import (
+    continuation_prompt,
+    conversation_prompt,
+    prompt_for,
+    seeded_conversation_prompt,
+)
 from workbench.agents.protocol import (
     AgentEvent,
     AgentFailed,
@@ -183,12 +188,21 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
         if not worktree.is_dir():
             return NotPrepared(f"{task.title!r} no longer has a worktree at {worktree}.")
 
+        # A seeded run has something specific to open with — free text from
+        # the Discuss dialog, or a Split/Check CI shortcut — instead of the
+        # generic "someone is here" every conversation opened with before
+        # this existed.
+        opening = (
+            seeded_conversation_prompt(task.title, run.seed_message)
+            if run.seed_message
+            else continuation_prompt(task.title)
+        )
         return Prepared(
             backend=backend,
             request=AgentRequest(
                 worktree=worktree,
                 phase=RunPhase.CONVERSATION,
-                prompt=continuation_prompt(task.title),
+                prompt=opening,
                 resume_token=resume_token_for(db, task, run.backend),
                 model=run.model,
                 run_id=run.id,

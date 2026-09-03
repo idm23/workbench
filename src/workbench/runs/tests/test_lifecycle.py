@@ -25,9 +25,11 @@ from workbench.runs.executors import (
 from workbench.runs.lifecycle import (
     AlreadyRunning,
     NotCancellable,
+    NotContinuable,
     NotStarted,
     TooManyRuns,
     cancel_run,
+    continue_run,
     reap,
     start_conversation,
     start_run,
@@ -379,6 +381,65 @@ def test_a_run_with_no_handle_is_not_reaped(db, task, monkeypatch):
     age(db, run, 120)
 
     assert reap(db) == []
+
+
+# --- Continuing / Discussing ------------------------------------------------
+
+
+def _finished(db, task, *, status=RunStatus.SUCCEEDED, resume_token="session-abc") -> Run:
+    run = create_run(db, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(db, run, status, resume_token=resume_token)
+    return run
+
+
+def test_continuing_a_finished_run_seeds_the_new_one_with_the_message(db, task, executor):
+    source = _finished(db, task)
+
+    result = continue_run(db, source, message="split this plan into subtasks")
+
+    assert isinstance(result, Run)
+    assert result.phase is RunPhase.CONVERSATION
+    assert result.seed_message == "split this plan into subtasks"
+
+
+def test_a_plain_continue_leaves_the_seed_unset(db, task, executor):
+    """The existing "Continue this conversation" button, unchanged: no
+    message means no seed, exactly as before seeding existed."""
+    source = _finished(db, task)
+
+    result = continue_run(db, source)
+
+    assert isinstance(result, Run)
+    assert result.seed_message is None
+
+
+def test_an_awaiting_review_plan_can_be_discussed(db, task, executor):
+    """The normal state of an "executable plan" nobody has approved yet —
+    Discuss/Split must work here, not only once the run is terminal."""
+    source = _finished(db, task, status=RunStatus.AWAITING_REVIEW)
+
+    result = continue_run(db, source, message="split this plan into subtasks")
+
+    assert isinstance(result, Run)
+
+
+def test_a_run_still_in_flight_cannot_be_discussed(db, task, executor):
+    source = create_run(db, task, RunPhase.EXECUTE, backend="claude")
+    source.resume_token = "session-abc"
+    db.commit()
+
+    result = continue_run(db, source, message="anything")
+
+    assert isinstance(result, NotContinuable)
+
+
+def test_discussing_a_run_with_no_session_is_refused(db, task, executor):
+    source = _finished(db, task, resume_token=None)
+
+    result = continue_run(db, source, message="anything")
+
+    assert isinstance(result, NotContinuable)
+    assert "no session" in result.message
 
 
 def _a_task(db, sibling, title: str):

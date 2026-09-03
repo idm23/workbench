@@ -43,9 +43,29 @@
   <p class="msg notice">{{ run.outcome_detail }}</p>
 {% endif %}
 
+{# Whether this run can be reopened with something specific to say — Discuss
+   free text, or the Split/Check CI shortcuts. Same session requirement as
+   "Continue this conversation" below (`resume_token` and a `task`), but also
+   open to `awaiting_review`: a plan nobody has approved yet is the normal
+   state of an "executable plan", and that is exactly when Discuss/Split are
+   meant to be usable — see `continue_run` in runs/lifecycle.py. #}
+{% set can_discuss = (run.status.is_terminal or run.status == 'awaiting_review') and run.resume_token and task %}
+
 {% if run.plan %}
   <h2 class="section">Plan</h2>
   <div class="block prose">{{ run.plan | markdown }}</div>
+  {% if can_discuss %}
+    <div class="task-actions">
+      <button type="button" class="slim secondary" data-open-discuss>Discuss</button>
+      {# Fires immediately, no dialog — matching every other action button on
+         this page (Sync, Retry, Discard, Stop run…), none of which confirm
+         before sending. #}
+      <form method="post" action="/runs/{{ run.id }}/discuss">
+        <input type="hidden" name="message" value="{{ shortcut_split }}">
+        <button class="slim secondary" type="submit">Split</button>
+      </form>
+    </div>
+  {% endif %}
 {% endif %}
 
 {% if run.proposed_subtasks %}
@@ -66,6 +86,17 @@
 {% if run.summary %}
   <h2 class="section">Summary</h2>
   <div class="block prose">{{ run.summary | markdown }}</div>
+  {% if can_discuss %}
+    <div class="task-actions">
+      <button type="button" class="slim secondary" data-open-discuss>Discuss</button>
+      {% if run.pr_url %}
+        <form method="post" action="/runs/{{ run.id }}/discuss">
+          <input type="hidden" name="message" value="{{ shortcut_check_ci }}">
+          <button class="slim secondary" type="submit">Check CI</button>
+        </form>
+      {% endif %}
+    </div>
+  {% endif %}
 {% endif %}
 
 {% if run.diffstat %}
@@ -130,17 +161,45 @@
   </form>
 {% endif %}
 
-{% if run.status.is_terminal and run.resume_token and task %}
+{% if can_discuss %}
   {# The other half of ending promptly. A plan or execute run stops as soon
      as the agent is done, so this is how a dialog gets started — when one is
      actually wanted, rather than every run waiting on the chance of it.
 
-     Needs a session to resume into: without `resume_token` this would answer
-     from no context at all, which looks identical from the outside and is
-     much worse. #}
+     Same `can_discuss` gate as the Discuss/Split/Check CI buttons above —
+     this is the same "reopen this run's session" action with nothing
+     specific to say, so it shares their eligibility rather than a narrower
+     terminal-only check. #}
   <form method="post" action="/runs/{{ run.id }}/continue" style="margin-top: 1.25rem;">
     <button type="submit" class="secondary">Continue this conversation</button>
   </form>
+{% endif %}
+
+{% if can_discuss %}
+  <dialog id="discuss-dialog">
+    <form method="post" action="/runs/{{ run.id }}/discuss">
+      <label for="discuss-message">Say something to the agent</label>
+      <textarea id="discuss-message" name="message" rows="4" required
+                placeholder="Feedback on the plan, or anything else…"></textarea>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" id="discuss-cancel">Cancel</button>
+        <button type="submit">Send</button>
+      </div>
+    </form>
+  </dialog>
+  <script>
+    // One dialog shared by every "Discuss" trigger on the page (next to the
+    // plan, next to the summary) — they open the same form rather than each
+    // getting their own copy of it.
+    (function () {
+      var dialog = document.getElementById("discuss-dialog");
+      var cancel = document.getElementById("discuss-cancel");
+      document.querySelectorAll("[data-open-discuss]").forEach(function (button) {
+        button.addEventListener("click", function () { dialog.showModal(); });
+      });
+      cancel.addEventListener("click", function () { dialog.close(); });
+    })();
+  </script>
 {% endif %}
 
 {% if live %}

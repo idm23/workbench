@@ -110,6 +110,13 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 #: than rendered in one response. A long agent run is thousands of rows.
 MAX_RENDERED_EVENTS = 500
 
+#: The two canned messages behind the Split and Check CI buttons on a run's
+#: page. Kept as constants next to the route that sends them, rather than
+#: hard-coded twice, so the button's value and whatever eventually reads it
+#: back cannot drift apart.
+SHORTCUT_SPLIT_MESSAGE = "split this plan into subtasks"
+SHORTCUT_CHECK_CI_MESSAGE = "check the CI status of your pull request and report back"
+
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -620,6 +627,34 @@ def continue_finished_run(db: DbSession, run_id: int) -> RedirectResponse:
     return _redirect(target, error=result.message)
 
 
+@app.post("/runs/{run_id}/discuss")
+def discuss_run(db: DbSession, run_id: int, message: Annotated[str, Form()]) -> RedirectResponse:
+    """Reopen a run's session with something specific to say.
+
+    The seeded counterpart to `continue_finished_run`: same reopening
+    machinery (`continue_run`), but the new run's first line is free-text
+    feedback from the Discuss dialog, or one of the Split/Check CI shortcuts,
+    instead of a generic "someone is here." One route for both, because the
+    only difference between them is which string the form submits.
+
+    Reachable from a plan still `awaiting_review`, not only a finished run —
+    see `continue_run` for why.
+    """
+    source = db.get(Run, run_id)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+
+    target = f"/runs/{run_id}"
+    cleaned = message.strip()
+    if not cleaned:
+        return _redirect(target, error="Type something first.")
+
+    result = continue_run(db, source, message=cleaned)
+    if isinstance(result, Run):
+        return _redirect(f"/runs/{result.id}")
+    return _redirect(target, error=result.message)
+
+
 @app.post("/runs/{run_id}/cancel")
 def cancel_task_run(db: DbSession, run_id: int) -> RedirectResponse:
     run = db.get(Run, run_id)
@@ -693,6 +728,8 @@ def show_run(
             "live": not run.status.is_terminal,
             "error": error,
             "notice": notice,
+            "shortcut_split": SHORTCUT_SPLIT_MESSAGE,
+            "shortcut_check_ci": SHORTCUT_CHECK_CI_MESSAGE,
         },
     )
 

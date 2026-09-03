@@ -1140,6 +1140,38 @@ def test_a_task_conversation_without_a_worktree_is_refused(db, task, checkout, b
     assert "worktree" in (followup.error or "")
 
 
+def test_a_seeded_task_conversation_sends_the_seed_not_the_generic_greeting(
+    db, run, checkout, backend
+):
+    """The Discuss/Split/Check CI path: `seed_message` set means the agent
+    hears the actual message on the first turn, not `continuation_prompt`'s
+    "someone is here"."""
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    check_ci = "check the CI status of your pull request and report back"
+    followup = create_task_conversation(db, task, backend="fake", seed_message=check_ci)
+
+    execute(db, followup)
+
+    prompt = backend.requests[-1].prompt
+    assert "check the CI status of your pull request and report back" in prompt
+    assert "not a new attempt" not in prompt
+
+
+def test_an_unseeded_task_conversation_still_gets_the_generic_greeting(db, run, checkout, backend):
+    """Nothing regresses for the plain "Continue this conversation" button,
+    which creates a task conversation with no seed at all."""
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    followup = create_task_conversation(db, task, backend="fake")
+
+    execute(db, followup)
+
+    assert "not a new attempt" in backend.requests[-1].prompt
+
+
 def test_a_task_conversation_leaves_the_tasks_status_alone(db, run, checkout, backend):
     """Talking about work is not doing it. `record` routes on phase before it
     reads a task at all, which is what keeps this true."""

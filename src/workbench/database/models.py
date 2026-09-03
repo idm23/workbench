@@ -398,6 +398,14 @@ class Run(Base):
     # with `backend` above.
     resume_token: Mapped[str | None] = mapped_column(String(200), default=None)
 
+    # What to say on the first turn of a `phase=CONVERSATION` run that is
+    # resuming another run's session, instead of `continuation_prompt`'s
+    # generic "someone is here" — free text from the Discuss dialog, or one
+    # of the Split/Check CI shortcuts. Null for every conversation that was
+    # simply reopened with nothing specific to say, which is every
+    # conversation before this column existed.
+    seed_message: Mapped[str | None] = mapped_column(Text, default=None)
+
     # How this run was started, and what to ask about it afterwards.
     #
     # Recorded per run for the same reason `backend` is: the moment a second

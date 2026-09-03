@@ -10,6 +10,7 @@ from workbench.runs.store import (
     append_event,
     append_input,
     create_run,
+    create_task_conversation,
     fetch_new_inputs,
     finish_run,
     mark_running,
@@ -26,6 +27,24 @@ def test_a_new_run_is_queued_with_nothing_started(db, task):
     assert run.status is RunStatus.QUEUED
     assert run.handle is None
     assert run.finished_at is None
+
+
+def test_a_task_conversation_has_no_seed_by_default(db, task):
+    """Every conversation before `seed_message` existed opened with
+    `continuation_prompt`'s generic announcement — unset must keep doing
+    that, not silently seed with an empty string."""
+    run = create_task_conversation(db, task, backend="fake")
+
+    assert run.seed_message is None
+
+
+def test_a_task_conversation_can_be_seeded(db, task):
+    run = create_task_conversation(
+        db, task, backend="fake", seed_message="split this plan into subtasks"
+    )
+
+    assert run.seed_message == "split this plan into subtasks"
+    assert run.phase is RunPhase.CONVERSATION
 
 
 def test_sequence_numbers_start_at_one_and_increase(db, run):
