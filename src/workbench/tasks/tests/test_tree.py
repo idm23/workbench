@@ -7,8 +7,9 @@ so a mistake in ordering or depth is silent rather than obvious.
 
 import pytest
 
-from workbench.database.models import Task, TaskStatus
-from workbench.tasks import build_tree, flatten, would_create_cycle
+from workbench.database.models import RunPhase, RunStatus, Task, TaskStatus
+from workbench.runs.activity import TaskActivity
+from workbench.tasks import build_tree, flatten, ready_for_review, would_create_cycle
 
 
 def make(task_id: int, parent: int | None = None, position: int = 0, title: str = "t") -> Task:
@@ -198,3 +199,62 @@ def test_done_count_uses_effective_status_not_raw_status():
     roots = build_tree(tasks)
     assert roots[0].children[0].effective_status is TaskStatus.DONE
     assert roots[0].progress == "1/1"
+
+
+def busy(run_id: int = 1) -> TaskActivity:
+    """A minimal in-flight run, for tasks that should be excluded as busy."""
+    return TaskActivity(run_id=run_id, phase=RunPhase.CONVERSATION, status=RunStatus.RUNNING)
+
+
+@pytest.mark.parametrize("status", [TaskStatus.OPEN, TaskStatus.ACTIVE, TaskStatus.BLOCKED])
+def test_a_leaf_with_an_open_pr_is_ready_for_review(status):
+    task = make(1, title="leaf")
+    task.status = status
+    nodes = flatten(build_tree([task]))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={1: "https://github.com/x/y/pull/1"})
+
+    assert [item.node.task.id for item in result] == [1]
+    assert result[0].pr_url == "https://github.com/x/y/pull/1"
+
+
+@pytest.mark.parametrize("status", [TaskStatus.DONE, TaskStatus.CANCELLED])
+def test_a_finished_task_is_not_ready_for_review_even_with_an_open_pr(status):
+    task = make(1, title="leaf")
+    task.status = status
+    nodes = flatten(build_tree([task]))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={1: "https://github.com/x/y/pull/1"})
+
+    assert result == []
+
+
+def test_a_leaf_with_no_pr_is_not_ready_for_review():
+    nodes = flatten(build_tree([make(1, title="leaf")]))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={})
+
+    assert result == []
+
+
+def test_a_task_with_something_running_against_it_is_not_ready_for_review():
+    """An open PR with a follow-up run in flight is left to the main tree row,
+    which already shows the busy badge and a way to stop it."""
+    nodes = flatten(build_tree([make(1, title="leaf")]))
+
+    result = ready_for_review(
+        nodes, activity={1: busy()}, pr_urls={1: "https://github.com/x/y/pull/1"}
+    )
+
+    assert result == []
+
+
+def test_a_parent_task_is_never_ready_for_review():
+    """Only leaves ever run agents, so only leaves ever earn a `pr_url` — but
+    the check is defensive, mirroring `ready_to_execute`'s own leaf guard."""
+    tasks = [make(1, title="parent"), make(2, parent=1, title="child")]
+    nodes = flatten(build_tree(tasks))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={1: "https://github.com/x/y/pull/1"})
+
+    assert result == []
