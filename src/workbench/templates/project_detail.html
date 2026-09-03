@@ -90,7 +90,7 @@
 {% endif %}
 
 {% if nodes %}
-  <ul class="tree" id="task-tree">
+  <ul class="tree" id="task-tree" data-activity-version="{{ activity_version }}">
     {% for node in nodes %}
       {% set busy = activity.get(node.task.id) %}
       {% set effective_status = node.effective_status %}
@@ -245,6 +245,10 @@
   </ul>
 {% else %}
   <p class="empty">No tasks yet. Add the first one below.</p>
+  {# The first task might get added from another device while this tab sits
+     open on an empty tree — the poll script below needs a starting version
+     to compare against even though there is no #task-tree to hang it on. #}
+  <span hidden id="activity-version" data-activity-version="{{ activity_version }}"></span>
 {% endif %}
 
 <form method="post" action="/projects/{{ project.id }}/tasks">
@@ -309,4 +313,48 @@
   })();
 </script>
 {% endif %}
+<script>
+  // The task tree is rendered once per request from a snapshot — nothing
+  // pushes an update to an open tab. This is the project-scoped analogue of
+  // what `run_detail.html` does with SSE for a single run: poll a cheap
+  // fingerprint and reload the whole page when it moves, because teaching
+  // this page to patch itself in place is a lot more code than a reload.
+  (function () {
+    var marker = document.getElementById("task-tree") || document.getElementById("activity-version");
+    if (!marker) return;
+    var startVersion = marker.dataset.activityVersion;
+
+    function isMidType(el) {
+      // "Add a task"'s title/body are the one thing on this page a person is
+      // likely to be typing into when a poll tick lands — never discard that
+      // out from under them for a reload that can just as well happen next
+      // tick instead.
+      if (!el) return false;
+      var tag = el.tagName;
+      if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
+      if (tag === "INPUT" && el.type !== "text") return false;
+      return el.value.length > 0;
+    }
+
+    window.setInterval(function () {
+      // Paused while backgrounded — phone-first, and a poll from a tab
+      // nobody is looking at is spent for nothing.
+      if (document.hidden) return;
+
+      fetch("/projects/{{ project.id }}/activity-version")
+        .then(function (response) { return response.json(); })
+        .then(function (data) {
+          if (data.version === startVersion) return;
+          if (isMidType(document.activeElement)) return; // try again next tick
+          // Same key base.html's own scroll-restore script reads back on
+          // load — a poll-triggered reload never fires the `submit` event
+          // that script stashes position on, so without this the tree would
+          // jump to the top on every auto-refresh.
+          sessionStorage.setItem("scrollY:" + location.pathname, String(window.scrollY));
+          window.location.reload();
+        })
+        .catch(function () { /* offline for a tick; try again next interval */ });
+    }, 5000);
+  })();
+</script>
 {% endblock %}

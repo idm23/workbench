@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -51,7 +52,7 @@ from workbench.git.worktrees import (
     local_checkout,
     sync_worktree,
 )
-from workbench.runs.activity import activity_by_task, pr_url_by_task
+from workbench.runs.activity import activity_by_task, pr_url_by_task, project_activity_fingerprint
 from workbench.runs.lifecycle import (
     NotCancellable,
     active_run_for_project,
@@ -89,6 +90,13 @@ app = FastAPI(title="Workbench")
 # Mounted rather than defined here: the JSON routes are a second face on the
 # same operations, not a second implementation of them.
 app.include_router(api_router)
+
+# The site icon (favicons, apple-touch-icon, manifest icons) and its
+# manifest — everything else is inline in base.html, so this is the app's
+# only static asset directory. Read straight from the checkout via
+# `__file__`, same as `templates` above, so it works under the editable
+# install `uv sync` produces without any packaging step.
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 #: A run with more events than this is read in pages by the stream rather
@@ -311,6 +319,9 @@ def show_project(
     # A finished task's pull request, if one was opened — surfaced directly on
     # the tree rather than only on the run that opened it.
     pr_urls = pr_url_by_task(db, project.id)
+    # What the page started with, so the poll script below can tell "nothing
+    # has changed" from "something has" without re-rendering anything itself.
+    activity_version = project_activity_fingerprint(db, project.id)
     # Derived, not stored. This database is copied between instances — staging
     # restores production's snapshot on every deploy — so a stored path would
     # arrive pointing at the other machine's disk.
@@ -326,6 +337,7 @@ def show_project(
             "archived_count": archived_count,
             "activity": activity,
             "pr_urls": pr_urls,
+            "activity_version": activity_version,
             # Tasks one click away from starting or continuing execution —
             # promoted above the tree so the thing most worth doing on the
             # page is the first thing it offers, not something to scroll for.
@@ -350,6 +362,19 @@ def show_project(
             "notice": notice,
         },
     )
+
+
+@app.get("/projects/{project_id}/activity-version")
+def project_activity_version(db: DbSession, project_id: int) -> dict[str, str]:
+    """What `project_detail.html` polls to notice the tree has gone stale.
+
+    Cheap on purpose: two aggregate queries, no template render, no join to
+    anything the page itself needs. The client only ever compares this
+    against the value it started with — see `project_activity_fingerprint`
+    for what actually goes into it.
+    """
+    project = _get_project_or_404(db, project_id)
+    return {"version": project_activity_fingerprint(db, project.id)}
 
 
 @app.post("/projects/{project_id}/conversation")
