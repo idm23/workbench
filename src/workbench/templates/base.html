@@ -6,6 +6,17 @@
 <meta name="color-scheme" content="light dark">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Workbench">
+<meta name="theme-color" content="#b45309">
+<!-- iOS ignores the manifest's icons for "Add to Home Screen" and falls
+     back to a plain initial on a gray tile without this tag — this is the
+     one that actually fixes that. The SVG + sized PNGs below are for
+     everything else: desktop tab favicons, bookmarks, and Android/desktop
+     "install as app". -->
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="icon" type="image/svg+xml" href="/static/icons/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/static/icons/favicon-16.png">
+<link rel="manifest" href="/static/manifest.webmanifest">
 <title>{% block title %}Workbench{% endblock %}</title>
 <style>
   :root {
