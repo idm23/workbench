@@ -224,3 +224,45 @@ def ready_to_execute(
                 )
             )
     return ready
+
+
+@dataclass(frozen=True)
+class ReviewTask:
+    """A leaf task whose most recent pull request is still open.
+
+    The complement of `ready_to_execute`'s own exclusion of tasks with a
+    `pr_url` — promotes a task that's done except for a person's decision,
+    the same way `ReadyTask` promotes one that's one click from starting.
+    """
+
+    node: TaskNode
+    pr_url: str
+
+
+def ready_for_review(
+    nodes: list[TaskNode],
+    activity: dict[int, TaskActivity],
+    pr_urls: dict[int, str],
+) -> list[ReviewTask]:
+    """Leaf tasks with an open pull request nobody has closed out yet.
+
+    `pr_url` outlives a status toggle (see the tree template's own note on
+    this), so a task stays listed here until it is actually marked done. Left
+    out when something is currently running against the task — e.g. a
+    follow-up conversation addressing review comments — since the main tree
+    row already shows what that needs; this section is only for a task with
+    nothing left but review.
+    """
+    review: list[ReviewTask] = []
+    for node in nodes:
+        if not node.is_leaf:
+            continue
+        if node.effective_status in (TaskStatus.DONE, TaskStatus.CANCELLED):
+            continue
+        pr_url = pr_urls.get(node.task.id)
+        if not pr_url:
+            continue
+        if activity.get(node.task.id) is not None:
+            continue
+        review.append(ReviewTask(node=node, pr_url=pr_url))
+    return review

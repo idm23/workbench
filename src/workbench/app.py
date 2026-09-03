@@ -74,6 +74,7 @@ from workbench.tasks import (
     create_subtask,
     create_task,
     flatten,
+    ready_for_review,
     ready_to_execute,
     set_status,
     unarchive_task,
@@ -348,6 +349,12 @@ def show_project(
             # promoted above the tree so the thing most worth doing on the
             # page is the first thing it offers, not something to scroll for.
             "ready": ready_to_execute(nodes, activity, pr_urls, checkout=bool(checkout)),
+            # Tasks whose most recent run opened a pull request that's still
+            # open — the complement of `ready`'s own exclusion of tasks with a
+            # `pr_url`, promoted the same way for the same reason: the PR link
+            # and the buttons to close the loop shouldn't be something to
+            # scroll for either.
+            "for_review": ready_for_review(nodes, activity, pr_urls),
             # The project's own standing conversation, if one is in flight —
             # what lets the page offer "Continue" instead of "Talk to this
             # project" without a second click to find out.

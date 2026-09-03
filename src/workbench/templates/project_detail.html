@@ -37,6 +37,40 @@
   </p>
 {% endif %}
 
+{% if for_review %}
+  {# Tasks whose most recent run opened a pull request that's still open: the
+     work is done, and all that's left is a person's decision. Promoted above
+     the tree for the same reason "Ready to execute" is — the thing most
+     worth doing on the page shouldn't be something to scroll for. Rendered
+     ahead of "Ready to execute" itself: closing out finished work reads as
+     more immediately actionable than starting more of it. #}
+  <h2 class="section">Ready for review</h2>
+  <ul class="tree" style="margin-bottom: 1.75rem;">
+    {% for item in for_review %}
+      <li>
+        <div class="task">
+          <form method="post" action="/tasks/{{ item.node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
+            <input type="hidden" name="new_status" value="done">
+            <button class="tick" type="submit" aria-label="Mark done"></button>
+          </form>
+          <div class="task-body">
+            <div class="task-title">{{ item.node.task.title }}</div>
+            <div class="task-actions">
+              <a class="slim" href="{{ item.pr_url }}" target="_blank" rel="noopener">View PR</a>
+              <form method="post" action="/tasks/{{ item.node.task.id }}/sync">
+                <button class="slim secondary" type="submit">Sync</button>
+              </form>
+              <form method="post" action="/tasks/{{ item.node.task.id }}/delete">
+                <button class="slim danger" type="submit">Delete</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
 {% if ready %}
   {# Tasks one click away from starting or continuing execution: a plan
      nobody has approved yet, or a task a plan's own decomposition already
