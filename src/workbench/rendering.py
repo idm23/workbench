@@ -7,15 +7,15 @@ writes unprompted. Until now the page showed that source verbatim inside a
 `white-space: pre-wrap` block, so a heading came through as a literal `#` and
 a fenced code block as a literal ` ``` `. This renders it instead.
 
-Deliberately narrow: only *complete* text is ever passed through
-`render_markdown` — a plan or summary in full, a finished event's body, a
-subtask's own `body`. The character-truncated previews in the task tree
-(`TaskNode.body_preview`, `ReadyTask.plan_preview`) are cut at an arbitrary
-byte offset and can land mid-construct (mid code-fence, mid `**bold`), so
-they stay plain text; rendering a fragment as Markdown risks producing a
-disclosure triangle's one-line teaser as a stray heading or an unclosed
-code block, which is worse than the raw syntax it replaces. The `_rest` half
-revealed by expanding one, and every other full field, goes through this.
+Only *complete* text is ever passed through `render_markdown` — a plan or
+summary in full, a finished event's body, a task's own `body`. That was once
+a carve-out excluding the task tree, whose previews were cut at an arbitrary
+character offset and could land mid-construct (mid code-fence, mid `**bold`);
+rendering either half of such a split produces a stray heading or an unclosed
+code block, which is worse than the raw syntax it replaces. The tree no longer
+splits anything — it renders the whole document and clips it in CSS — so the
+carve-out is gone and the rule is now simply that fragments are never
+rendered, because none are made.
 
 This is the only module that marks a string `Markup`-safe. Nothing else
 should get to decide that model output is safe to render unescaped — that is

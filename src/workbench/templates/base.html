@@ -612,6 +612,45 @@
   .prose a { color: var(--accent); text-decoration: underline; text-underline-offset: .15em; }
   .prose hr { border: none; border-top: 1px solid var(--rule); margin: 1em 0; }
 
+  /* Folding a long plan or task body on the tree.
+
+     The whole document is rendered and then *clipped*, rather than the text
+     being cut in two and each half rendered separately — Markdown split at a
+     character offset is two invalid documents (a fence opened in one half and
+     closed in the other), which is what this replaced.
+
+     `<details>` normally shows nothing but its `<summary>` when closed. The
+     `display: block` below overrides that so a few lines stay visible as a
+     peek, with a mask fading them out. If a browser refuses the override the
+     result is a plain `<details>`: the peek is gone, the toggle still opens
+     the full plan. Degraded, never broken — which is why the summary carries
+     its own label rather than relying on the peek to say what it is. */
+  .foldable { margin-top: .35rem; }
+  .foldable > summary {
+    cursor: pointer;
+    list-style: none;
+    font-size: .85rem;
+    font-weight: 600;
+    color: var(--accent);
+    /* Above the fading peek, which is pulled up underneath it. */
+    position: relative;
+    z-index: 1;
+  }
+  .foldable > summary::-webkit-details-marker { display: none; }
+  .foldable > summary::after { content: "show more"; }
+  .foldable[open] > summary::after { content: "show less"; }
+  .foldable > .prose { display: block; }
+  .foldable:not([open]) > .prose {
+    max-height: 4.5em;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+            mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+  }
+  /* The peek reads as the thing being disclosed, so it sits above the
+     toggle; source order keeps <summary> first, as the element requires. */
+  .foldable > .prose { order: -1; }
+  .foldable { display: flex; flex-direction: column; }
+
   /* The event log, as a stack of cards rather than a divided list — closer
      to a chat transcript, which is what a project conversation actually is.
      The left border is each kind's whole identity; the background only
