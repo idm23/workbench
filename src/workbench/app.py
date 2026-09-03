@@ -52,6 +52,7 @@ from workbench.git.worktrees import (
     local_checkout,
     sync_worktree,
 )
+from workbench.rendering import render_markdown
 from workbench.runs.activity import activity_by_task, pr_url_by_task, project_activity_fingerprint
 from workbench.runs.lifecycle import (
     NotCancellable,
@@ -84,6 +85,11 @@ from workbench.tasks.origin import DEFAULT as DEFAULT_ORIGIN
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, origin_choices, resolve_origin
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+# A plan, a summary, and a run's own `text`/`thinking` events are Markdown —
+# see rendering.py for why — so templates reach for `| markdown` wherever
+# they show one of those *in full*. Never applied to a character-truncated
+# preview; see that module's docstring for why not.
+templates.env.filters["markdown"] = render_markdown
 
 app = FastAPI(title="Workbench")
 

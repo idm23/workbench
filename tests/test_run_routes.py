@@ -668,6 +668,29 @@ def test_a_plan_awaiting_review_offers_to_approve(client, session, cloned):
     assert "Discard" in page
 
 
+def test_a_plan_already_carried_out_stops_offering_to_be_approved(client, session, cloned):
+    """The symptom of a superseded run still driving the row: the tree went
+    on showing a plan's Execute button after a later run had done the work,
+    so pressing it started another agent against finished work and nothing
+    on the page ever changed."""
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = _plan_awaiting_review(session, task=task)
+    finish_run(
+        session,
+        create_run(session, task, RunPhase.EXECUTE, backend="claude"),
+        RunStatus.SUCCEEDED,
+        summary="Did the work.",
+    )
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/runs/{run.id}/approve" not in page
+    assert ">Discard<" not in page
+
+
 def test_a_decomposing_plan_says_how_many_subtasks(client, session, cloned):
     task = a_task(session)
     run = _plan_awaiting_review(

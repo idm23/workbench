@@ -24,6 +24,9 @@ from workbench.database.models import Run, RunEvent, RunPhase, RunStatus, Task
 #: run that failed for a reason that has nothing to do with the work itself
 #: (a rate-limit window, a dropped connection) still has a resume token worth
 #: not losing, and the button to use it should be right where the run was.
+#:
+#: Deliberately applied *after* picking a task's newest run rather than as a
+#: filter on the query — see `activity_by_task`.
 MARKED_STATUSES = (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.AWAITING_REVIEW, RunStatus.FAILED)
 
 
@@ -89,18 +92,26 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
     """The run worth marking on each of a project's tasks, keyed by task id.
 
     A task can accumulate several runs — a plan, then an execute, then a retry
-    — so where more than one qualifies the newest wins, which is the one whose
-    state the page is describing.
+    — so the newest wins, which is the one whose state the page is describing.
+
+    "Newest" is taken across *every* run of the task, and only then judged
+    worth marking. Filtering to `MARKED_STATUSES` first would be the same
+    thing right up until a run finished cleanly: `succeeded` is not marked, so
+    an older `awaiting_review` would survive it and go on describing a task
+    whose work is long done. That is not hypothetical — a plan run left the
+    tree offering to approve it after two later runs had carried it out,
+    opened a pull request, and marked the task done, so every press started
+    another agent against finished work and nothing on the page ever moved.
     """
     rows = db.execute(
         select(Run.id, Run.task_id, Run.phase, Run.status, Run.proposed_subtasks, Run.plan)
         .join(Task, Task.id == Run.task_id)
-        .where(Task.project_id == project_id, Run.status.in_(MARKED_STATUSES))
+        .where(Task.project_id == project_id)
         .order_by(Run.id)
     ).all()
 
     # Ascending, so a later row overwrites an earlier one and the newest wins.
-    return {
+    newest = {
         task_id: TaskActivity(
             run_id=run_id,
             phase=phase,
@@ -109,6 +120,12 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
             plan=plan,
         )
         for run_id, task_id, phase, status, proposed_subtasks, plan in rows
+    }
+
+    return {
+        task_id: activity
+        for task_id, activity in newest.items()
+        if activity.status in MARKED_STATUSES
     }
 
 
