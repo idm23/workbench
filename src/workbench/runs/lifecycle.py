@@ -195,6 +195,7 @@ def continue_run(
     db: Session,
     source: Run,
     *,
+    message: str | None = None,
     executor: str | None = None,
 ) -> StartResult | NotContinuable:
     """Reopen a finished run as a conversation, because someone asked to.
@@ -209,6 +210,10 @@ def continue_run(
     of what happened and stays that way — its events, its cost, its outcome —
     and continuing it would rewrite history that something else may already
     have reported on.
+
+    `message` seeds the new run's first turn — free text, or one of the
+    canned shortcuts — instead of the generic check-in prompt. Left `None`,
+    the conversation opens exactly as it always has.
     """
     reap(db)
 
@@ -234,7 +239,7 @@ def continue_run(
 
     # The source run's backend, never the project's current default: the token
     # is opaque and means nothing to any backend but the one that issued it.
-    run = create_task_conversation(db, task, backend=source.backend)
+    run = create_task_conversation(db, task, backend=source.backend, seed_message=message)
     return _launch(db, run, executor)
 
 

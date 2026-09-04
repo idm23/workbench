@@ -59,7 +59,9 @@ def create_conversation(db: Session, project: Project, backend: str) -> Run:
     return run
 
 
-def create_task_conversation(db: Session, task: Task, backend: str) -> Run:
+def create_task_conversation(
+    db: Session, task: Task, backend: str, seed_message: str | None = None
+) -> Run:
     """Talk to the agent that just worked a task, in the worktree it worked in.
 
     A conversation like `create_conversation`, but scoped to a task rather
@@ -72,9 +74,17 @@ def create_task_conversation(db: Session, task: Task, backend: str) -> Run:
     column to find "the project's standing conversation", and this is not
     one — it belongs to a single task, and offering it as the project's
     would send someone talking about one task into a worktree for another.
+
+    `seed_message` is optional: free text a person typed, or one of the
+    canned shortcuts, to open with instead of the generic check-in. Left
+    `None`, the run gets today's plain "someone wants to talk to you" prompt.
     """
     run = Run(
-        task_id=task.id, phase=RunPhase.CONVERSATION, backend=backend, status=RunStatus.QUEUED
+        task_id=task.id,
+        phase=RunPhase.CONVERSATION,
+        backend=backend,
+        status=RunStatus.QUEUED,
+        seed_message=seed_message,
     )
     db.add(run)
     db.commit()
