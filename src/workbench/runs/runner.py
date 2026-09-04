@@ -30,7 +30,12 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from workbench.agents.prompts import continuation_prompt, conversation_prompt, prompt_for
+from workbench.agents.prompts import (
+    continuation_prompt,
+    conversation_prompt,
+    prompt_for,
+    seeded_continuation_prompt,
+)
 from workbench.agents.protocol import (
     AgentEvent,
     AgentFailed,
@@ -188,7 +193,11 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
             request=AgentRequest(
                 worktree=worktree,
                 phase=RunPhase.CONVERSATION,
-                prompt=continuation_prompt(task.title),
+                prompt=(
+                    seeded_continuation_prompt(task.title, run.seed_message)
+                    if run.seed_message
+                    else continuation_prompt(task.title)
+                ),
                 resume_token=resume_token_for(db, task, run.backend),
                 model=run.model,
                 run_id=run.id,

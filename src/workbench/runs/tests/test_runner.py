@@ -1154,3 +1154,31 @@ def test_a_task_conversation_leaves_the_tasks_status_alone(db, run, checkout, ba
 
     assert followup.status is RunStatus.SUCCEEDED
     assert task.status is TaskStatus.OPEN
+
+
+def test_a_seeded_conversation_opens_with_the_seed_message(db, run, checkout, backend):
+    """The whole point of seeding one: skip the empty 'I'm here' round trip
+    and let the agent see what was actually asked straight away."""
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    followup = create_task_conversation(
+        db, task, backend="fake", seed_message="Please check CI on this branch."
+    )
+
+    execute(db, followup)
+
+    assert "Please check CI on this branch." in backend.requests[-1].prompt
+
+
+def test_an_unseeded_conversation_still_gets_the_generic_check_in(db, run, checkout, backend):
+    """`seed_message` is optional — leaving it unset must not change today's
+    behavior for a bare 'continue this conversation' click."""
+    from workbench.runs.store import create_task_conversation
+
+    task = _worked_task(db, run, checkout, backend)
+    followup = create_task_conversation(db, task, backend="fake")
+
+    execute(db, followup)
+
+    assert "not a new attempt" in backend.requests[-1].prompt
