@@ -118,6 +118,45 @@ def continuation_prompt(title: str) -> str:
     )
 
 
+def seeded_continuation_prompt(title: str, message: str) -> str:
+    """Reopening a finished run with something specific to say.
+
+    Same framing as `continuation_prompt` — the session is resumed, the work
+    is over, and this is a follow-up conversation rather than a second
+    attempt at `title` — but skips the empty "say you're here" round trip
+    `continuation_prompt` asks for when nobody had anything particular in
+    mind. Here someone did, and the whole point of seeding it was for the
+    agent to see it as the first line of this conversation rather than a
+    second message it has to wait for.
+    """
+    return (
+        f"That run is finished and this is a follow-up conversation about it, "
+        f"not a new attempt at {title!r}.\n"
+        "\n"
+        f"{message}\n"
+        "\n"
+        "This conversation stays open for a while: reply to each message and "
+        "then wait for the next one rather than assuming you are finished."
+    )
+
+
+#: Ask the agent to decompose the task the way a plan run's structured output
+#: would have, using the same skill a project conversation already relies on
+#: to touch the task list through the API rather than only describing it.
+SPLIT_SHORTCUT = (
+    "Split this task into subtasks using the workbench-tasks skill, the way "
+    "a plan run's structured output would have, and briefly explain the "
+    "breakdown you chose."
+)
+
+#: Ask the agent to look at CI on the branch it already committed to, and fix
+#: whatever it finds failing rather than only reporting it.
+CHECK_CI_SHORTCUT = (
+    "Check whether CI is passing on this task's branch and pull request. If "
+    "anything is failing, look into why and fix it."
+)
+
+
 def prompt_for(phase: RunPhase, title: str, body: str | None = None) -> str:
     """The prompt for a task phase, so callers switch on the enum in one
     place. `CONVERSATION` is not a task phase — see `conversation_prompt`."""

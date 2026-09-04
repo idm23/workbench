@@ -398,6 +398,15 @@ class Run(Base):
     # with `backend` above.
     resume_token: Mapped[str | None] = mapped_column(String(200), default=None)
 
+    # What to open a task conversation with, instead of the generic "someone
+    # wants to talk to you" prompt — free text a person typed, or one of the
+    # canned shortcuts ("split this up", "check CI"). Read once, by
+    # `runs.runner._prepare_conversation()`, when the run starts; null means
+    # the plain check-in `continuation_prompt` is used instead. Only
+    # meaningful for a task-scoped `RunPhase.CONVERSATION` run — a project's
+    # own standing conversation has no source run to seed it from.
+    seed_message: Mapped[str | None] = mapped_column(Text, default=None)
+
     # How this run was started, and what to ask about it afterwards.
     #
     # Recorded per run for the same reason `backend` is: the moment a second
