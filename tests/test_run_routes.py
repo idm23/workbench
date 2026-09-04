@@ -1136,6 +1136,59 @@ def test_continuing_a_run_that_never_finished_is_refused(client, session):
     assert "not+finished" in response.headers["location"]
 
 
+def test_continuing_with_a_typed_message_seeds_the_new_run(client, session, executor):
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    response = client.post(
+        f"/runs/{run.id}/continue", data={"message": "Please check CI on this branch."}
+    )
+
+    started = session.query(Run).order_by(Run.id.desc()).first()
+    assert started is not None
+    assert started.seed_message == "Please check CI on this branch."
+    assert response.headers["location"] == f"/runs/{started.id}"
+
+
+def test_continuing_with_the_split_shortcut_seeds_the_canned_message(client, session, executor):
+    from workbench.agents.prompts import SPLIT_SHORTCUT
+
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    client.post(f"/runs/{run.id}/continue", data={"shortcut": "split"})
+
+    started = session.query(Run).order_by(Run.id.desc()).first()
+    assert started.seed_message == SPLIT_SHORTCUT
+
+
+def test_continuing_with_the_check_ci_shortcut_seeds_the_canned_message(client, session, executor):
+    from workbench.agents.prompts import CHECK_CI_SHORTCUT
+
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    client.post(f"/runs/{run.id}/continue", data={"shortcut": "check_ci"})
+
+    started = session.query(Run).order_by(Run.id.desc()).first()
+    assert started.seed_message == CHECK_CI_SHORTCUT
+
+
+def test_continuing_with_neither_field_still_seeds_nothing(client, session, executor):
+    """The bare-click path that already existed must keep working unchanged."""
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    client.post(f"/runs/{run.id}/continue")
+
+    started = session.query(Run).order_by(Run.id.desc()).first()
+    assert started.seed_message is None
+
+
 # --- Reading a run back ----------------------------------------------------
 
 

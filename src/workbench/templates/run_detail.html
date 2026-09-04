@@ -139,7 +139,15 @@
      from no context at all, which looks identical from the outside and is
      much worse. #}
   <form method="post" action="/runs/{{ run.id }}/continue" style="margin-top: 1.25rem;">
+    <label for="continue-message">Say something (optional)</label>
+    <textarea id="continue-message" name="message" rows="2"
+              placeholder="Feedback to open the conversation with…"></textarea>
     <button type="submit" class="secondary">Continue this conversation</button>
+    {# Shortcuts submit the same form with no typed message; the route maps
+       `shortcut` to canned text from `agents.prompts` rather than duplicating
+       it here. Typed text, if present, wins over either button. #}
+    <button type="submit" name="shortcut" value="split" class="secondary">Split</button>
+    <button type="submit" name="shortcut" value="check_ci" class="secondary">Check CI</button>
   </form>
 {% endif %}
 
