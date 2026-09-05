@@ -37,18 +37,18 @@ fi
 # version is the one where you have to read both halves to follow either.
 #
 # The flag is still passed through, so the module sees exactly what was typed.
-ROLE=head
+ROLE="head"
 for arg in "$@"; do
     case "$arg" in
-        --role=node|node) ROLE=node ;;
-        --role=head|head) ROLE=head ;;
+        --role=node|node) ROLE="node" ;;
+        --role=head|head) ROLE="head" ;;
     esac
 done
 
-if [ "$ROLE" = node ]; then
-    ENTRY=workbench.install_node
+if [ "$ROLE" = "node" ]; then
+    ENTRY="workbench.install_node"
 else
-    ENTRY=workbench.install_core
+    ENTRY="workbench.install_core"
 fi
 
 # --no-project, so this does NOT build a virtualenv first. The installer is
