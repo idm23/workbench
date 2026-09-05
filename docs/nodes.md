@@ -53,6 +53,19 @@ Two things it will not do, both on purpose:
   it had done — reading the worktree rather than the model's own summary, because those
   disagree more often than you would expect.
 
+  Measured on an RTX 3070 Laptop (8 GB) with 30 GB of system memory:
+
+  | model | weights | result |
+  |---|---|---|
+  | `qwen2.5-coder:7b` | 4.7 GB | never used the tool channel — cannot drive a run |
+  | `qwen3:8b` | 5.2 GB | completed the task, 112s over 8 turns |
+  | `gpt-oss:20b` | 13 GB | completed the task, 53s over 10 turns |
+
+  **If your node has 16 GB of memory or more, use `gpt-oss:20b`.** It is twice as quick
+  here despite not fitting on the card, because a mixture of experts activates only a
+  fraction of itself per token. Put `WORKBENCH_LOCAL_MODEL=gpt-oss:20b` in the node's
+  environment before installing, or `ollama pull` it and set the variable on the head.
+
 Re-running `./install.sh --role=node` is safe and is how you pick up a changed drop-in or
 a new model.
 
