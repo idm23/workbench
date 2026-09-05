@@ -52,9 +52,22 @@ def test_the_execute_phase_asks_for_a_summary_naming_the_task():
     assert "Add a healthz endpoint" in execute_prompt("Add a healthz endpoint")
 
 
-def test_the_execute_phase_points_at_the_outcome_skill():
+def test_the_execute_phase_demands_an_outcome():
     """An unreported run must never read as a quiet success."""
-    assert "workbench-outcome" in execute_prompt("Add a healthz endpoint")
+    prompt = execute_prompt("Add a healthz endpoint")
+
+    assert "finished, failed, or needs re-planning" in prompt
+    assert "never assumed to have succeeded" in prompt
+
+
+def test_the_execute_phase_names_no_backend_mechanism():
+    """Two backends report an outcome two ways — a skill for one, a tool for
+    the other — and this module is the one place that must know neither.
+    Naming one here is how the vendor-neutral prompt quietly stops being one."""
+    prompt = execute_prompt("Add a healthz endpoint")
+
+    assert "skill" not in prompt.lower()
+    assert "report_outcome" not in prompt
 
 
 def test_a_cold_started_execute_task_gets_its_body():

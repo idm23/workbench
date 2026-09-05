@@ -19,3 +19,16 @@ import pytest
 def isolated_home(tmp_path, monkeypatch):
     """Point `$HOME` at an empty directory, which reads as "no opinion"."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+@pytest.fixture(autouse=True)
+def isolated_data_dir(tmp_path, monkeypatch):
+    """Point `data/` at a temporary directory, as the root conftest does.
+
+    That one lives in `tests/` and so does not reach the suites that sit
+    beside their code. It matters here because the local backend keeps its
+    transcripts under `data/sessions/`: without this, running the tests would
+    write conversations into the developer's own checkout and, worse, resume
+    from them.
+    """
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))

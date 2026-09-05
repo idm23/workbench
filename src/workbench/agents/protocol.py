@@ -167,8 +167,16 @@ type AgentStream = AsyncIterator[AgentEvent | AgentOutcome]
 #: problem to report loudly; "the probe could not run" is not, because a
 #: warning that fires when the checker itself breaks is one people learn to
 #: ignore, and then miss the real one.
+#:
+#: `local` is the odd one and earns its place by not lying. A model served on
+#: this network has no credential, no account, and nothing to expire — reporting
+#: it as `none` would put "nobody has logged in" on every page of a machine that
+#: is working perfectly, and reporting it as a subscription would invent a payer.
+#: What `logged_in` then means for it is the same question in local terms: would
+#: a run started now reach a model.
 CREDENTIAL_SUBSCRIPTION = "subscription"
 CREDENTIAL_API_KEY = "api_key"
+CREDENTIAL_LOCAL = "local"
 CREDENTIAL_NONE = "none"
 CREDENTIAL_UNKNOWN = "unknown"
 

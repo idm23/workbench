@@ -85,6 +85,78 @@ def worktrees_dir() -> Path:
     return data_dir() / "worktrees"
 
 
+#: Where a local model answers, and what to ask it for. An OpenAI-compatible
+#: URL rather than a vendor name, because Ollama, `llama-server` and vLLM all
+#: speak it and the choice between them should not reach any code: swapping
+#: one for another is a different value here, not a different backend.
+#:
+#: The default is loopback because that is the case needing no configuration
+#: at all — a machine serving its own inference. A head reaching a worker node
+#: sets this, or (once nodes are registered) learns it from one.
+DEFAULT_INFERENCE_URL = "http://127.0.0.1:11434/v1"
+
+#: The model the local backend asks for when nothing names another. Sized to
+#: fit, with room for context, in the 8 GB of VRAM this was first built
+#: against — bigger models are a per-machine decision rather than a default
+#: that quietly falls back to CPU.
+#:
+#: Which model is not a matter of benchmarks, and this default was changed once
+#: already on evidence. `qwen2.5-coder:7b` is the better coder on paper and
+#: cannot drive a run at all: it writes every tool call as prose, so Ollama's
+#: parser never sees one. `qwen3:8b` uses the tool-call channel properly and
+#: completes the task — measured, on the node, with
+#: `scripts/test_local_model.py`, which exists to keep that judgement
+#: reproducible rather than remembered.
+#:
+#: It is the default for fitting rather than for winning. `gpt-oss:20b` did the
+#: same task in half the wall clock on the same card, because a mixture of
+#: experts activates a fraction of itself per token — but it wants 13 GB of
+#: weights against this one's 5.2, which is a bet on a machine nobody has
+#: described yet. A node with the memory should say so out loud through
+#: WORKBENCH_LOCAL_MODEL; see docs/nodes.md.
+DEFAULT_LOCAL_MODEL = "qwen3:8b"
+
+#: How long one request to a local model may take. Generous compared to a
+#: hosted API on purpose: a MoE with its experts offloaded to system RAM can
+#: spend minutes on a single long turn, and a timeout that fires mid-run costs
+#: the whole run rather than the turn.
+DEFAULT_INFERENCE_TIMEOUT_SECONDS = 600
+
+
+def inference_base_url() -> str:
+    """The OpenAI-compatible endpoint the local backend talks to."""
+    configured = os.environ.get("WORKBENCH_INFERENCE_URL", "").strip()
+    return (configured or DEFAULT_INFERENCE_URL).rstrip("/")
+
+
+def local_model() -> str:
+    """Which model the local backend asks that endpoint for."""
+    return os.environ.get("WORKBENCH_LOCAL_MODEL", "").strip() or DEFAULT_LOCAL_MODEL
+
+
+def inference_timeout_seconds() -> float:
+    raw = os.environ.get("WORKBENCH_INFERENCE_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_INFERENCE_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("WORKBENCH_INFERENCE_TIMEOUT_SECONDS is not a number: %r", raw)
+        return DEFAULT_INFERENCE_TIMEOUT_SECONDS
+
+
+def sessions_dir() -> Path:
+    """Where a backend keeps a conversation it has to remember itself.
+
+    Under `data/` with everything else this machine generates, and pointedly
+    *not* inside a worktree: a worktree is disposable, and a transcript stored
+    in one would take the conversation with it when the task's checkout is
+    removed. That is the whole difference between this and a backend whose
+    sessions are keyed to the directory they ran in.
+    """
+    return data_dir() / "sessions"
+
+
 def default_agent_backend() -> str:
     """Which agent backend to use when a project does not name one.
 
