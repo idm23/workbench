@@ -100,13 +100,20 @@ DEFAULT_INFERENCE_URL = "http://127.0.0.1:11434/v1"
 #: against — bigger models are a per-machine decision rather than a default
 #: that quietly falls back to CPU.
 #:
-#: Which 8B is not a matter of benchmarks, and this default was changed once
+#: Which model is not a matter of benchmarks, and this default was changed once
 #: already on evidence. `qwen2.5-coder:7b` is the better coder on paper and
 #: cannot drive a run at all: it writes every tool call as prose, so Ollama's
 #: parser never sees one. `qwen3:8b` uses the tool-call channel properly and
 #: completes the task — measured, on the node, with
 #: `scripts/test_local_model.py`, which exists to keep that judgement
 #: reproducible rather than remembered.
+#:
+#: It is the default for fitting rather than for winning. `gpt-oss:20b` did the
+#: same task in half the wall clock on the same card, because a mixture of
+#: experts activates a fraction of itself per token — but it wants 13 GB of
+#: weights against this one's 5.2, which is a bet on a machine nobody has
+#: described yet. A node with the memory should say so out loud through
+#: WORKBENCH_LOCAL_MODEL; see docs/nodes.md.
 DEFAULT_LOCAL_MODEL = "qwen3:8b"
 
 #: How long one request to a local model may take. Generous compared to a

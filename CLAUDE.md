@@ -161,15 +161,27 @@ already has (`stopped_early` invalidating a self-reported outcome), which is
 reassuring: a self-reported outcome is worth exactly as much as the evidence
 beside it.
 
-**And the model itself is a decision with evidence, not a benchmark.**
-`qwen2.5-coder:7b` is the better coder on paper and cannot drive a run at all —
-every tool call as prose, none through the channel. `qwen3:8b` uses the channel
-properly and completes the task: measured on the node, 112 seconds over eight
-turns, file edited, change committed, outcome reported. So it is the default,
-and `scripts/test_local_model.py` is how that judgement stays reproducible
-rather than remembered — one small task against a real endpoint, with every
+**And the model itself is a decision with evidence, not a benchmark.** Three
+were measured on the node, on the same small task, through
+`scripts/test_local_model.py`:
+
+| model | weights | result |
+|---|---|---|
+| `qwen2.5-coder:7b` | 4.7 GB | never used the tool channel; wrote every call as prose |
+| `qwen3:8b` | 5.2 GB | completed it, 112s over 8 turns |
+| `gpt-oss:20b` | 13 GB | completed it, 53s over 10 turns |
+
+The one that looks best on paper is the one that cannot do it at all. The
+fastest is a mixture of experts that activates a fraction of itself per token,
+so it beats a model a quarter its size on a card that cannot hold either
+comfortably. Neither fact is visible from a model card, which is the argument
+for the harness existing: one small task against a real endpoint, with every
 check reading the worktree rather than the model's own summary, because those
 two disagree more often than seems possible.
+
+`qwen3:8b` is the default for fitting rather than for winning — 13 GB of
+weights is a bet on a machine nobody has described yet, and a node with the
+memory can say so through `WORKBENCH_LOCAL_MODEL`.
 
 One consequence reached back into the vendor-neutral half. `prompts.execute_prompt` used
 to tell the agent to use the `workbench-outcome` skill, which is one backend's mechanism
