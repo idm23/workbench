@@ -577,6 +577,14 @@ Unresolved. Recorded here so they are not rediscovered later.
 - **Is "no commits" a failure?** A run where the agent correctly concludes nothing needs
   changing produced no pull request, but calling that `failed` reads as a malfunction when
   it was judgement. Probably wants a third outcome.
+
+  The local backend has since taken a position on half of it, and deliberately in the
+  narrower place: it refuses a self-reported `finished` while the worktree is exactly as
+  the run found it, because a small model claims to have finished things it has not
+  started. That is a backend distrusting its own model, not Workbench deciding what
+  `finished` means — which is still this question, still open, and now with evidence that
+  the two cases ("nothing needed doing" and "nothing was done") are told apart by asking
+  the agent rather than by counting commits.
 - **Rate-limit readings are only as fresh as the last run.** The panel updates when a
   backend reports a reading, and nothing else asks. A one-turn probe session does emit
   one — measured, it works — but it costs about 11,600 cache-creation tokens a shot,
