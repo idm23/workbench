@@ -132,6 +132,33 @@ def test_text_arrives_as_events_before_the_outcome(monkeypatch):
     assert isinstance(items[-1], AgentFinished)
 
 
+def test_reasoning_is_coalesced_harder_than_text(monkeypatch):
+    """A reasoning model talks to itself at length: one qwen3 run here made
+    three tool calls and over a hundred rows of monologue, all of them kept
+    forever and scrolled past by whoever wanted to see what it did."""
+    assert backend_module.THINKING_FLUSH_CHARS > backend_module.TEXT_FLUSH_CHARS
+    assert backend_module.THINKING_FLUSH_SECONDS > backend_module.TEXT_FLUSH_SECONDS
+
+
+def test_a_long_monologue_is_not_one_row_per_thought(monkeypatch):
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(
+                *[chunk(thinking="Let me think about this. " * 4) for _ in range(20)],
+                chunk(content="done"),
+            )
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request()))
+    thoughts = events(items, RunEventKind.THINKING)
+
+    # Twenty chunks of reasoning, a handful of rows.
+    assert 0 < len(thoughts) <= 4
+
+
 def test_reasoning_is_recorded_as_thinking(monkeypatch):
     """Three servers spell this field three ways; all three mean thinking."""
     monkeypatch.setattr(

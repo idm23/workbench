@@ -102,6 +102,15 @@ MAX_CONSECUTIVE_TOOL_FAILURES = 4
 TEXT_FLUSH_CHARS = 400
 TEXT_FLUSH_SECONDS = 2.0
 
+#: Thinking is buffered far harder, and that is not a tidiness preference. A
+#: reasoning model talks to itself at length — one qwen3 run here produced over
+#: a hundred rows of it while making three tool calls — and those rows are kept
+#: forever, scrolled past by a person looking for what the agent actually did.
+#: A reader needs to see that it is thinking and roughly about what; they do not
+#: need the transcript at the granularity of the answer.
+THINKING_FLUSH_CHARS = 2_000
+THINKING_FLUSH_SECONDS = 15.0
+
 #: How long the credential probe waits. It runs on a page render path, so it
 #: has to fail fast when nothing is listening.
 PROBE_TIMEOUT_SECONDS = 5.0
@@ -316,17 +325,24 @@ def _apply_delta(delta: dict[str, Any], reply: _Assistant) -> tuple[str, str]:
 
 
 class _Buffer:
-    """Coalesces streamed text into events worth storing as rows."""
+    """Coalesces streamed text into events worth storing as rows.
 
-    def __init__(self, kind: RunEventKind) -> None:
+    Two instances with different bounds, because the two kinds are read
+    differently: a person follows the reply as it arrives, and skims the
+    reasoning to see whether it is going anywhere.
+    """
+
+    def __init__(self, kind: RunEventKind, chars: int, seconds: float) -> None:
         self._kind = kind
+        self._chars = chars
+        self._seconds = seconds
         self._text = ""
         self._since = datetime.now(UTC)
 
     def add(self, fragment: str) -> AgentEvent | None:
         self._text += fragment
         elapsed = (datetime.now(UTC) - self._since).total_seconds()
-        if len(self._text) >= TEXT_FLUSH_CHARS or elapsed >= TEXT_FLUSH_SECONDS:
+        if len(self._text) >= self._chars or elapsed >= self._seconds:
             return self.flush()
         return None
 
@@ -349,8 +365,8 @@ async def _turn(
     led to it.
     """
     reply = _Assistant()
-    text = _Buffer(RunEventKind.TEXT)
-    thinking = _Buffer(RunEventKind.THINKING)
+    text = _Buffer(RunEventKind.TEXT, TEXT_FLUSH_CHARS, TEXT_FLUSH_SECONDS)
+    thinking = _Buffer(RunEventKind.THINKING, THINKING_FLUSH_CHARS, THINKING_FLUSH_SECONDS)
 
     async with client.stream("POST", "/chat/completions", json=payload) as response:
         if response.status_code >= 400:
