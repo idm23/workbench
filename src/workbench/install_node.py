@@ -21,10 +21,13 @@ Two things here are deliberately *not* ours to own:
   vLLM fit behind the same URL if it ever disappoints.
 """
 
+import json
 import logging
 import os
 import shutil
+import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -33,6 +36,7 @@ from pathlib import Path
 from workbench.config import (
     ROLE_NODE,
     deploy_branch,
+    head_url,
     inference_base_url,
     local_model,
     repo_root,
@@ -54,6 +58,7 @@ from workbench.install import (
     info,
     install_units,
     needs_relocation,
+    record_head,
     record_role,
     relocate,
     report_outstanding,
@@ -93,6 +98,14 @@ OLLAMA_KEEP_ALIVE = "30m"
 
 #: How long to wait for the server to answer once it has been started.
 ENDPOINT_TIMEOUT_SECONDS = 60.0
+
+#: How long to wait on the head when registering. Short: it is one small POST
+#: over a LAN, and a head that is off should cost a warning rather than a wait.
+REGISTER_TIMEOUT_SECONDS = 10
+
+#: What this node advertises it can do. The string the head matches on — see
+#: `workbench.nodes.INFERENCE`, which is the same word from the other side.
+INFERENCE_CAPABILITY = "inference"
 
 
 def check_gpu() -> None:
@@ -251,21 +264,109 @@ Useful commands:
     )
 
 
-def _lan_address() -> str | None:
-    """This machine's address on the local network, for the line above.
+#: Addresses to leave out of what a node advertises. Docker's bridge is
+#: reachable from nowhere but this machine, and a link-local address is worse
+#: than useless to a head: it resolves and then does not work.
+_UNROUTABLE_PREFIXES = ("172.17.", "169.254.", "127.")
 
-    The LAN first, because that is the path the head should prefer: one hop
-    between two machines in the same house, where the tailnet address is a
-    working fallback rather than the route to take by default. Best effort — a
-    printed hint that is occasionally blank is fine, where a wrong address
-    confidently printed is not.
+
+def addresses() -> list[str]:
+    """Every way to reach this node, best route first.
+
+    LAN before tailnet, because one hop between two machines in the same house
+    beats WireGuard and a coordination server — and because the head probes
+    this list in order rather than trusting it, a route that stops working
+    costs one failed connection rather than a run.
+
+    IPv6 is left out. Both paths here are IPv4, and an address that resolves
+    but does not route is the failure this list exists to avoid.
     """
     probe = subprocess.run(["hostname", "-I"], capture_output=True, text=True, check=False)
+    lan: list[str] = []
+    tailnet: list[str] = []
     for candidate in probe.stdout.split():
-        if candidate.startswith("100.") or ":" in candidate:
-            # Skip the tailnet address and IPv6: this line is the LAN hint.
+        if ":" in candidate or candidate.startswith(_UNROUTABLE_PREFIXES):
             continue
-        return candidate
+        # 100.64.0.0/10 is the shared address space Tailscale hands out.
+        (tailnet if candidate.startswith("100.") else lan).append(candidate)
+    return lan + tailnet
+
+
+def _lan_address() -> str | None:
+    """The first LAN address, for the hint printed at the end of an install."""
+    found = [one for one in addresses() if not one.startswith("100.")]
+    return found[0] if found else None
+
+
+def gpu_description() -> str | None:
+    """What this node is lending, in one line, or None if it has no card."""
+    if shutil.which("nvidia-smi") is None:
+        return None
+    probe = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    lines = probe.stdout.strip().splitlines() if probe.returncode == 0 else []
+    return lines[0].strip() if lines else None
+
+
+def register_with_head() -> None:
+    """Tell the head this node exists, and how to reach it.
+
+    Best effort by design. A head that is off, or on the other side of a
+    network that is down, must not fail a node's install — the node still
+    serves models, and the next deploy tries again in five minutes. What it
+    must not do is stay quiet about having failed.
+    """
+    head = head_url()
+    if head is None:
+        info("no head configured, so this node is not registered with one.")
+        info("Re-run with --head http://<head>:8787 to register it.")
+        return
+
+    payload = json.dumps(
+        {
+            "name": socket.gethostname(),
+            "addresses": addresses(),
+            "capabilities": [INFERENCE_CAPABILITY],
+            "model": local_model(),
+            "gpu": gpu_description(),
+        }
+    ).encode()
+    request = urllib.request.Request(
+        f"{head}/api/nodes",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        # urllib rather than httpx, like every other request in the installer:
+        # this module has to stay importable before a virtualenv exists.
+        with urllib.request.urlopen(request, timeout=REGISTER_TIMEOUT_SECONDS) as answer:
+            if answer.status < 300:
+                info(f"registered with the head at {head}")
+                return
+            warn(f"the head at {head} answered {answer.status} to this registration.")
+    except (urllib.error.URLError, OSError) as error:
+        warn(f"could not register with the head at {head}: {error}")
+        info("The node still serves models; its deploy timer will try again.")
+
+
+def _head_argument() -> str | None:
+    """The `--head` this install was given, in either spelling.
+
+    Parsed by hand rather than with argparse because this module is reached
+    through `install.sh` with the role flag still in `sys.argv`, and a parser
+    strict enough to be useful would reject that.
+    """
+    argv = sys.argv[1:]
+    for index, argument in enumerate(argv):
+        if argument.startswith("--head="):
+            return argument.split("=", 1)[1].strip().rstrip("/") or None
+        if argument == "--head" and index + 1 < len(argv):
+            return argv[index + 1].strip().rstrip("/") or None
     return None
 
 
@@ -301,6 +402,8 @@ def main() -> int:
         step("Recording what this machine is")
         ensure_data_directory(account)
         record_role(ROLE_NODE, account)
+        if (head := _head_argument()) is not None:
+            record_head(head, account)
 
         step("Installing the model server")
         serving = install_inference_server()
@@ -319,6 +422,9 @@ def main() -> int:
                 wait_for_endpoint()
 
             report_success()
+
+        step("Registering with the head")
+        register_with_head()
 
         # Said on every path, including the one that installed no units at all.
         # The head's installer learned this the hard way: an early return that

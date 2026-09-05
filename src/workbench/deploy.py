@@ -327,7 +327,7 @@ def rebuild_and_restart() -> DeployFailed | None:
         unit_error = refresh_units()
         if unit_error is not None:
             return unit_error
-        return converge_inference_server()
+        return converge_node()
 
     restore_error = restore_snapshot()
     if restore_error is not None:
@@ -359,8 +359,8 @@ def rebuild_and_restart() -> DeployFailed | None:
     return restart_service()
 
 
-def converge_inference_server() -> DeployFailed | None:
-    """Bring a node's model server back in line with what the repo says.
+def converge_node() -> DeployFailed | None:
+    """Bring a node back in line with what the repo says, and say it is alive.
 
     The same convergence rule the units follow: decide from state rather than
     from what this tick happened to pull, so a drop-in edited by hand comes
@@ -381,6 +381,15 @@ def converge_inference_server() -> DeployFailed | None:
         # reachable; a model server that needs attention is a thing to say,
         # not a reason to leave the checkout half-deployed.
         logger.warning("Could not converge the model server: %s", error)
+
+    try:
+        # Every tick, not only the ones that pulled something. This is what
+        # keeps `nodes.last_seen_at` a heartbeat rather than a record of the
+        # last deploy — a node that has stopped updating is the one thing a
+        # head can notice on its own, since nothing here polls.
+        install_node.register_with_head()
+    except Exception as error:
+        logger.warning("Could not register with the head: %s", error)
     return None
 
 
@@ -407,6 +416,17 @@ def deploy() -> DeployResult:
             if failure is not None:
                 return failure
 
+            # A node's own convergence, on every tick and for the same
+            # reason: state, not events. It also re-registers, which is what
+            # keeps `nodes.last_seen_at` a heartbeat — a node that stopped
+            # deploying is the one failure a head can notice by itself, since
+            # nothing here polls.
+            if is_node():
+                failure = converge_node()
+                if failure is not None:
+                    return failure
+                return advanced
+
             # And converge acceptance, for the same reason and a sharper one.
             # Acceptance used to run only on the tick that advanced the
             # checkout — so a deploy that pulled a commit and then failed
@@ -421,19 +441,14 @@ def deploy() -> DeployResult:
             # the worst symptom: new code and new units on disk, an old process
             # still serving, and nothing anywhere looking wrong. Converged the
             # same way — from what the service *is*, not from what this tick
-            # happened to do.
-            # Both of these are about the app: whether the running process
-            # is older than the checkout, and whether staging has reported on
-            # this revision. A node runs neither, so on one they would compare
-            # against a service that was never installed.
-            if not is_node():
-                failure = converge_service()
-                if failure is not None:
-                    return failure
+            # happened to do. Both are about the app, which a node has not got.
+            failure = converge_service()
+            if failure is not None:
+                return failure
 
-                if acceptance_is_outstanding():
-                    logger.info("Acceptance has not reported on this revision yet")
-                    run_acceptance()
+            if acceptance_is_outstanding():
+                logger.info("Acceptance has not reported on this revision yet")
+                run_acceptance()
         return advanced
 
     failure = rebuild_and_restart()
