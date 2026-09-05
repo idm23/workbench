@@ -906,15 +906,14 @@ def check_inference_node() -> Check:
     before a run needs it.
     """
     from workbench.database.db import session_scope
-    from workbench.database.models import Node
-    from workbench.nodes import inference_url
+    from workbench.nodes import inference_url, known_nodes
 
     key = "inference-node"
     title = "A worker node is answering"
 
     try:
         with session_scope() as db:
-            known = db.query(Node).count()
+            known = len(known_nodes(db))
             chosen = inference_url(db) if known else None
     except Exception as error:
         return Check(
