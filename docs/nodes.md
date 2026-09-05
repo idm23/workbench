@@ -38,7 +38,20 @@ Two things it will not do, both on purpose:
   script should decide. If `nvidia-smi` is missing you are told to run
   `sudo ubuntu-drivers install`, and to re-run the installer afterwards.
 - **Choose the model for you** beyond a default. `WORKBENCH_LOCAL_MODEL` picks it, and
-  the default (`qwen2.5-coder:7b`) is what fits in 8 GB of VRAM with room for context.
+  the default (`qwen3:8b`) is what fits in 8 GB of VRAM with room for context *and* can
+  actually drive a run — which does not follow from the first. `qwen2.5-coder:7b` is the
+  better coder on paper and fails immediately, because it writes its tool calls as prose
+  instead of calling them.
+
+  Before trusting a new model with real work, ask it to do one small task:
+
+  ```sh
+  uv run scripts/test_local_model.py --model <model> --url http://<node>:11434/v1
+  ```
+
+  It reports whether the model used its tools, changed the file, committed, and said what
+  it had done — reading the worktree rather than the model's own summary, because those
+  disagree more often than you would expect.
 
 Re-running `./install.sh --role=node` is safe and is how you pick up a changed drop-in or
 a new model.
