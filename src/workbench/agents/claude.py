@@ -332,6 +332,20 @@ def _env_for(request: AgentRequest) -> dict[str, str]:
     }
 
 
+def prompt_for(request: AgentRequest) -> str:
+    """Workbench's prompt, plus how *this* backend reports an outcome.
+
+    `prompts.execute_prompt` states the obligation and deliberately not the
+    mechanism, because a second backend has a different one. This is where the
+    Claude-shaped half goes: the skill is loaded in `_options` for the execute
+    phase, and a skill that is available but never mentioned is one a model
+    routinely does not reach for.
+    """
+    if request.phase is not RunPhase.EXECUTE:
+        return request.prompt
+    return f"{request.prompt}\n\nUse the workbench-outcome skill to report it."
+
+
 def _options(request: AgentRequest) -> ClaudeAgentOptions:
     options: dict[str, Any] = {
         "cwd": request.worktree,
@@ -733,7 +747,7 @@ class ClaudeBackend:
         async def drive(options: ClaudeAgentOptions) -> AsyncIterator[AgentEvent]:
             nonlocal last_result
             async with ClaudeSDKClient(options=options) as client:
-                await client.query(request.prompt)
+                await client.query(prompt_for(request))
                 async for event in turn(client):
                     yield event
 

@@ -86,9 +86,14 @@ def execute_prompt(title: str, body: str | None = None) -> str:
         f"{title!r} without having watched you work. Mention anything you left "
         "undone or were unsure about.",
         "",
-        "Use the workbench-outcome skill to report whether this task finished, "
-        "failed, or needs re-planning before you stop — an unreported run is "
-        "never assumed to have succeeded.",
+        # The obligation, not the mechanism. How a backend reports an outcome
+        # is the backend's business — a skill for one, a tool for another —
+        # and naming one of them here would put a vendor's vocabulary in the
+        # module that exists precisely to have none. Each backend appends its
+        # own sentence saying how.
+        "Report whether this task finished, failed, or needs re-planning "
+        "before you stop — an unreported run is never assumed to have "
+        "succeeded.",
     ]
     return "\n".join(parts)
 
