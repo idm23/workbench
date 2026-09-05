@@ -1,8 +1,8 @@
 # Workbench
 
 A personal tool for managing software projects on a home server. Lists projects,
-shows a todo tree per project, and lets a task be worked on either by hand or by a
-Claude agent — with a written summary either way.
+shows a todo tree per project, and lets a task be worked on by hand, by Claude, or by a
+model running on a GPU in the next room — with a written summary either way.
 
 Runs on an always-on Ubuntu box, reachable only over Tailscale.
 
@@ -24,6 +24,14 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > conversation path are all proven against the machine rather than a stub. What the first
 > real use found was not any of those: it was the credential expiring on a clock nothing
 > was watching, with every page still reporting a healthy login. See Deployment below.
+> **There are now two backends and two kinds of machine.** `agents/local.py` drives a
+> model served over a plain OpenAI-compatible endpoint, which is the first thing to test
+> the swappability the seam was built for — it imports no SDK, so the rule that keeps
+> Claude behind an adapter constrains it too. And `./install.sh --role=node` turns a
+> second machine into a worker that serves that model, registers itself, and keeps itself
+> updated. What running a real 7B first found was not the plumbing either: it was that a
+> small model writes its tool calls as prose, claims to have finished things it never
+> started, and reaches verdicts without reading anything. See Machines below.
 > See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
