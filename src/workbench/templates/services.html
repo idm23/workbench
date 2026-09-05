@@ -38,6 +38,41 @@
   <p class="empty">Nothing running right now.</p>
 {% endif %}
 
+<h2 class="section">Worker nodes</h2>
+{% if nodes %}
+  <ul class="items">
+    {% for node in nodes %}
+      <li>
+        <div class="row-title">
+          <span>{{ node.name }}</span>
+          <span class="chev">{{ node.capabilities | join(", ") }}</span>
+        </div>
+        {# The address that answered last, because "which route is actually
+           working" is the question a person asks when a node goes quiet — and
+           it is not always the first one the node advertised. #}
+        <div class="row-meta mono">
+          {{ node.last_good_address or node.addresses | join(", ") }}
+        </div>
+        <div class="row-meta">
+          {{ node.model or "no model recorded" }}{% if node.gpu %} · {{ node.gpu }}{% endif %}
+        </div>
+        <div class="row-meta">
+          {% if node.last_seen_at %}last seen {{ node.last_seen_at.strftime("%d %b %H:%M") }}
+          {% else %}never checked in{% endif %}
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  {# Not an error state. A single machine is a perfectly good Workbench, and
+     this panel is how someone finds out that adding a second one is a thing
+     they can do. #}
+  <p class="empty">
+    No worker nodes. Install one with <span class="mono">./install.sh --role=node</span>
+    on a machine with a GPU.
+  </p>
+{% endif %}
+
 <h2 class="section">Shells in progress</h2>
 {% if shells %}
   <ul class="items">
