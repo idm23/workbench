@@ -389,10 +389,32 @@ because that is replaced on upgrade and a drop-in is not. Ollama itself is drive
 than reimplemented: its CUDA handling is the part we least want to maintain, and
 `llama-server` or vLLM fit behind the same URL if it disappoints.
 
-**Still manual: telling the head where its node is.** `WORKBENCH_INFERENCE_URL` in
-`/etc/workbench/env`, by hand, today. Nodes registering themselves — a `nodes` table, an
-address list the head probes in preference order — is the next slice, and it is what makes
-adding a laptop a matter of running the installer on the laptop and nothing on the head.
+**Nodes register themselves, and the head probes rather than trusts.** `./install.sh
+--role=node --head http://<head>:8787` writes the head's address beside the role marker,
+POSTs the node's name, addresses, capabilities, model and GPU to `/api/nodes`, and repeats
+that on every deploy tick. Adding a machine is therefore something you do *on that
+machine*; nothing is typed on the head.
+
+Three decisions inside that are worth keeping.
+
+- **Addresses are an ordered list, not a field per network.** A node advertises every
+  route to itself, LAN first, and the head tries them in order and writes down which
+  answered (`last_good_address`, tried first next time, so the common case is one
+  connection). Which route works is a property of where the asking happens, not of the
+  node — and on this pair of machines the answer already changed once mid-project. A
+  route that stops working now costs one failed connection instead of a run.
+- **A re-registration forgets a remembered route that is no longer offered.** Otherwise a
+  node that moved network keeps a `last_good_address` on the old one, and every run pays
+  the timeout before falling back.
+- **The runner asks, and the backend is told.** `AgentRequest.endpoint` carries the chosen
+  node, because a backend may not touch the database and choosing between nodes means
+  reading a table and probing an address. A machine with no nodes registered gets `None`
+  and behaves exactly as it did before there were any: the backend uses
+  `WORKBENCH_INFERENCE_URL`, which is still there and still wins when set.
+
+`last_seen_at` is a heartbeat rather than a record of the last deploy, because the node
+re-registers on every tick including the ones that pull nothing. That is the only way a
+head notices a node has gone away — nothing here polls.
 
 ## Deployment
 
