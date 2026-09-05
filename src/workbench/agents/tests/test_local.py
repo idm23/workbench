@@ -42,6 +42,27 @@ def a_request(**overrides: Any) -> AgentRequest:
     return AgentRequest(**(fields | overrides))
 
 
+def a_repository(tmp_path) -> Path:
+    """A worktree that is a real checkout.
+
+    Two of the guards below decide from git — whether the run changed anything
+    — and both answer "cannot tell" outside a repository, which is correct and
+    makes for a test that passes without exercising them.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "app.py").write_text("x = 1\n")
+    for argv in (["init", "-q", "-b", "main"], ["add", "-A"]):
+        subprocess.run(["git", *argv], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "first"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    return worktree
+
+
 def chunk(**delta: Any) -> dict[str, Any]:
     return {"model": "test-model", "choices": [{"delta": delta}]}
 
@@ -568,17 +589,7 @@ def test_a_finished_claim_that_changed_nothing_is_refused(monkeypatch, tmp_path)
     """The run that prompted this reported finished with an empty worktree:
     Workbench noticed there were no commits and declined to push, and nothing
     declined the claim itself — the task went to done."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    (worktree / "app.py").write_text("x = 1\n")
-    for argv in (["init", "-q", "-b", "main"], ["add", "-A"]):
-        subprocess.run(["git", *argv], cwd=worktree, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "first"],
-        cwd=worktree,
-        check=True,
-        capture_output=True,
-    )
+    worktree = a_repository(tmp_path)
     monkeypatch.setattr(
         backend_module,
         "_client",
@@ -594,6 +605,38 @@ def test_a_finished_claim_that_changed_nothing_is_refused(monkeypatch, tmp_path)
 
     assert "exactly as you found it" in results[1]["text"]
     assert results[1]["is_error"]
+
+
+def test_a_run_that_stalled_and_then_ran_out_of_turns_says_so(monkeypatch, tmp_path):
+    """The trap in inferring `stopped_early` from what was said last: a run
+    that stalled, was nudged, and then ground on to the turn limit has a
+    perfectly good final message from the stall. Reporting that as a clean
+    ending would hand the runner a self-reported outcome it has no reason to
+    distrust — which is the one thing this flag is for."""
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(backend_module, "MAX_TURNS_EXECUTE", 4)
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(chunk(content="I will get to it shortly.")),
+            sse(tool_call("read_file", {"path": "app.py"})),
+        ),
+    )
+
+    outcome = drain(LocalBackend().run(a_request(worktree=worktree)))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.stopped_early
+
+
+def test_a_run_that_finished_on_its_own_is_not_stopped_early(monkeypatch):
+    monkeypatch.setattr(backend_module, "_client", stub(sse(chunk(content="All done."))))
+
+    outcome = drain(LocalBackend().run(a_request()))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert not outcome.stopped_early
 
 
 def test_a_run_costs_nothing(monkeypatch):

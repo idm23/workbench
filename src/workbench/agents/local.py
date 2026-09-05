@@ -569,6 +569,14 @@ class LocalBackend:
         failures = 0
         started = False
         nudges = 0
+        #: Whether the loop ended because the agent stopped, as opposed to
+        #: because it ran out of turns. Tracked rather than inferred: a run
+        #: that stalled, was nudged, and then ground on to the turn limit has
+        #: an `answered` from the stall, and inferring from that would report
+        #: a run cut short as one that chose to stop — which is exactly the
+        #: distinction `stopped_early` exists to make, since the runner
+        #: distrusts a self-reported outcome without it.
+        ended_cleanly = False
 
         async with _client() as client:
             while turns < _max_turns(phase):
@@ -667,14 +675,17 @@ class LocalBackend:
                         _save_transcript(token, messages)
                         continue
                     if phase is not RunPhase.CONVERSATION:
+                        ended_cleanly = True
                         break
                     # A conversation waits for the next thing typed, which is
                     # the whole point of one. Nothing typed ends it.
                     if request.inputs is None:
+                        ended_cleanly = True
                         break
                     try:
                         typed = await anext(request.inputs)
                     except StopAsyncIteration:
+                        ended_cleanly = True
                         break
                     messages.append({"role": "user", "content": typed})
                     _save_transcript(token, messages)
@@ -753,6 +764,7 @@ class LocalBackend:
 
                 _save_transcript(token, messages)
                 if plan is not None:
+                    ended_cleanly = True
                     break
                 if failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
                     yield AgentEvent(
@@ -767,7 +779,7 @@ class LocalBackend:
                     )
                     return
 
-        stopped_early = turns >= _max_turns(phase) and plan is None and answered is None
+        stopped_early = not ended_cleanly
         if stopped_early:
             yield AgentEvent(
                 RunEventKind.NOTICE,
