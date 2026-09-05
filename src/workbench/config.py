@@ -134,6 +134,32 @@ def is_node() -> bool:
     return role() == ROLE_NODE
 
 
+def head_marker() -> Path:
+    """The file recording which head this node reports to.
+
+    Beside `data/role` and for the same reason: the node's deploy timer
+    re-registers on every tick, and it has to know where to send that without
+    anyone re-running the installer with the flag again.
+    """
+    return data_dir() / "head"
+
+
+def head_url() -> str | None:
+    """Where this node's head is, or None if it was never told.
+
+    None is an ordinary state, not an error: a node installed without `--head`
+    still serves models perfectly well — it is simply not registered, so a
+    person has to point the head at it by hand. The doctor says so.
+    """
+    configured = os.environ.get("WORKBENCH_HEAD_URL", "").strip()
+    if not configured:
+        try:
+            configured = head_marker().read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return configured.rstrip("/") or None
+
+
 #: Where a local model answers, and what to ask it for. An OpenAI-compatible
 #: URL rather than a vendor name, because Ollama, `llama-server` and vLLM all
 #: speak it and the choice between them should not reach any code: swapping
