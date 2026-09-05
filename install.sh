@@ -2,7 +2,8 @@
 #
 # Bootstrap for Workbench.
 #
-#   ./install.sh
+#   ./install.sh              # the machine that runs Workbench
+#   ./install.sh --role=node  # a machine that lends it a GPU
 #
 # This script exists only to get `uv` onto the machine. Everything else lives
 # in src/workbench/install.py, which is Python: testable, and able to import
@@ -31,6 +32,25 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
+# Which installer to hand off to. A node lends a head a GPU; a head runs
+# Workbench itself. Two modules rather than one with a flag, because the flag
+# version is the one where you have to read both halves to follow either.
+#
+# The flag is still passed through, so the module sees exactly what was typed.
+ROLE=head
+for arg in "$@"; do
+    case "$arg" in
+        --role=node|node) ROLE=node ;;
+        --role=head|head) ROLE=head ;;
+    esac
+done
+
+if [ "$ROLE" = node ]; then
+    ENTRY=workbench.install_node
+else
+    ENTRY=workbench.install_core
+fi
+
 # --no-project, so this does NOT build a virtualenv first. The installer is
 # written against the standard library alone precisely so it can run before one
 # exists — because one of the first things it decides is whether this checkout
@@ -48,4 +68,4 @@ fi
 PYTHONPATH="$(pwd)/src"
 export PYTHONPATH
 
-exec uv run --no-project --python "$(cat .python-version)" python -m workbench.install "$@"
+exec uv run --no-project --python "$(cat .python-version)" python -m "$ENTRY" "$@"
