@@ -95,11 +95,19 @@ def worktrees_dir() -> Path:
 #: sets this, or (once nodes are registered) learns it from one.
 DEFAULT_INFERENCE_URL = "http://127.0.0.1:11434/v1"
 
-#: The model the local backend asks for when nothing names another. A 7B coder
-#: at Q4 is what fits, with room for context, in the 8 GB of VRAM this was
-#: first built against — bigger models are a per-machine decision rather than a
-#: default that quietly falls back to CPU.
-DEFAULT_LOCAL_MODEL = "qwen2.5-coder:7b"
+#: The model the local backend asks for when nothing names another. Sized to
+#: fit, with room for context, in the 8 GB of VRAM this was first built
+#: against — bigger models are a per-machine decision rather than a default
+#: that quietly falls back to CPU.
+#:
+#: Which 8B is not a matter of benchmarks, and this default was changed once
+#: already on evidence. `qwen2.5-coder:7b` is the better coder on paper and
+#: cannot drive a run at all: it writes every tool call as prose, so Ollama's
+#: parser never sees one. `qwen3:8b` uses the tool-call channel properly and
+#: completes the task — measured, on the node, with
+#: `scripts/test_local_model.py`, which exists to keep that judgement
+#: reproducible rather than remembered.
+DEFAULT_LOCAL_MODEL = "qwen3:8b"
 
 #: How long one request to a local model may take. Generous compared to a
 #: hosted API on purpose: a MoE with its experts offloaded to system RAM can

@@ -161,6 +161,16 @@ already has (`stopped_early` invalidating a self-reported outcome), which is
 reassuring: a self-reported outcome is worth exactly as much as the evidence
 beside it.
 
+**And the model itself is a decision with evidence, not a benchmark.**
+`qwen2.5-coder:7b` is the better coder on paper and cannot drive a run at all —
+every tool call as prose, none through the channel. `qwen3:8b` uses the channel
+properly and completes the task: measured on the node, 112 seconds over eight
+turns, file edited, change committed, outcome reported. So it is the default,
+and `scripts/test_local_model.py` is how that judgement stays reproducible
+rather than remembered — one small task against a real endpoint, with every
+check reading the worktree rather than the model's own summary, because those
+two disagree more often than seems possible.
+
 One consequence reached back into the vendor-neutral half. `prompts.execute_prompt` used
 to tell the agent to use the `workbench-outcome` skill, which is one backend's mechanism
 sitting in the module that exists to have none. It now states the *obligation* — report
