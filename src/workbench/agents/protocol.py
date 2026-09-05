@@ -63,6 +63,17 @@ class AgentRequest:
     #: outcome, because that is what gets recorded.
     model: str | None = None
 
+    #: Where to send the work, when Workbench knows better than the backend's
+    #: own configuration does — a worker node it picked and probed, say. None
+    #: means "you decide", which is what every backend that talks to a hosted
+    #: service will always get.
+    #:
+    #: Passed here rather than left for the backend to look up, because a
+    #: backend may not touch the database (see `Backend.run`) and choosing
+    #: between nodes is a database question. The runner asks; the backend is
+    #: told.
+    endpoint: str | None = None
+
     #: Plain identifiers, not a vendor shape — a backend that can call back
     #: into Workbench's own API (the live outcome report, a subtask spun off
     #: mid-execute) needs to say which run and task it is. Never parsed by

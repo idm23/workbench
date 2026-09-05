@@ -65,6 +65,7 @@ from workbench.git.worktrees import (
     run_setup_command,
     uncommitted_diffstat,
 )
+from workbench.nodes import inference_url
 from workbench.runs.store import append_event, fetch_new_inputs, finish_run, mark_running
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, resolve_origin
 
@@ -211,6 +212,26 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
     )
 
 
+def _endpoint(db: Session, run: Run) -> str | None:
+    """A worker node that will serve this run, if one answers.
+
+    Asked here rather than inside the backend because a backend may not touch
+    the database, and choosing between nodes means reading a table and probing
+    an address. None when no node is registered or none answers, which is the
+    ordinary case on a single machine: the backend then uses its own
+    configuration, and a machine with no nodes behaves exactly as it did before
+    there were any.
+
+    A notice goes on the run either way, so "which machine actually did this"
+    is answerable from the event log a year later rather than from whatever
+    `/etc/workbench/env` says today.
+    """
+    chosen = inference_url(db)
+    if chosen is not None:
+        append_event(db, run.id, RunEventKind.NOTICE, {"text": f"Serving this run from {chosen}."})
+    return chosen
+
+
 def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     """Get the worktree and the backend ready, or explain why not.
 
@@ -286,6 +307,7 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
             prompt=prompt_for(run.phase, task.title, task.body),
             resume_token=resume_token_for(db, task, run.backend),
             model=run.model,
+            endpoint=_endpoint(db, run),
             run_id=run.id,
             task_id=task.id,
         ),
