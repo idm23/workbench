@@ -128,6 +128,12 @@ def inference_url(db: Session) -> str | None:
 
     Probing costs one HTTP request in the common case, because the address that
     answered last is tried first and written back when it answers again.
+
+    With more than one capable node this takes the first by name rather than
+    balancing between them. Deliberately dull while there is one: choosing
+    *which* node — least loaded, biggest card, nearest — is a real question and
+    wants real inputs, and inventing an answer now would be a policy nobody
+    asked for sitting in the way of the one they eventually want.
     """
     nodes = db.execute(select(Node).order_by(Node.name)).scalars().all()
     for node in nodes:
