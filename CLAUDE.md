@@ -108,6 +108,36 @@ implementation, and `agents/claude.py` is the only module in the repository perm
 import an agent SDK. It translates into `RunEventKind` and returns an opaque resume token,
 so nothing above it can tell which vendor answered.
 
+**A second backend now exists, which is the first evidence any of this works.**
+`agents/local.py` drives a model served on this machine or this network through a plain
+OpenAI-compatible `/chat/completions` — Ollama, `llama-server` and vLLM all speak it, so
+which one is running is a URL rather than a code path. The telling detail is what it did
+*not* need: no change to `test_seam.py`, because it imports `httpx` and no vendor SDK at
+all. The seam constrains it exactly as it constrains the runner.
+
+Four things it does differently, each forced rather than chosen:
+
+- **There is no agent on the other end, only a model**, so Workbench supplies the tools
+  (`agents/tools.py`), drives the turn loop, and decides when the run is over. That is the
+  real cost of the backend and also its one advantage: what the agent can do is a list in
+  one file rather than a vendor's decision.
+- **The plan phase is read-only by absence.** Claude gets that from the SDK's plan mode;
+  here the tools that write are simply not in the list sent for a plan run, and `dispatch`
+  refuses one by name even if the model invents it. There is nothing to bypass, which
+  makes it the stronger of the two guarantees.
+- **The transcript belongs to Workbench**, written under `data/sessions/` and named by the
+  opaque resume token, because a local endpoint keeps no session to resume.
+- **A run bills nothing**, so `total_cost_usd` stays null rather than becoming a zero. It
+  spends a GPU and a wall clock; the rate-limit panel has nothing to say about it, which
+  is the entire point of having it.
+
+One consequence reached back into the vendor-neutral half. `prompts.execute_prompt` used
+to tell the agent to use the `workbench-outcome` skill, which is one backend's mechanism
+sitting in the module that exists to have none. It now states the *obligation* — report
+finished, failed, or needs re-planning — and each backend appends the sentence saying how:
+a skill for Claude, a `report_outcome` tool for the local loop. Both reach the same
+`POST /api/runs/{id}/outcome`, so nothing above the seam learns there were two ways.
+
 The rule is enforced rather than documented: `agents/tests/test_seam.py` parses every
 module in the package and fails if a vendor SDK is imported anywhere else. That matters
 because of how this decays — not by someone rejecting the decision, but by a series of
@@ -482,11 +512,15 @@ because the runner looks over-built until the cgroup behaviour is clear.
 
 Unresolved. Recorded here so they are not rediscovered later.
 
-- **Agent sessions are directory-scoped.** A backend's resume token is keyed to the
-  directory it ran in, which conflicts with "worktrees are disposable" — deleting a
-  task's worktree orphans the `resume_token` its runs point at. Per-task worktrees narrow
-  this but do not close it. Some SDKs expose a pluggable session store, which would let
-  those live in our own SQLite instead of on disk.
+- **Agent sessions are directory-scoped — for one backend.** Claude's resume token is
+  keyed to the directory it ran in, which conflicts with "worktrees are disposable":
+  deleting a task's worktree orphans the `resume_token` its runs point at. Per-task
+  worktrees narrow this but do not close it. Some SDKs expose a pluggable session store,
+  which would let those live in our own SQLite instead of on disk. Worth noting that the
+  local backend has no such problem and not because it solved one — it had to keep the
+  transcript itself, since a `/chat/completions` endpoint remembers nothing, so the
+  conversation is a file under `data/sessions/` that no worktree owns. That is what the
+  fix for Claude would look like if an SDK ever allows it.
 - **Polling is how the stream tails.** There is no in-process signal available: the runner
   is a different process in a different cgroup, and SQLite has no LISTEN/NOTIFY, so the
   table is the only thing the two share. Once per second per open page is fine at this
