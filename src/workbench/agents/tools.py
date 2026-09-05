@@ -24,7 +24,7 @@ import logging
 import os
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,17 @@ class ToolContext:
     run_id: int = 0
     task_id: int = 0
     project_id: int = 0
+
+    #: Which tools have been called in this run so far. Mutable inside a frozen
+    #: container on purpose: it is the run's history rather than its
+    #: configuration, and two tools below refuse to be the *first* thing a run
+    #: does — see `_nothing_looked_at`.
+    used: set[str] = field(default_factory=set)
+
+    #: The worktree's HEAD when the run started, so `report_outcome` can tell
+    #: whether anything actually happened. None when the backend could not read
+    #: it, which reads as "cannot say" rather than as "nothing changed".
+    head_at_start: str | None = None
 
 
 @dataclass(frozen=True)
@@ -323,6 +334,63 @@ def _edit_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolResult(f"Edited {where} ({count} replacement{'s' if count > 1 else ''}).")
 
 
+def _git(context: ToolContext, *args: str) -> str | None:
+    """One read-only git command in the worktree, or None if it could not run."""
+    try:
+        done = subprocess.run(
+            ["git", *args],
+            cwd=context.worktree,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def nothing_happened(context: ToolContext) -> bool:
+    """Whether this run has left the worktree exactly as it found it.
+
+    Both halves matter. A commit moves HEAD; work in progress shows in
+    `status`. Only when neither has changed is "finished" a claim about
+    nothing, and only then is it worth refusing.
+
+    Answers False whenever it cannot tell. A tool that blocks an outcome on a
+    git command that did not run would turn a broken probe into a run that can
+    never report anything.
+    """
+    if context.head_at_start is None:
+        return False
+    head = _git(context, "rev-parse", "HEAD")
+    if head is None or head != context.head_at_start:
+        return False
+    return _git(context, "status", "--porcelain") == ""
+
+
+def _nothing_looked_at(context: ToolContext, tool: str) -> ToolResult | None:
+    """Refuse a verdict from a run that has not looked at anything yet.
+
+    The first real run against a 7B ended on turn one: it reported
+    `needs_replanning` — "the specification is too vague" — having read no
+    file, listed no directory, and run no command. That is not a judgement, it
+    is a reflex, and the run recorded it as an outcome.
+
+    So the two tools that end a run refuse to be the first thing it does. The
+    message says what to do instead, which is what a small model needs; a task
+    that genuinely cannot be done can still be reported after one look.
+    """
+    if context.used - {tool}:
+        return None
+    return ToolResult(
+        "Not yet — this run has not looked at anything. Read the files the task "
+        "mentions first, then decide. If it still cannot be done, call this again "
+        "and say what you found.",
+        is_error=True,
+    )
+
+
 def _report_outcome(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     """Tell Workbench how the task went, through its own API.
 
@@ -335,10 +403,26 @@ def _report_outcome(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     defined as "not assumed to have succeeded" — turning a lost HTTP call into
     a failed run would throw away the commits with it.
     """
+    if (refusal := _nothing_looked_at(context, "report_outcome")) is not None:
+        return refusal
+
     outcome = str(args.get("outcome") or "").strip()
     if outcome not in {"finished", "failed", "needs_replanning"}:
         return ToolResult(
             "`outcome` must be one of finished, failed, needs_replanning.", is_error=True
+        )
+
+    if outcome == "finished" and nothing_happened(context):
+        # Observed on the second real run: a batch of tool calls composed
+        # before any of them had run, an edit that failed because the file had
+        # not been read yet, a commit with nothing staged — and then
+        # `finished`, which marked the task done. Workbench noticed there were
+        # no commits and declined to push; nothing declined the claim itself.
+        return ToolResult(
+            "The worktree is exactly as you found it: nothing committed, nothing "
+            "changed. Do the work first, or report failed or needs_replanning and "
+            "say what stopped you.",
+            is_error=True,
         )
     payload = {"outcome": outcome, "detail": str(args.get("detail") or "") or None}
 
@@ -360,6 +444,9 @@ def _report_outcome(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
 
 
 def _submit_plan(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    if (refusal := _nothing_looked_at(context, "submit_plan")) is not None:
+        return refusal
+
     plan = str(args.get("plan") or "").strip()
     if not plan:
         return ToolResult("`plan` must not be empty.", is_error=True)
@@ -573,6 +660,7 @@ def dispatch(phase: RunPhase, name: str, args: dict[str, Any], context: ToolCont
             f"There is no tool called {name!r} here.{known} Available: {available}.",
             is_error=True,
         )
+    context.used.add(name)
     try:
         return TOOLS[name].handler(context, args)
     except Exception as exc:

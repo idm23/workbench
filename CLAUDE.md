@@ -131,6 +131,36 @@ Four things it does differently, each forced rather than chosen:
   spends a GPU and a wall clock; the rate-limit panel has nothing to say about it, which
   is the entire point of having it.
 
+**What a real small model does, and what the loop had to grow to survive it.**
+None of this came from design; all four came from the first runs against
+`qwen2.5-coder:7b` on the node, and each one had already produced a *wrong result
+that looked right* before it was fixed.
+
+- **It writes tool calls as prose.** Ollama's parser only recognises Qwen's
+  `<tool_call>` tags, so an untagged call arrives as message content — and a loop
+  that reads "no tool calls" as "finished" records the JSON as the run's summary
+  and reports success. The loop now recovers a call from text, keyed on the tool
+  name actually existing in that phase so a summary containing JSON is still a
+  summary.
+- **It composes whole scripts before seeing a result.** Read, edit, commit,
+  report, in one message — with the edit written against a file it had not read.
+  So a batch stops at the first failure: everything queued behind one is
+  reasoning from a result that never happened.
+- **It reaches a verdict without looking.** The very first run reported
+  `needs_replanning` — "the specification is too vague" — on turn one, having
+  read nothing. `report_outcome` and `submit_plan` now refuse to be the first
+  thing a run does.
+- **It claims to have finished when it has not.** A `finished` is refused while
+  the worktree is exactly as the run found it: no commit, no dirty file. Note
+  where this sits — the local backend distrusts its own model, rather than
+  Workbench changing what `finished` means for every backend. That question is
+  still open below.
+
+The last two are the same shape as the SDK-level distrust the Claude adapter
+already has (`stopped_early` invalidating a self-reported outcome), which is
+reassuring: a self-reported outcome is worth exactly as much as the evidence
+beside it.
+
 One consequence reached back into the vendor-neutral half. `prompts.execute_prompt` used
 to tell the agent to use the `workbench-outcome` skill, which is one backend's mechanism
 sitting in the module that exists to have none. It now states the *obligation* — report

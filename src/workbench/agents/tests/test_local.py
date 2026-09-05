@@ -12,6 +12,7 @@ look at their task or at their GPU.
 """
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -224,11 +225,17 @@ def test_the_plan_phase_is_sent_no_tool_that_writes(monkeypatch):
     assert "write_file" not in offered
 
 
-def test_submitting_a_plan_ends_the_planning_run(monkeypatch):
+def test_submitting_a_plan_ends_the_planning_run(monkeypatch, tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "app.py").write_text("x = 1\n")
     monkeypatch.setattr(
         backend_module,
         "_client",
         stub(
+            # A look first: `submit_plan` refuses to be the first thing a run
+            # does, because a plan written from the task title alone is not one.
+            sse(tool_call("read_file", {"path": "app.py"})),
             sse(
                 tool_call(
                     "submit_plan",
@@ -239,11 +246,11 @@ def test_submitting_a_plan_ends_the_planning_run(monkeypatch):
                         ],
                     },
                 )
-            )
+            ),
         ),
     )
 
-    outcome = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN)))[-1]
+    outcome = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))[-1]
 
     assert isinstance(outcome, AgentFinished)
     assert outcome.text == "Add the endpoint."
@@ -411,6 +418,155 @@ def test_a_conversation_waits_for_what_is_typed_next(monkeypatch):
     assert isinstance(outcome, AgentFinished)
     assert outcome.text == "covered"
     assert captured["payloads"][1]["messages"][-1]["content"] == "and what about tests?"
+
+
+def test_a_tool_call_written_as_text_is_recovered(monkeypatch, tmp_path):
+    """What the first real 7B run did on turn one. Ollama's parser only knows
+    Qwen's tagged form, so an untagged call arrives as prose — and a loop that
+    reads "no tool calls" as "finished" records the JSON as a summary and calls
+    the run a success."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "app.py").write_text("x = 1\n")
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(chunk(content='{"name": "read_file", "arguments": {"path": "app.py"}}')),
+            sse(chunk(content="It sets x to 1.")),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(worktree=worktree)))
+
+    assert events(items, RunEventKind.TOOL_USE)[0]["name"] == "read_file"
+    assert "x = 1" in events(items, RunEventKind.TOOL_RESULT)[0]["text"]
+    assert any("as text" in one["text"] for one in events(items, RunEventKind.NOTICE))
+    assert items[-1].text == "It sets x to 1."
+
+
+def test_the_tagged_form_is_recovered_too(monkeypatch, tmp_path):
+    """Qwen's own spelling, which reaches us untagged only when the server's
+    parser has already had a go at it."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "app.py").write_text("x = 1\n")
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(
+                chunk(
+                    content=(
+                        '<tool_call>{"name": "read_file", "parameters": '
+                        '{"path": "app.py"}}</tool_call>'
+                    )
+                )
+            ),
+            sse(chunk(content="done")),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(worktree=worktree)))
+
+    assert events(items, RunEventKind.TOOL_USE)[0]["input"] == {"path": "app.py"}
+
+
+def test_a_summary_that_merely_contains_json_is_still_a_summary(monkeypatch):
+    """The guard against over-recovering, and the reason it keys on the tool
+    name: a run that explains a JSON payload it wrote must be allowed to end."""
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(sse(chunk(content='I added a fixture: {"name": "widget", "arguments": 3}.'))),
+    )
+
+    outcome = drain(LocalBackend().run(a_request()))[-1]
+
+    assert isinstance(outcome, AgentFinished)
+    assert outcome.text.startswith("I added a fixture")
+
+
+def test_a_batch_stops_at_its_first_failure(monkeypatch, tmp_path):
+    """A small model composes whole scripts — read, edit, commit, report — in
+    one message, before any of them has run. The second real 7B run did that,
+    and its edit was written against a file it had not read yet. Everything
+    queued behind a failure is reasoning from a result that never happened."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "app.py").write_text("x = 1\n")
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(
+                chunk(
+                    tool_calls=[
+                        {
+                            "index": 0,
+                            "id": "c1",
+                            "function": {
+                                "name": "edit_file",
+                                "arguments": json.dumps(
+                                    {"path": "app.py", "old_text": "y = 2", "new_text": "y = 3"}
+                                ),
+                            },
+                        },
+                        {
+                            "index": 1,
+                            "id": "c2",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": json.dumps(
+                                    {"path": "never.py", "content": "should not happen"}
+                                ),
+                            },
+                        },
+                    ]
+                )
+            ),
+            sse(chunk(content="I will look first.")),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(worktree=worktree)))
+    results = events(items, RunEventKind.TOOL_RESULT)
+
+    assert "quote it exactly" in results[0]["text"]
+    assert "queued behind a call that failed" in results[1]["text"]
+    assert not (worktree / "never.py").exists()
+
+
+def test_a_finished_claim_that_changed_nothing_is_refused(monkeypatch, tmp_path):
+    """The run that prompted this reported finished with an empty worktree:
+    Workbench noticed there were no commits and declined to push, and nothing
+    declined the claim itself — the task went to done."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "app.py").write_text("x = 1\n")
+    for argv in (["init", "-q", "-b", "main"], ["add", "-A"]):
+        subprocess.run(["git", *argv], cwd=worktree, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "first"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(tool_call("read_file", {"path": "app.py"}, call_id="c1")),
+            sse(tool_call("report_outcome", {"outcome": "finished"}, call_id="c2")),
+            sse(chunk(content="Nothing needed doing.")),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(worktree=worktree)))
+    results = events(items, RunEventKind.TOOL_RESULT)
+
+    assert "exactly as you found it" in results[1]["text"]
+    assert results[1]["is_error"]
 
 
 def test_a_run_costs_nothing(monkeypatch):

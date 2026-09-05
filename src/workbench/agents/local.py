@@ -24,6 +24,7 @@ consequences worth knowing before reading on:
 
 import json
 import logging
+import subprocess
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -51,6 +52,8 @@ from workbench.agents.tools import (
     ToolResult,
     clip,
     dispatch,
+    nothing_happened,
+    tool_names_for,
     tools_for,
 )
 from workbench.config import (
@@ -74,6 +77,20 @@ MAX_TURNS_PLAN = 40
 MAX_TURNS_EXECUTE = 120
 MAX_TURNS_CONVERSATION = 300
 
+#: How many times a run that has done nothing is asked to carry on before it
+#: is allowed to end. Bounded rather than absent: a model that will not act is
+#: a model that will not act, and an unbounded nudge is a rate limit spent on
+#: asking the same question.
+MAX_NUDGES = 2
+
+#: What that push says. Deliberately concrete — "continue" alone gets another
+#: paragraph of intent, where naming the next physical act gets a tool call.
+_NUDGE = (
+    "You have not changed anything yet, so the task is not done. Do not describe "
+    "what you will do — do it now, with one tool call, starting from what the "
+    "last result actually said."
+)
+
 #: How many malformed tool calls in a row before this is not going to work.
 #: Small models emit unparseable arguments; they usually recover when told,
 #: and when they do not they do it forever.
@@ -88,6 +105,85 @@ TEXT_FLUSH_SECONDS = 2.0
 #: How long the credential probe waits. It runs on a page render path, so it
 #: has to fail fast when nothing is listening.
 PROBE_TIMEOUT_SECONDS = 5.0
+
+
+#: How a model writes a tool call when it does not use the tool-call channel.
+#: Qwen wraps them in these; Ollama's parser only recognises the tagged form,
+#: so an untagged one arrives as ordinary prose and this is what finds it.
+_TOOL_CALL_TAGS = ("<tool_call>", "</tool_call>", "```json", "```")
+
+
+def _tool_calls_from_text(text: str, allowed: set[str]) -> list[dict[str, Any]]:
+    """Tool calls a model wrote out as text instead of calling.
+
+    Small models do this constantly, and the first real run against one did it
+    on its first turn: a perfectly well-formed `report_outcome` call, in the
+    message content, which the loop then read as "no tool calls, so it must be
+    finished" and recorded as a summary. The reply was JSON; the run said
+    succeeded.
+
+    Recovering is cheap and the guard against over-recovering is `allowed`: the
+    object has to name a tool that actually exists in this phase. A summary
+    that happens to contain a JSON example is therefore still a summary, which
+    is the case that would otherwise turn a finished run into an endless one.
+    """
+    if not text or "{" not in text:
+        return []
+
+    stripped = text
+    for tag in _TOOL_CALL_TAGS:
+        stripped = stripped.replace(tag, " ")
+
+    decoder = json.JSONDecoder()
+    found: list[dict[str, Any]] = []
+    index = 0
+    while (start := stripped.find("{", index)) != -1:
+        try:
+            value, end = decoder.raw_decode(stripped, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        index = end
+        if not isinstance(value, dict):
+            continue
+        name = value.get("name")
+        if not isinstance(name, str) or name not in allowed:
+            continue
+        # `parameters` is the other spelling in the wild; both mean the same.
+        arguments = value.get("arguments")
+        if arguments is None:
+            arguments = value.get("parameters")
+        found.append(
+            {
+                "id": f"recovered_{len(found)}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments
+                    if isinstance(arguments, str)
+                    else json.dumps(arguments if isinstance(arguments, dict) else {}),
+                },
+            }
+        )
+    return found
+
+
+def _head_of(worktree: Path) -> str | None:
+    """The worktree's current commit, so a run can be asked afterwards whether
+    it did anything. None when it cannot be read — an unborn branch, a
+    directory that is not a checkout — which reads as "cannot say"."""
+    try:
+        found = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    return found.stdout.strip() if found.returncode == 0 else None
 
 
 def _client() -> httpx.AsyncClient:
@@ -126,11 +222,17 @@ def system_prompt(phase: RunPhase) -> str:
     common = (
         "You are a software engineer working autonomously inside a git worktree. "
         "You have tools; use them. Never claim to have read, changed, or run "
-        "something without actually calling the tool that does it.\n"
+        "something without actually calling the tool that does it, and never "
+        "write a tool call out as text in your reply — call it.\n"
+        "\n"
+        "Always look before you conclude. Read the files the task names, and the "
+        "ones around them, before deciding anything — including deciding that the "
+        "task cannot be done. A verdict reached without reading anything is a "
+        "guess, and this run has no one to correct it.\n"
         "\n"
         "Nobody is attached to this session. Do not ask questions — decide, say "
-        "which interpretation you chose, and carry on. Work in small steps: look "
-        "before you edit, and check your work after."
+        "which interpretation you chose, and carry on. Work in small steps, and "
+        "check what you changed afterwards."
     )
     if phase is RunPhase.PLAN:
         return (
@@ -150,10 +252,11 @@ def system_prompt(phase: RunPhase) -> str:
     return (
         f"{common}\n"
         "\n"
-        "Commit your work with run_command as you go; do not push and do not open "
-        "a pull request — Workbench does both once you finish. Call report_outcome "
-        "once, near the end. Then reply with your summary and no further tool "
-        "calls: that reply is what ends the run and what a reviewer reads."
+        "Work in this order: read what the task refers to, make the change, check "
+        "it, commit it with run_command, then call report_outcome once. Do not "
+        "push and do not open a pull request — Workbench does both once you "
+        "finish. After report_outcome, reply with your summary and no further "
+        "tool calls: that reply ends the run and is what a reviewer reads."
     )
 
 
@@ -429,6 +532,7 @@ class LocalBackend:
             run_id=request.run_id,
             task_id=request.task_id,
             project_id=request.project_id,
+            head_at_start=_head_of(request.worktree),
         )
 
         messages = _load_transcript(request.resume_token)
@@ -448,6 +552,7 @@ class LocalBackend:
         plan: PlanSubmitted | None = None
         failures = 0
         started = False
+        nudges = 0
 
         async with _client() as client:
             while turns < _max_turns(phase):
@@ -496,11 +601,55 @@ class LocalBackend:
 
                 started = True
                 model = reply.model or model
+
+                if not reply.tool_calls:
+                    # Before believing "no tool calls" means "done", check
+                    # whether it wrote one out as text. See
+                    # `_tool_calls_from_text` — this is the single most common
+                    # thing a small model gets wrong.
+                    recovered = _tool_calls_from_text(reply.text, set(tool_names_for(phase)))
+                    if recovered:
+                        yield AgentEvent(
+                            RunEventKind.NOTICE,
+                            {
+                                "text": (
+                                    f"The model wrote {len(recovered)} tool call(s) as text "
+                                    "rather than calling them; recovered."
+                                )
+                            },
+                        )
+                        reply.tool_calls = recovered
+                        reply.text = ""
+
                 messages.append(reply.as_message())
                 _save_transcript(token, messages)
 
                 if not reply.tool_calls:
                     answered = reply.text.strip()
+                    # A reply with no tool calls is how a capable model says it
+                    # is done. A small one says it the same way after a failed
+                    # call — narrating what it intends to do next instead of
+                    # doing it. If the worktree is untouched, nothing has been
+                    # done, so this is not an ending; it is a stall, and one
+                    # push is worth more than a run that reports nothing.
+                    if (
+                        phase is RunPhase.EXECUTE
+                        and nudges < MAX_NUDGES
+                        and nothing_happened(context)
+                    ):
+                        nudges += 1
+                        yield AgentEvent(
+                            RunEventKind.NOTICE,
+                            {
+                                "text": (
+                                    "The model stopped without changing anything; "
+                                    f"asking it to continue ({nudges}/{MAX_NUDGES})."
+                                )
+                            },
+                        )
+                        messages.append({"role": "user", "content": _NUDGE})
+                        _save_transcript(token, messages)
+                        continue
                     if phase is not RunPhase.CONVERSATION:
                         break
                     # A conversation waits for the next thing typed, which is
@@ -515,8 +664,31 @@ class LocalBackend:
                     _save_transcript(token, messages)
                     continue
 
+                # A small model composes whole scripts: read, edit, commit,
+                # report, all in one message, before any of them has run. The
+                # second real run did exactly that, and its edit was authored
+                # against a file it had not read yet. So the batch stops at the
+                # first failure — every call after one is reasoning from a
+                # result that never happened.
+                batch_failed = False
                 for call in reply.tool_calls:
                     name = str((call.get("function") or {}).get("name") or "")
+                    call_id_early = call.get("id") or f"call_{turns}"
+                    if batch_failed:
+                        skipped = (
+                            f"Not run: {name} was queued behind a call that failed. "
+                            "Look at that result and decide again."
+                        )
+                        yield AgentEvent(
+                            RunEventKind.TOOL_RESULT,
+                            {"id": call_id_early, "text": skipped, "is_error": True},
+                        )
+                        # Still answered, because a tool call with no matching
+                        # result is a malformed conversation to a strict server.
+                        messages.append(
+                            {"role": "tool", "tool_call_id": call_id_early, "content": skipped}
+                        )
+                        continue
                     arguments = _tool_arguments(call)
                     call_id = call.get("id") or f"call_{turns}"
 
@@ -561,6 +733,7 @@ class LocalBackend:
                     messages.append(
                         {"role": "tool", "tool_call_id": call_id, "content": outcome.text}
                     )
+                    batch_failed = outcome.is_error
 
                 _save_transcript(token, messages)
                 if plan is not None:

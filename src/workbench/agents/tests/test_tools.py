@@ -256,6 +256,8 @@ def test_an_unknown_tool_lists_what_there_is(context):
 
 
 def test_submitting_a_plan_ends_the_planning_run(context):
+    call(context, "read_file", RunPhase.PLAN, path="src/app.py")
+
     result = dispatch(
         RunPhase.PLAN,
         "submit_plan",
@@ -275,6 +277,8 @@ def test_submitting_a_plan_ends_the_planning_run(context):
 def test_a_malformed_subtask_is_dropped_rather_than_crashing(context):
     """Defensive despite the schema, for the same reason the Claude adapter
     is: a small model deviates from what it was told to send."""
+    call(context, "read_file", RunPhase.PLAN, path="src/app.py")
+
     result = dispatch(
         RunPhase.PLAN,
         "submit_plan",
@@ -286,7 +290,48 @@ def test_a_malformed_subtask_is_dropped_rather_than_crashing(context):
     assert result.subtasks == []
 
 
+def test_a_verdict_before_looking_at_anything_is_refused(context):
+    """What the first real run against a 7B did on turn one: reported
+    needs_replanning — "the specification is too vague" — having read no file,
+    listed no directory and run no command. That is a reflex, not a
+    judgement."""
+    result = call(context, "report_outcome", outcome="needs_replanning", detail="too vague")
+
+    assert result.is_error
+    assert "has not looked at anything" in result.text
+
+
+def test_a_verdict_after_looking_goes_through(context, monkeypatch):
+    """A task that genuinely cannot be done is still reportable — after one
+    look. The refusal is about order, not about the answer."""
+    sent: dict[str, Any] = {}
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, json, timeout: (
+            sent.update(json) or httpx.Response(204, request=httpx.Request("POST", url))
+        ),
+    )
+    call(context, "read_file", path="src/app.py")
+
+    result = call(context, "report_outcome", outcome="needs_replanning", detail="still vague")
+
+    assert not result.is_error
+    assert sent["outcome"] == "needs_replanning"
+
+
+def test_a_plan_submitted_before_looking_at_anything_is_refused(context):
+    """The same reflex in the other phase: a plan written from the task title
+    alone is not a plan."""
+    result = dispatch(RunPhase.PLAN, "submit_plan", {"plan": "Looks easy enough"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+
+
 def test_an_empty_plan_is_refused(context):
+    call(context, "read_file", RunPhase.PLAN, path="src/app.py")
+
     result = dispatch(RunPhase.PLAN, "submit_plan", {"plan": "  "}, context)
 
     assert isinstance(result, ToolResult)
@@ -304,6 +349,7 @@ def test_reporting_an_outcome_posts_to_workbenchs_own_api(context, monkeypatch):
         return httpx.Response(204, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx, "post", fake_post)
+    call(context, "read_file", path="src/app.py")
 
     result = call(context, "report_outcome", outcome="finished", detail="all done")
 
@@ -331,6 +377,7 @@ def test_an_unreachable_workbench_does_not_end_the_run(context, monkeypatch):
         raise httpx.ConnectError("nothing listening")
 
     monkeypatch.setattr(httpx, "post", refuse)
+    call(context, "read_file", path="src/app.py")
 
     result = call(context, "report_outcome", outcome="finished")
 
