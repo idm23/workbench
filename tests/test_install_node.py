@@ -93,9 +93,9 @@ def test_a_missing_driver_is_reported_with_the_command(monkeypatch, caplog):
 
 
 def test_the_lan_address_is_preferred_over_the_tailnet_one(monkeypatch):
-    """The hint printed at the end of an install. The LAN is the fast path and,
-    between the two machines this was built for, currently the only one that
-    resolves at all."""
+    """The hint printed at the end of an install. The LAN address is the direct
+    route between two machines in the same house; the tailnet one is the
+    fallback, and printing it here would send the head the long way round."""
 
     class Addresses:
         returncode = 0

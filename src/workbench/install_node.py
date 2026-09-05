@@ -254,10 +254,11 @@ Useful commands:
 def _lan_address() -> str | None:
     """This machine's address on the local network, for the line above.
 
-    The LAN first, because that is the path the head should prefer: it is the
-    fast one and, between these two machines today, the only one that resolves
-    at all. Best effort — a printed hint that is occasionally blank is fine,
-    where a wrong address confidently printed is not.
+    The LAN first, because that is the path the head should prefer: one hop
+    between two machines in the same house, where the tailnet address is a
+    working fallback rather than the route to take by default. Best effort — a
+    printed hint that is occasionally blank is fine, where a wrong address
+    confidently printed is not.
     """
     probe = subprocess.run(["hostname", "-I"], capture_output=True, text=True, check=False)
     for candidate in probe.stdout.split():
