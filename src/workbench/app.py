@@ -51,6 +51,7 @@ from workbench.git.worktrees import (
     local_checkout,
     sync_worktree,
 )
+from workbench.nodes import known_nodes
 from workbench.runs.activity import activity_by_task, pr_url_by_task
 from workbench.runs.lifecycle import (
     NotCancellable,
@@ -220,6 +221,7 @@ def show_services(request: Request, db: DbSession) -> HTMLResponse:
             **_shared(db),
             "services": running_services(db),
             "shells": active_shells(db),
+            "nodes": known_nodes(db),
             "systemd_available": systemd_available(),
         },
     )

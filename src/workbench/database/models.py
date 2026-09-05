@@ -551,3 +551,62 @@ class RunInput(Base):
 
     def __repr__(self) -> str:
         return f"<RunInput run={self.run_id} seq={self.seq}>"
+
+
+class Node(Base):
+    """Another machine that lends this one a capability.
+
+    A GPU serving a model today. The table is deliberately not named for that:
+    what makes a node interesting is that it can do something this machine
+    cannot, and the second kind of node will be a row here rather than a
+    schema change.
+
+    Rows are written by the node itself, at the end of its install and on
+    every deploy, rather than typed in here — which is what makes adding a
+    machine a matter of running the installer on that machine and nothing at
+    all on the head.
+    """
+
+    __tablename__ = "nodes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    #: The node's hostname, and the key it re-registers under. Unique, because
+    #: a node reinstalled or re-addressed is the same node — a second row for
+    #: it would leave the head probing an address nothing listens on.
+    name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+
+    #: Every way to reach it, **in preference order**: LAN first, tailnet
+    #: second, whatever comes third after that. A list rather than a
+    #: `lan_address`/`tailnet_address` pair because the order is the whole
+    #: point, and because a third path — a VPN, a name that starts resolving —
+    #: should not need a migration.
+    addresses: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: The address that answered last. Not a cache of the list above but an
+    #: answer to a different question: which of these actually works from
+    #: *here*. Tried first, so the common case is one connection rather than a
+    #: walk down the list.
+    last_good_address: Mapped[str | None] = mapped_column(String(200), default=None)
+
+    #: What this node can do, as plain strings — `inference` today. A list
+    #: rather than a role column: the interesting machines will have more than
+    #: one, and a head asking "who can do X" should not have to know what else
+    #: they do.
+    capabilities: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: What it is serving and what it is serving it with. Both nullable and
+    #: both descriptive — a head does not act on them, it shows them, which is
+    #: enough to answer "why is that node slow" without opening a terminal.
+    model: Mapped[str | None] = mapped_column(String(200), default=None)
+    gpu: Mapped[str | None] = mapped_column(String(200), default=None)
+
+    #: When it last said anything about itself. A node that stopped deploying
+    #: stops updating this, which is the only sign a head gets that one has
+    #: gone away — nothing here polls.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<Node {self.name} {self.capabilities}>"

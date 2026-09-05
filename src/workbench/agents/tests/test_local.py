@@ -97,9 +97,12 @@ def stub(*responses: bytes | Exception, captured: dict[str, Any] | None = None):
             raise body
         return httpx.Response(200, content=body)
 
-    def factory() -> httpx.AsyncClient:
+    def factory(base_url: str | None = None) -> httpx.AsyncClient:
+        # The signature mirrors `_client`, which now takes the endpoint the
+        # runner picked. The scripted server ignores it: what is under test is
+        # the loop, not the address.
         return httpx.AsyncClient(
-            base_url="http://model.test/v1", transport=httpx.MockTransport(handler)
+            base_url=base_url or "http://model.test/v1", transport=httpx.MockTransport(handler)
         )
 
     return factory

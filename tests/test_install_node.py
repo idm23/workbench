@@ -92,6 +92,82 @@ def test_a_missing_driver_is_reported_with_the_command(monkeypatch, caplog):
     assert "ubuntu-drivers install" in caplog.text
 
 
+def test_addresses_are_offered_lan_first(monkeypatch):
+    """The order is the message: the head probes this list top down, so the
+    route that costs one hop has to come before the one that costs WireGuard
+    and a coordination server."""
+
+    class Addresses:
+        returncode = 0
+        stdout = "100.120.132.42 192.168.1.155 172.17.0.1 fe80::1 127.0.0.1\n"
+        stderr = ""
+
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Addresses())
+
+    assert install_node.addresses() == ["192.168.1.155", "100.120.132.42"]
+
+
+def test_addresses_nothing_can_route_to_are_left_out(monkeypatch):
+    """Docker's bridge is reachable from nowhere but this machine, and a
+    link-local address is worse than useless to a head: it resolves, and then
+    it does not work."""
+
+    class Addresses:
+        returncode = 0
+        stdout = "172.17.0.1 169.254.3.4 127.0.0.1\n"
+        stderr = ""
+
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Addresses())
+
+    assert install_node.addresses() == []
+
+
+def test_the_head_flag_is_read_in_either_spelling(monkeypatch):
+    for argv in (
+        ["--role=node", "--head", "http://homebox-core:8787"],
+        ["--head=http://homebox-core:8787/", "--role=node"],
+    ):
+        monkeypatch.setattr(install_node.sys, "argv", ["install", *argv])
+        assert install_node._head_argument() == "http://homebox-core:8787"
+
+
+def test_no_head_flag_is_not_an_error(monkeypatch):
+    """A node installed without one still serves models. It is simply
+    invisible until someone points a head at it."""
+    monkeypatch.setattr(install_node.sys, "argv", ["install", "--role=node"])
+
+    assert install_node._head_argument() is None
+
+
+def test_an_unregistered_node_says_how_to_register(monkeypatch, caplog):
+    monkeypatch.delenv("WORKBENCH_HEAD_URL", raising=False)
+    monkeypatch.setattr(install_node, "head_url", lambda: None)
+
+    with caplog.at_level("INFO"):
+        install_node.register_with_head()
+
+    assert "--head" in caplog.text
+
+
+def test_a_head_that_is_off_does_not_fail_the_install(monkeypatch, caplog):
+    """The node still serves models, and its deploy timer tries again in five
+    minutes. What it must not do is stay quiet about having failed."""
+    monkeypatch.setattr(install_node, "head_url", lambda: "http://homebox-core:8787")
+    monkeypatch.setattr(install_node, "addresses", lambda: ["192.168.1.155"])
+    monkeypatch.setattr(install_node, "gpu_description", lambda: None)
+
+    def refuse(*args, **kwargs):
+        raise install_node.urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(install_node.urllib.request, "urlopen", refuse)
+
+    with caplog.at_level("INFO"):
+        install_node.register_with_head()
+
+    assert "could not register" in caplog.text
+    assert "try again" in caplog.text
+
+
 def test_the_lan_address_is_preferred_over_the_tailnet_one(monkeypatch):
     """The hint printed at the end of an install. The LAN address is the direct
     route between two machines in the same house; the tailnet one is the

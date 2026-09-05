@@ -52,6 +52,7 @@ from workbench.config import (
     deploy_branch,
     deploy_unit_name,
     deployment_root,
+    head_marker,
     host,
     instance,
     is_node,
@@ -407,6 +408,15 @@ def record_role(name: str, account: pwd.struct_passwd) -> None:
     marker.write_text(f"{name}\n", encoding="utf-8")
     os.chown(marker, account.pw_uid, account.pw_gid)
     info(f"this machine is a {name}")
+
+
+def record_head(url: str, account: pwd.struct_passwd) -> None:
+    """Write down which head this node reports to. See `record_role`."""
+    marker = head_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{url}\n", encoding="utf-8")
+    os.chown(marker, account.pw_uid, account.pw_gid)
+    info(f"reporting to the head at {url}")
 
 
 def _service_passwd() -> pwd.struct_passwd:

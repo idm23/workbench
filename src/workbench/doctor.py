@@ -49,7 +49,9 @@ from pathlib import Path
 import httpx
 
 from workbench.config import (
+    default_agent_backend,
     deployment_root,
+    head_url,
     instance,
     is_node,
     port,
@@ -866,6 +868,85 @@ def _serves_port(config: object, wanted: int) -> bool:
 INFERENCE_BACKEND = "local"
 
 
+def check_head() -> Check:
+    """Whether this node knows which head to report to.
+
+    Not a failure when it does not: a node with no head still serves models
+    perfectly well, it is simply invisible until someone points a head at it by
+    hand. Saying so is the whole job — an unregistered node is otherwise a
+    machine that works and that nothing uses.
+    """
+    key = "head"
+    title = "This node reports to a head"
+
+    configured = head_url()
+    if configured is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="No head configured, so nothing knows this node exists.",
+            fix="./install.sh --role=node --head http://<head>:8787",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=f"Registering with {configured} on every deploy.",
+    )
+
+
+def check_inference_node() -> Check:
+    """Whether any registered node will actually answer right now.
+
+    A head's version of the question a node asks about itself, and it exists
+    because of where the failure lands otherwise: the head is configured
+    perfectly, the node is registered, and every run fails at the first request
+    because the machine is asleep or has moved network. Probing here says so
+    before a run needs it.
+    """
+    from workbench.database.db import session_scope
+    from workbench.nodes import inference_url, known_nodes
+
+    key = "inference-node"
+    title = "A worker node is answering"
+
+    try:
+        with session_scope() as db:
+            known = len(known_nodes(db))
+            chosen = inference_url(db) if known else None
+    except Exception as error:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail=f"The node list could not be read: {error}",
+        )
+
+    if not known:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                "No worker nodes are registered, so runs use whatever "
+                "WORKBENCH_INFERENCE_URL points at on this machine."
+            ),
+            fix="./install.sh --role=node --head http://<this-machine>:8787   # on the node",
+        )
+    if chosen is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL,
+            detail=(
+                f"{known} node(s) are registered and none answered. Runs on the local "
+                "backend will fail until one does."
+            ),
+        )
+    return Check(key=key, title=title, state=CheckState.OK, detail=f"Serving from {chosen}.")
+
+
 def check_gpu() -> Check:
     """Whether this node has the thing it exists to lend, and what it is.
 
@@ -964,12 +1045,22 @@ NODE_CHECKS = (
     check_home_directory,
     check_gpu,
     check_inference_endpoint,
+    check_head,
 )
 
 
 def checks_for_this_machine() -> tuple[Callable[[], Check], ...]:
-    """Which list applies here. See `config.role()` for how that is decided."""
-    return NODE_CHECKS if is_node() else HEAD_CHECKS
+    """Which list applies here. See `config.role()` for how that is decided.
+
+    The head gains one question only when it is configured to use a local
+    model: whether a node will answer. Asking it unconditionally would put a
+    warning about worker nodes on every machine that has never wanted one.
+    """
+    if is_node():
+        return NODE_CHECKS
+    if default_agent_backend() == INFERENCE_BACKEND:
+        return (*HEAD_CHECKS, check_inference_node)
+    return HEAD_CHECKS
 
 
 #: The checks that need to reach the network, skipped by `--offline`.
@@ -978,7 +1069,7 @@ def checks_for_this_machine() -> tuple[Callable[[], Check], ...]:
 #: all is answerable from the filesystem, and it needs to be, because the page
 #: banner probes with `--offline` — a machine that cannot open pull requests
 #: should say so on every page, not only to whoever thinks to run the doctor.
-NETWORK_CHECKS = frozenset({"deploy-key", "github-token-works"})
+NETWORK_CHECKS = frozenset({"deploy-key", "github-token-works", "inference-node"})
 
 
 def run_checks(*, network: bool = True) -> list[Check]:

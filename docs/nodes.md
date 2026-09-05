@@ -25,7 +25,7 @@ On a fresh Ubuntu Server machine with an NVIDIA card:
 ```sh
 git clone https://github.com/idm23/workbench.git
 cd workbench
-./install.sh --role=node
+./install.sh --role=node --head http://homebox-core:8787
 ```
 
 That creates the `workbench` account, relocates the checkout to `/srv/workbench`, records
@@ -71,21 +71,28 @@ a new model.
 
 ## Pointing a head at it
 
-Today this is one line, by hand, on the head — in `/etc/workbench/env`:
+The `--head` above is the whole of it. The node POSTs its name, every address it can be
+reached on, what it can do, its model and its GPU to `/api/nodes` — at the end of the
+install and again on every deploy tick, so an address that changes arrives within five
+minutes rather than when someone remembers.
+
+Nothing is typed on the head. It picks a node when a run starts, trying the address that
+answered last and then the rest in order, and records which one worked.
+
+One thing still is a decision on the head: whether to use a local model at all.
 
 ```
 WORKBENCH_AGENT_BACKEND=local
-WORKBENCH_INFERENCE_URL=http://192.168.1.153:11434/v1
 ```
 
-Then `sudo systemctl restart workbench`. Per project, `projects.agent_backend` overrides
-the machine-wide default, so one project can use the node while everything else uses
-Claude.
+in `/etc/workbench/env`, then `sudo systemctl restart workbench`. Per project,
+`projects.agent_backend` overrides the machine-wide default, so one project can use the
+node while everything else uses Claude. `WORKBENCH_INFERENCE_URL` still works and still
+wins when set — it is how you point at a model server that is not a registered node.
 
-**Use the node's LAN address.** Head and node are one hop apart on the same home network,
-so that is the direct route; the tailnet works too and is the fallback, not the default.
-Nodes registering themselves — so the head learns each one's addresses and probes them in
-order — is the next slice of this work.
+**Addresses are offered LAN first.** Head and node are one hop apart on the same home
+network, so that is the direct route; the tailnet is the fallback, and the head finds out
+which is true by trying rather than by being told.
 
 ## Checking it
 
@@ -98,6 +105,9 @@ On the node:
 which asks the four questions that apply to a node — is this a proper deployment, does
 `$HOME` belong to the right account, is there a GPU, and does a model server answer with
 the right model loaded.
+
+On the head, the nodes it knows about are listed at `/services`, and the doctor gains a
+`A worker node is answering` check whenever this machine is configured for a local model.
 
 From the head, the same endpoint the backend will use:
 
@@ -120,6 +130,8 @@ journalctl -u ollama -f
 | The doctor says the model is not there | `ollama pull <model>` on the node, or set `WORKBENCH_LOCAL_MODEL` to one it has |
 | Everything works but is very slow | `nvidia-smi` during a run — if the model is on the CPU, the driver is missing or the model does not fit in VRAM |
 | A node stopped updating itself | `systemctl list-timers workbench-deploy.timer`, then `journalctl -u workbench-deploy -n 50` |
+| A node is missing from `/services` | It was installed without `--head`, or could not reach it — `journalctl -u workbench-deploy -n 50` on the node says which |
+| A node's `last seen` is hours old | Its deploy timer has stopped; the node re-registers on every tick, so a stale time means the timer, not the model server |
 
 ## The security note worth reading once
 

@@ -14,6 +14,7 @@ FastAPI publishes an OpenAPI schema for these at `/docs`, which is the fastest
 way to see what the shapes actually are.
 """
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from workbench.database.db import get_db
 from workbench.database.models import (
+    Node,
     Project,
     Run,
     RunOutcome,
@@ -32,6 +34,7 @@ from workbench.database.models import (
     TaskStatus,
 )
 from workbench.git.worktrees import local_checkout
+from workbench.nodes import Registration, register
 from workbench.runs.store import report_outcome
 from workbench.tasks import (
     TaskNode,
@@ -90,6 +93,36 @@ class SubtaskIn(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     body: str | None = None
     ready_to_execute: bool = False
+
+
+class NodeIn(BaseModel):
+    """What a worker node says about itself when it registers.
+
+    Sent by the node at the end of its install and on every deploy, which is
+    what makes adding a machine a matter of running the installer on that
+    machine and nothing at all here.
+
+    `addresses` is ordered and the order is meaningful: LAN first, tailnet
+    after. The head probes down the list rather than trusting any of it —
+    which route works is a property of where the asking happens.
+    """
+
+    name: str = Field(min_length=1, max_length=100)
+    addresses: list[str] = Field(min_length=1)
+    capabilities: list[str] = Field(min_length=1)
+    model: str | None = None
+    gpu: str | None = None
+
+
+class NodeOut(BaseModel):
+    id: int
+    name: str
+    addresses: list[str]
+    last_good_address: str | None
+    capabilities: list[str]
+    model: str | None
+    gpu: str | None
+    last_seen_at: datetime | None
 
 
 class OutcomeIn(BaseModel):
@@ -244,6 +277,33 @@ def update_task(db: DbSession, task_id: int, patch: TaskPatch) -> TaskOut:
 def remove_task(db: DbSession, task_id: int) -> None:
     """Delete a task and everything under it, worktrees included."""
     delete_task(db, _task_or_404(db, task_id))
+
+
+@router.get("/nodes", response_model=list[NodeOut])
+def list_nodes(db: DbSession) -> list[Node]:
+    """Every machine that has told this one it exists."""
+    return list(db.execute(select(Node).order_by(Node.name)).scalars().all())
+
+
+@router.post("/nodes", response_model=NodeOut, status_code=status.HTTP_200_OK)
+def register_node(db: DbSession, incoming: NodeIn) -> Node:
+    """A node registering, or re-registering, itself.
+
+    Idempotent and keyed on the name, so the node's own deploy timer keeps this
+    fresh: an address that changed arrives on the next tick rather than the next
+    time somebody remembers. `200` rather than `201` for the same reason — the
+    common call is the tenth one, not the first.
+    """
+    return register(
+        db,
+        Registration(
+            name=incoming.name,
+            addresses=incoming.addresses,
+            capabilities=incoming.capabilities,
+            model=incoming.model,
+            gpu=incoming.gpu,
+        ),
+    )
 
 
 @router.post("/runs/{run_id}/outcome", status_code=status.HTTP_204_NO_CONTENT)
