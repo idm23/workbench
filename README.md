@@ -9,10 +9,10 @@ project, and tasks worked either by hand or by a Claude agent, with a written su
 tree of tasks you can add, complete, and delete from a phone. A project can be cloned to the server,
 and each task can be given its own git worktree.
 
-Agents exist: `workbench/agents/` drives Claude behind a vendor-neutral seam, a run is carried out
-by its own systemd unit, and a run's page streams output live and replays whatever a sleeping phone
-missed. The service runs as a dedicated unprivileged account that owns nothing but its own
-deployment under `/srv`.
+Agents exist: `workbench/agents/` drives Claude — or a model served on your own GPU — behind a
+vendor-neutral seam, a run is carried out by its own systemd unit, and a run's page streams output
+live and replays whatever a sleeping phone missed. The service runs as a dedicated unprivileged
+account that owns nothing but its own deployment under `/srv`.
 
 **No agent has yet completed a run on the real server.** Signing one in needs a browser login that
 no installer can perform, so `./install.sh` finishes by saying so with the exact command, and
@@ -62,6 +62,7 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `install.sh` | The only entry point — a ~12-line bootstrap that installs `uv` and hands off. |
 | `src/workbench/install.py` | The installer proper. Python, so it shares config with the app. |
 | `src/workbench/app.py` | The web application: routes and templates. |
+| `src/workbench/agents/` | The backends behind one seam: `claude.py`, and `local.py` for your own GPU. |
 | `src/workbench/database/` | `models.py` (the schema) and `db.py` (engine and sessions). |
 | `src/workbench/git/` | `github.py`, `worktrees.py`, `revision.py` — everything that shells to git. |
 | `src/workbench/tasks/` | `tree.py` (the shape a page renders) and `store.py` (every write). |
