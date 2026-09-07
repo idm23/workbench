@@ -20,9 +20,20 @@ from workbench.tasks.store import (
     set_status,
     unarchive_task,
 )
-from workbench.tasks.tree import TaskNode, build_tree, flatten, would_create_cycle
+from workbench.tasks.tree import (
+    ReadyTask,
+    ReviewTask,
+    TaskNode,
+    build_tree,
+    flatten,
+    ready_for_review,
+    ready_to_execute,
+    would_create_cycle,
+)
 
 __all__ = [
+    "ReadyTask",
+    "ReviewTask",
     "TaskNode",
     "TaskNotFound",
     "WrongProject",
@@ -33,6 +44,8 @@ __all__ = [
     "create_task",
     "delete_task",
     "flatten",
+    "ready_for_review",
+    "ready_to_execute",
     "set_status",
     "unarchive_task",
     "would_create_cycle",

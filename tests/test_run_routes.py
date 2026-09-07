@@ -382,7 +382,11 @@ def test_approving_a_decomposed_plan_creates_its_subtasks_instead(client, sessio
     assert children[1].entry_phase is None
 
 
-def test_a_decomposed_subtask_defaults_its_origin_to_the_parent(client, session, executor):
+def test_a_decomposed_subtask_defaults_its_origin_to_staging(client, session, executor):
+    """Not the parent's own branch: the usual reason to decompose is a
+    handful of independent pieces that should each land in staging on their
+    own, and the parent's branch may never even be pushed (a plan that only
+    decomposes never publishes)."""
     task = a_task(session)
     task.branch = "workbench/task-1-write-the-runner"
     session.commit()
@@ -393,7 +397,7 @@ def test_a_decomposed_subtask_defaults_its_origin_to_the_parent(client, session,
     client.post(f"/runs/{run.id}/approve")
 
     child = session.query(Task).filter_by(title="x").one()
-    assert child.origin_ref == f"task:{task.id}"
+    assert child.origin_ref == "staging"
 
 
 def test_approving_a_run_that_is_not_awaiting_review_is_refused(client, session, executor):
@@ -547,29 +551,33 @@ def test_a_parent_task_shows_a_progress_meter(client, session, cloned):
     assert 'aria-valuenow="100"' in page
 
 
-def test_a_short_task_body_is_shown_in_full(client, session, cloned):
+def test_a_task_body_is_rendered_as_markdown(client, session, cloned):
+    """The tree shows the same rendered Markdown a run's own page does —
+    it used to show the raw `##` because the preview it displayed was a
+    character-truncated fragment that could not safely be rendered."""
     task = a_task(session)
-    task.body = "A short note."
+    task.body = "## A heading\n\nWith `code` in it."
     session.commit()
 
     page = client.get(f"/projects/{task.project_id}").text
 
-    assert "A short note." in page
-    assert "<details" not in page
+    assert "<h2>A heading</h2>" in page
+    assert "<code>code</code>" in page
+    assert "## A heading" not in page
 
 
-def test_a_long_task_body_is_folded_behind_a_toggle(client, session, cloned):
-    """The "more"/"less" affordance itself is CSS `content`, invisible to a
-    server-rendered response — what the page actually has to emit is the
-    `<details>`/`<summary>` pair a browser turns into that toggle."""
+def test_a_task_body_is_rendered_whole_rather_than_split(client, session, cloned):
+    """Folding is CSS clipping over the entire rendered document, so even a
+    long body arrives complete — nothing is cut at a character offset, which
+    is what used to hand the renderer two invalid halves."""
     task = a_task(session)
-    task.body = "word " * 100
+    task.body = "word " * 100  # 500 characters, far past the old 220 cut
     session.commit()
 
     page = client.get(f"/projects/{task.project_id}").text
 
-    assert '<details class="task-note">' in page
-    assert "<summary>" in page
+    assert '<details class="task-note foldable">' in page
+    assert page.count("word") >= 100
 
 
 def test_a_runnable_task_offers_an_origin_picker(client, session, cloned):
@@ -664,6 +672,29 @@ def test_a_plan_awaiting_review_offers_to_approve(client, session, cloned):
     assert "Discard" in page
 
 
+def test_a_plan_already_carried_out_stops_offering_to_be_approved(client, session, cloned):
+    """The symptom of a superseded run still driving the row: the tree went
+    on showing a plan's Execute button after a later run had done the work,
+    so pressing it started another agent against finished work and nothing
+    on the page ever changed."""
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = _plan_awaiting_review(session, task=task)
+    finish_run(
+        session,
+        create_run(session, task, RunPhase.EXECUTE, backend="claude"),
+        RunStatus.SUCCEEDED,
+        summary="Did the work.",
+    )
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/runs/{run.id}/approve" not in page
+    assert ">Discard<" not in page
+
+
 def test_a_decomposing_plan_says_how_many_subtasks(client, session, cloned):
     task = a_task(session)
     run = _plan_awaiting_review(
@@ -735,6 +766,46 @@ def test_the_most_recent_pull_request_wins_over_an_earlier_run(client, session, 
     assert 'href="https://github.com/idm23/workbench/pull/1"' not in page
 
 
+def test_a_task_with_an_open_pull_request_offers_no_new_run(client, session, cloned):
+    """The button `test_a_task_with_an_opened_pull_request_links_to_it` doesn't
+    check: once a run has opened a PR, the branch is out for review and a
+    fresh run against it would be redundant, not helpful."""
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, run, RunStatus.SUCCEEDED, summary="done")
+    run.pr_url = "https://github.com/idm23/workbench/pull/9"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert ">View PR<" in page
+    assert f'action="/tasks/{task.id}/runs"' not in page
+
+
+def test_reopening_a_task_with_a_pull_request_still_offers_no_new_run(client, session, cloned):
+    """The status tick toggles `open`<->`done`, but `pr_url` is never cleared
+    by that — so the `done`/`cancelled` guard alone would let the button
+    reappear next to a branch that already has an open PR. This is the actual
+    bug the `pr_url` check on the button closes off."""
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    run = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, run, RunStatus.SUCCEEDED, summary="done")
+    run.pr_url = "https://github.com/idm23/workbench/pull/9"
+    task.status = TaskStatus.DONE
+    session.commit()
+    task.status = TaskStatus.OPEN
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert ">View PR<" in page
+    assert f'action="/tasks/{task.id}/runs"' not in page
+
+
 def test_a_done_task_is_not_offered_another_run(client, session, cloned):
     """The project's other seeded task is still open, so a Plan button
     remains on the page — just not on this one."""
@@ -757,8 +828,122 @@ def test_an_execute_ready_task_offers_to_execute_first(client, session, cloned):
 
     page = client.get(f"/projects/{task.project_id}").text
 
-    assert page.count(">Execute<") == 1
+    # Once in the "Ready to execute" summary at the top of the page, and once
+    # more in its own row further down — see the `ready_to_execute` tests
+    # below for the summary in isolation.
+    assert page.count(">Execute<") == 2
     assert page.count(">Plan<") == 1  # the project's other, unplanned task
+
+
+# --- The "Ready to execute" summary at the top of the page ------------------
+
+
+def test_ready_to_execute_shows_a_plan_awaiting_review(client, session, cloned):
+    task = a_task(session)
+    run = _plan_awaiting_review(session, task=task)
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "Ready to execute" in page
+    assert "Here is the plan." in page
+    # Once in the summary, and once more in the task's own row further down.
+    assert page.count(f'action="/runs/{run.id}/approve"') == 2
+
+
+def test_ready_to_execute_shows_a_decomposing_plans_subtask_count(client, session, cloned):
+    task = a_task(session)
+    _plan_awaiting_review(
+        session, task=task, proposed_subtasks={"subtasks": [{"title": "a"}, {"title": "b"}]}
+    )
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "Ready to execute" in page
+    assert page.count("Approve (2 subtasks)") == 2  # summary, and the task's own row
+
+
+def test_ready_to_execute_includes_an_execute_ready_task(client, session, cloned):
+    task = a_task(session)
+    task.entry_phase = RunPhase.EXECUTE
+    task.body = "Rename the field and update its callers."
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "Ready to execute" in page
+    assert "Rename the field and update its callers." in page
+    assert page.count(f'action="/tasks/{task.id}/runs"') == 2  # summary, and its own row
+
+
+def test_a_plan_on_the_tree_is_rendered_as_markdown(client, session, cloned):
+    """The actual bug this fixed: the Ready-to-execute panel is where a plan
+    is most often read, and it was the one place still printing raw `##`
+    while the run's own page rendered it."""
+    task = a_task(session)
+    run = _plan_awaiting_review(session, task=task)
+    run.plan = "## Context\n\nSomething with `code`."
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "<h2>Context</h2>" in page
+    assert "<code>code</code>" in page
+    assert "## Context" not in page
+
+
+def test_a_long_plan_is_folded_whole_rather_than_split(client, session, cloned):
+    task = a_task(session)
+    run = _plan_awaiting_review(session, task=task)
+    run.plan = "word " * 100
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert '<details class="task-note foldable">' in page
+    assert page.count("word") >= 100
+
+
+def test_ready_to_execute_omits_a_task_still_needing_its_first_plan(client, session, cloned):
+    """An ordinary, never-run task is ready to be *planned*, not executed —
+    it keeps its "Plan" button in the tree but does not jump the queue."""
+    page = client.get(f"/projects/{a_task(session).project_id}").text
+
+    assert "Ready to execute" not in page
+
+
+def test_ready_to_execute_omits_a_task_that_is_already_running(client, session, cloned, executor):
+    task = a_task(session)
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "plan"})
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "Ready to execute" not in page
+
+
+def test_ready_to_execute_omits_a_task_with_an_open_pull_request(client, session, cloned):
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    task.entry_phase = RunPhase.EXECUTE
+    run = create_run(session, task, RunPhase.EXECUTE, backend="claude")
+    finish_run(session, run, RunStatus.SUCCEEDED, summary="done")
+    run.pr_url = "https://github.com/idm23/workbench/pull/3"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "Ready to execute" not in page
+
+
+def test_ready_to_execute_omits_a_done_task(client, session, cloned):
+    task = a_task(session)
+    task.entry_phase = RunPhase.EXECUTE
+    task.status = TaskStatus.DONE
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert "Ready to execute" not in page
 
 
 # --- Typing into a run while it goes ----------------------------------------
