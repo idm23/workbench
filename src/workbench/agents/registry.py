@@ -47,11 +47,21 @@ def _claude() -> Backend:
     return ClaudeBackend()
 
 
+def _local() -> Backend:
+    # Lazy for the same reason `_claude` is, though this one imports no SDK:
+    # the rule is about the shape of the registry, not about which module
+    # happens to be expensive today.
+    from workbench.agents.local import LocalBackend
+
+    return LocalBackend()
+
+
 #: Name to factory. A module-level constant rather than a registry something
 #: mutates at import time — a backend that only exists once some other module
 #: has been imported is a backend that works in one process and not another.
 _FACTORIES: dict[str, Callable[[], Backend]] = {
     "claude": _claude,
+    "local": _local,
 }
 
 

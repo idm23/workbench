@@ -84,6 +84,17 @@ def a_request(**overrides: Any) -> AgentRequest:
     return AgentRequest(**(fields | overrides))
 
 
+def sent(prompt: str) -> str:
+    """What an execute request actually puts on the wire.
+
+    Workbench's prompt plus the one sentence this backend appends naming its
+    own outcome mechanism. The tests below are about turn structure rather
+    than wording, so they compose it rather than restating it; the suffix
+    itself is pinned by its own tests further down.
+    """
+    return backend_module.prompt_for(a_request(prompt=prompt))
+
+
 def stub_client(turns: list[list[Any]], captured: dict[str, Any] | None = None):
     """Replace `ClaudeSDKClient` with a fake that stays connected across
     turns, answering each `query()` with the next canned list of messages —
@@ -425,7 +436,7 @@ def test_no_input_channel_sends_only_the_initial_prompt(monkeypatch):
 
     drain(ClaudeBackend().run(a_request(prompt="Do the thing")))
 
-    assert captured["prompts"] == ["Do the thing"]
+    assert captured["prompts"] == [sent("Do the thing")]
 
 
 def test_typed_input_becomes_a_second_turn_on_the_same_connection(monkeypatch):
@@ -446,7 +457,7 @@ def test_typed_input_becomes_a_second_turn_on_the_same_connection(monkeypatch):
 
     drain(ClaudeBackend().run(a_request(prompt="Do the thing", inputs=one_more_message())))
 
-    assert captured["prompts"] == ["Do the thing", "a follow-up"]
+    assert captured["prompts"] == [sent("Do the thing"), "a follow-up"]
 
 
 def test_an_input_channel_with_nothing_new_still_sends_only_the_initial_prompt(monkeypatch):
@@ -459,7 +470,7 @@ def test_an_input_channel_with_nothing_new_still_sends_only_the_initial_prompt(m
 
     drain(ClaudeBackend().run(a_request(prompt="Do the thing", inputs=nothing_more())))
 
-    assert captured["prompts"] == ["Do the thing"]
+    assert captured["prompts"] == [sent("Do the thing")]
 
 
 def test_a_second_turns_events_are_translated_too(monkeypatch):
@@ -535,7 +546,20 @@ def test_a_failed_turn_is_not_followed_by_another(monkeypatch):
     )[-1]
 
     assert isinstance(outcome, AgentFailed)
-    assert captured["prompts"] == ["Do the thing"]
+    assert captured["prompts"] == [sent("Do the thing")]
+
+
+def test_the_execute_prompt_names_this_backends_outcome_mechanism():
+    """`prompts.py` states the obligation and deliberately not the mechanism.
+    Naming the skill is this backend's half of that, and it matters: a skill
+    that is loaded but never mentioned is one the agent routinely ignores."""
+    assert "workbench-outcome" in backend_module.prompt_for(a_request(phase=RunPhase.EXECUTE))
+
+
+def test_no_other_phase_is_told_about_the_outcome_skill():
+    """Plan mode cannot call it, and a conversation has no task to report on."""
+    for phase in (RunPhase.PLAN, RunPhase.CONVERSATION):
+        assert backend_module.prompt_for(a_request(phase=phase)) == "Do the thing"
 
 
 def test_execute_loads_the_outcome_skill(monkeypatch):

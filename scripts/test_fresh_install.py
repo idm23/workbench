@@ -18,6 +18,11 @@ provide, so this same script can gate CI.
 Caveat: a plain container has no systemd, so install.sh skips the service step
 here. This exercises everything up to and including a working app; the systemd
 leg is covered by installing on the real server.
+
+It finishes by installing a *node* in the same container — the second thing
+this repo can make of a machine — which has neither systemd nor a GPU to work
+with, and so proves the half of that install which is about saying what it
+could not do.
 """
 
 import argparse
@@ -129,6 +134,12 @@ DEPLOYMENT = "/srv/workbench"
 
 #: The account the deployment ends up owned by, and served as.
 ACCOUNT = "workbench"
+
+#: The node install, run as a second instance in the same container. Its own
+#: account, directory and unit names fall out of WORKBENCH_INSTANCE, which is
+#: the same isolation staging uses to sit beside production on one machine.
+NODE_INSTALL_LOG = "/tmp/install-node.log"
+NODE_DEPLOYMENT = "/srv/workbench-node"
 
 
 def _expect(container: str, shell: str, complaint: str) -> None:
@@ -295,6 +306,59 @@ def run_test(image: str, from_github: bool, container: str) -> None:
     )
     if survived != 0:
         raise TestFailureError("the user created before the re-install is gone")
+
+    install_a_node(container)
+
+
+def install_a_node(container: str) -> None:
+    """The other half of the Jake test: `./install.sh --role=node`.
+
+    In the same container as a second deployment — `WORKBENCH_INSTANCE=node`
+    gives it its own account, its own `/srv` directory and its own unit names,
+    which is the same isolation staging already relies on. A second container
+    would be tidier and costs a full apt install to say the same thing.
+
+    What is proved here is what a container *can* prove: that the node path
+    runs to completion on a machine with no systemd and no GPU, records what it
+    is, skips the database it does not have, and names both of the things it
+    could not do. The unit selection itself is a unit test — `tests/test_roles.py`
+    — because installing units needs the systemd this container has not got.
+    """
+    step("Installing a node in the same container, as a second deployment")
+    docker(
+        "exec",
+        container,
+        "bash",
+        "-c",
+        f"set -o pipefail; cd {TARGET} && WORKBENCH_INSTANCE=node ./install.sh --role=node "
+        f"2>&1 | tee {NODE_INSTALL_LOG}",
+    )
+    output = docker_quiet("exec", container, "cat", NODE_INSTALL_LOG)
+
+    step("Confirming the node knows what it is")
+    _expect(
+        container,
+        f"grep -qx node {NODE_DEPLOYMENT}/data/role",
+        "the node install did not record its role",
+    )
+
+    step("Confirming the node did not migrate a database it has no use for")
+    _expect(
+        container,
+        f"test ! -f {NODE_DEPLOYMENT}/data/workbench.db",
+        "the node install created a database",
+    )
+
+    step("Confirming the node named what it could not do here")
+    # The same bargain the head install keeps, in the two places a node has to
+    # keep it: a driver install needs a reboot, and a model server needs a
+    # service manager. Neither is automatable in a container, so both have to
+    # be *said* — which is exactly the assertion that stops them quietly
+    # slipping out of the output later.
+    if "ubuntu-drivers install" not in output:
+        raise TestFailureError("the node install did not say how to get a GPU driver working")
+    if "Skipping the model server" not in output:
+        raise TestFailureError("the node install did not say the model server was skipped")
 
 
 def main() -> int:

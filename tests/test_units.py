@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from workbench import install
+from workbench import install, install_core
 from workbench.config import (
     agent_git_identity,
     agent_home,
@@ -605,7 +605,7 @@ def test_the_install_points_at_the_deployments_own_interpreter(monkeypatch, tmp_
     monkeypatch.setattr("workbench.install.repo_root", lambda: tmp_path)
 
     with caplog.at_level("INFO"):
-        install.report_success()
+        install_core.report_success()
 
     assert f"{tmp_path}/.venv/bin/python -m workbench.doctor" in caplog.text
     assert sys.executable not in caplog.text

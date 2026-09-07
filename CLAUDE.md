@@ -1,8 +1,8 @@
 # Workbench
 
 A personal tool for managing software projects on a home server. Lists projects,
-shows a todo tree per project, and lets a task be worked on either by hand or by a
-Claude agent — with a written summary either way.
+shows a todo tree per project, and lets a task be worked on by hand, by Claude, or by a
+model running on a GPU in the next room — with a written summary either way.
 
 Runs on an always-on Ubuntu box, reachable only over Tailscale.
 
@@ -24,14 +24,25 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > conversation path are all proven against the machine rather than a stub. What the first
 > real use found was not any of those: it was the credential expiring on a clock nothing
 > was watching, with every page still reporting a healthy login. See Deployment below.
+> **There are now two backends and two kinds of machine.** `agents/local.py` drives a
+> model served over a plain OpenAI-compatible endpoint, which is the first thing to test
+> the swappability the seam was built for — it imports no SDK, so the rule that keeps
+> Claude behind an adapter constrains it too. And `./install.sh --role=node` turns a
+> second machine into a worker that serves that model, registers itself, and keeps itself
+> updated. What running a real 7B first found was not the plumbing either: it was that a
+> small model writes its tool calls as prose, claims to have finished things it never
+> started, and reaches verdicts without reading anything. See Machines below.
 > See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
 
 A fresh Ubuntu Server 26.04 machine, a `git clone`, and `./install.sh` must produce a
-running service. Nothing else. If a step is needed, it belongs in that script rather
-than in a document — the bar is that this repo could be handed to someone with a spare
-machine and work without a conversation.
+running service. Nothing else. **And the same clone with `--role=node` must produce a
+node**, so the promise scales the way the hardware does: hand someone N machines, one
+becomes the head and the other N-1 become nodes, from this repository and one command
+each. If a step is needed, it belongs in that script rather than in a document — the bar
+is that this repo could be handed to someone with a spare machine and work without a
+conversation.
 
 Three consequences that shaped real decisions:
 
@@ -107,6 +118,88 @@ Workbench asks for and accepts back, `registry.py` turns a backend name into an
 implementation, and `agents/claude.py` is the only module in the repository permitted to
 import an agent SDK. It translates into `RunEventKind` and returns an opaque resume token,
 so nothing above it can tell which vendor answered.
+
+**A second backend now exists, which is the first evidence any of this works.**
+`agents/local.py` drives a model served on this machine or this network through a plain
+OpenAI-compatible `/chat/completions` — Ollama, `llama-server` and vLLM all speak it, so
+which one is running is a URL rather than a code path. The telling detail is what it did
+*not* need: no change to `test_seam.py`, because it imports `httpx` and no vendor SDK at
+all. The seam constrains it exactly as it constrains the runner.
+
+Four things it does differently, each forced rather than chosen:
+
+- **There is no agent on the other end, only a model**, so Workbench supplies the tools
+  (`agents/tools.py`), drives the turn loop, and decides when the run is over. That is the
+  real cost of the backend and also its one advantage: what the agent can do is a list in
+  one file rather than a vendor's decision.
+- **The plan phase is read-only by absence.** Claude gets that from the SDK's plan mode;
+  here the tools that write are simply not in the list sent for a plan run, and `dispatch`
+  refuses one by name even if the model invents it. There is nothing to bypass, which
+  makes it the stronger of the two guarantees.
+- **The transcript belongs to Workbench**, written under `data/sessions/` and named by the
+  opaque resume token, because a local endpoint keeps no session to resume.
+- **A run bills nothing**, so `total_cost_usd` stays null rather than becoming a zero. It
+  spends a GPU and a wall clock; the rate-limit panel has nothing to say about it, which
+  is the entire point of having it.
+
+**What a real small model does, and what the loop had to grow to survive it.**
+None of this came from design; all four came from the first runs against
+`qwen2.5-coder:7b` on the node, and each one had already produced a *wrong result
+that looked right* before it was fixed.
+
+- **It writes tool calls as prose.** Ollama's parser only recognises Qwen's
+  `<tool_call>` tags, so an untagged call arrives as message content — and a loop
+  that reads "no tool calls" as "finished" records the JSON as the run's summary
+  and reports success. The loop now recovers a call from text, keyed on the tool
+  name actually existing in that phase so a summary containing JSON is still a
+  summary.
+- **It composes whole scripts before seeing a result.** Read, edit, commit,
+  report, in one message — with the edit written against a file it had not read.
+  So a batch stops at the first failure: everything queued behind one is
+  reasoning from a result that never happened.
+- **It reaches a verdict without looking.** The very first run reported
+  `needs_replanning` — "the specification is too vague" — on turn one, having
+  read nothing. `report_outcome` and `submit_plan` now refuse to be the first
+  thing a run does.
+- **It claims to have finished when it has not.** A `finished` is refused while
+  the worktree is exactly as the run found it: no commit, no dirty file. Note
+  where this sits — the local backend distrusts its own model, rather than
+  Workbench changing what `finished` means for every backend. That question is
+  still open below.
+
+The last two are the same shape as the SDK-level distrust the Claude adapter
+already has (`stopped_early` invalidating a self-reported outcome), which is
+reassuring: a self-reported outcome is worth exactly as much as the evidence
+beside it.
+
+**And the model itself is a decision with evidence, not a benchmark.** Three
+were measured on the node, on the same small task, through
+`scripts/test_local_model.py`:
+
+| model | weights | result |
+|---|---|---|
+| `qwen2.5-coder:7b` | 4.7 GB | never used the tool channel; wrote every call as prose |
+| `qwen3:8b` | 5.2 GB | completed it, 112s over 8 turns |
+| `gpt-oss:20b` | 13 GB | completed it, 53s over 10 turns |
+
+The one that looks best on paper is the one that cannot do it at all. The
+fastest is a mixture of experts that activates a fraction of itself per token,
+so it beats a model a quarter its size on a card that cannot hold either
+comfortably. Neither fact is visible from a model card, which is the argument
+for the harness existing: one small task against a real endpoint, with every
+check reading the worktree rather than the model's own summary, because those
+two disagree more often than seems possible.
+
+`qwen3:8b` is the default for fitting rather than for winning — 13 GB of
+weights is a bet on a machine nobody has described yet, and a node with the
+memory can say so through `WORKBENCH_LOCAL_MODEL`.
+
+One consequence reached back into the vendor-neutral half. `prompts.execute_prompt` used
+to tell the agent to use the `workbench-outcome` skill, which is one backend's mechanism
+sitting in the module that exists to have none. It now states the *obligation* — report
+finished, failed, or needs re-planning — and each backend appends the sentence saying how:
+a skill for Claude, a `report_outcome` tool for the local loop. Both reach the same
+`POST /api/runs/{id}/outcome`, so nothing above the seam learns there were two ways.
 
 The rule is enforced rather than documented: `agents/tests/test_seam.py` parses every
 module in the package and fails if a vendor SDK is imported anywhere else. That matters
@@ -239,6 +332,98 @@ is Docker Compose for self-contained services, but Workbench's job is to manipul
 host — worktrees, build tools, `systemctl` — so it runs natively. The full rationale is
 in `docs/server-conventions.md`.
 
+## Machines: a head and its nodes
+
+One repository, two things it can make of a machine. A **head** runs Workbench — the app,
+the database, the worktrees, the runs. A **node** lends the head something it does not
+have; today that is a GPU serving an OpenAI-compatible endpoint for `agents/local.py`,
+and the shape is meant to hold when the next machine is good at something else.
+
+A node runs no web app, holds no database, and executes no runs. It answers
+`/v1/chat/completions` and keeps itself up to date, and that is deliberately the whole of
+it: the smaller the node's job, the less there is to go wrong on a machine nobody is
+looking at.
+
+**The role is one recorded fact, and three things read it.** `install_node` writes
+`data/role`, `config.role()` reads it, and `install.units()`, `deploy.rebuild_and_restart()`
+and `doctor.checks_for_this_machine()` all key off that one answer. A file rather than
+`Environment=` in a unit, because the question is asked by things nobody started from a
+unit — `python -m workbench.doctor` run by hand on a node has to answer as a node, and an
+environment variable that only exists inside systemd would have it answering as a head.
+
+What each reader does with it is worth stating, because all three are the same mistake
+avoided from different angles: a node installing the head's units would leave a web
+service failing on a database that was never created; a node's deploy migrating would
+create a schema nothing reads and then let `alembic check` decide whether a deploy
+succeeded on a machine with no stake in the answer; and a node asked the head's questions
+would report a missing deploy key, a missing pull request token and an unauthenticated
+agent — all correct, none actionable, which is the fastest way to teach someone to skim
+the one report that matters.
+
+**The installer is split by name, not by flag.** `install.py` is what both share and has
+no `main()` at all; `install_core.py` and `install_node.py` are the two flows. The
+alternative was one `main()` with a role branch threaded through it, which is the version
+where you cannot read half without holding the other half in your head. Two mechanics
+follow from the split rather than from taste: `become_root` and `hand_off_to` each take
+the module to come back as, so the role survives sudo's environment scrubbing and the
+re-exec after relocation *structurally* — a node that relocated and came back as a head
+would install the wrong units on the machine it had just moved to.
+
+**The LAN is the path, and the tailnet is the fallback.** Head and node sit on the same
+home network — `192.168.1.x`, one hop — so that is the direct route, while the tailnet
+adds WireGuard and a dependency on a coordination server to reach a machine in the next
+room.
+
+The tailnet is a real fallback rather than a theoretical one: both machines are on it and
+resolve by MagicDNS. But it was *not* reachable from the laptop this was written on until
+partway through the work, which is the reason the head probes an ordered list of
+addresses rather than being told one. A name that resolves today is not a name that
+resolves tomorrow, and the failure mode of assuming otherwise is a run that dies at the
+first request with a DNS error.
+
+**So the model server binds `0.0.0.0`, and that is a decision rather than a default.**
+`OLLAMA_HOST` takes one address; serving the LAN and the tailnet and loopback means
+serving all of them. The consequence belongs in the open: the endpoint is
+unauthenticated, so anything on the home network can spend that GPU. That is a wider
+audience than the two-device tailnet the "no auth at the app layer" note below was written
+against, and if it ever matters the mitigation is a firewall rule on the node rather than
+a setting in Workbench.
+
+**Two things a node install owns, and two it deliberately does not.** It owns the systemd
+drop-in that decides where Ollama listens, and the model pull. It does not own the GPU
+driver — a driver install is reboot-shaped, so `check_gpu` reports it with the exact
+command, exactly as the agent login is reported — and it does not own Ollama's own unit,
+because that is replaced on upgrade and a drop-in is not. Ollama itself is driven rather
+than reimplemented: its CUDA handling is the part we least want to maintain, and
+`llama-server` or vLLM fit behind the same URL if it disappoints.
+
+**Nodes register themselves, and the head probes rather than trusts.** `./install.sh
+--role=node --head http://<head>:8787` writes the head's address beside the role marker,
+POSTs the node's name, addresses, capabilities, model and GPU to `/api/nodes`, and repeats
+that on every deploy tick. Adding a machine is therefore something you do *on that
+machine*; nothing is typed on the head.
+
+Three decisions inside that are worth keeping.
+
+- **Addresses are an ordered list, not a field per network.** A node advertises every
+  route to itself, LAN first, and the head tries them in order and writes down which
+  answered (`last_good_address`, tried first next time, so the common case is one
+  connection). Which route works is a property of where the asking happens, not of the
+  node — and on this pair of machines the answer already changed once mid-project. A
+  route that stops working now costs one failed connection instead of a run.
+- **A re-registration forgets a remembered route that is no longer offered.** Otherwise a
+  node that moved network keeps a `last_good_address` on the old one, and every run pays
+  the timeout before falling back.
+- **The runner asks, and the backend is told.** `AgentRequest.endpoint` carries the chosen
+  node, because a backend may not touch the database and choosing between nodes means
+  reading a table and probing an address. A machine with no nodes registered gets `None`
+  and behaves exactly as it did before there were any: the backend uses
+  `WORKBENCH_INFERENCE_URL`, which is still there and still wins when set.
+
+`last_seen_at` is a heartbeat rather than a record of the last deploy, because the node
+re-registers on every tick including the ones that pull nothing. That is the only way a
+head notices a node has gone away — nothing here polls.
+
 ## Deployment
 
 - systemd unit, `Restart=always`, logs to journald. systemd 259 supports
@@ -307,9 +492,11 @@ in `docs/server-conventions.md`.
   "Add to Home Screen" behave like a real app on a phone. Never `tailscale funnel` —
   that exposes it publicly.
 - **There is no auth at the app layer.** This is only acceptable because the server sits
-  on a two-device personal tailnet. `tailscale serve` publishes to the entire tailnet,
-  and this app is remote code execution by design. Revisit before joining the server to
-  any shared tailnet.
+  on a two-device personal tailnet. `tailscale serve` publishes to the entire tailnet, and
+  this app is remote code execution by design. Revisit before joining the server to any
+  shared tailnet. Note that a node's model server widens this further: it binds every
+  interface, so it is reachable by the whole home LAN rather than by the tailnet alone —
+  see Machines above.
 - Backups: only the SQLite file is irreplaceable (repos are on GitHub, worktrees are
   disposable). Use `sqlite3 workbench.db ".backup ..."` on a timer, not `cp` — WAL
   mode makes a naive copy of a live database unsafe. Then restic/borg offsite. The
@@ -517,11 +704,15 @@ because the runner looks over-built until the cgroup behaviour is clear.
 
 Unresolved. Recorded here so they are not rediscovered later.
 
-- **Agent sessions are directory-scoped.** A backend's resume token is keyed to the
-  directory it ran in, which conflicts with "worktrees are disposable" — deleting a
-  task's worktree orphans the `resume_token` its runs point at. Per-task worktrees narrow
-  this but do not close it. Some SDKs expose a pluggable session store, which would let
-  those live in our own SQLite instead of on disk.
+- **Agent sessions are directory-scoped — for one backend.** Claude's resume token is
+  keyed to the directory it ran in, which conflicts with "worktrees are disposable":
+  deleting a task's worktree orphans the `resume_token` its runs point at. Per-task
+  worktrees narrow this but do not close it. Some SDKs expose a pluggable session store,
+  which would let those live in our own SQLite instead of on disk. Worth noting that the
+  local backend has no such problem and not because it solved one — it had to keep the
+  transcript itself, since a `/chat/completions` endpoint remembers nothing, so the
+  conversation is a file under `data/sessions/` that no worktree owns. That is what the
+  fix for Claude would look like if an SDK ever allows it.
 - **Polling is how the stream tails.** There is no in-process signal available: the runner
   is a different process in a different cgroup, and SQLite has no LISTEN/NOTIFY, so the
   table is the only thing the two share. Once per second per open page is fine at this
@@ -548,6 +739,14 @@ Unresolved. Recorded here so they are not rediscovered later.
 - **Is "no commits" a failure?** A run where the agent correctly concludes nothing needs
   changing produced no pull request, but calling that `failed` reads as a malfunction when
   it was judgement. Probably wants a third outcome.
+
+  The local backend has since taken a position on half of it, and deliberately in the
+  narrower place: it refuses a self-reported `finished` while the worktree is exactly as
+  the run found it, because a small model claims to have finished things it has not
+  started. That is a backend distrusting its own model, not Workbench deciding what
+  `finished` means — which is still this question, still open, and now with evidence that
+  the two cases ("nothing needed doing" and "nothing was done") are told apart by asking
+  the agent rather than by counting commits.
 - **Rate-limit readings are only as fresh as the last run.** The panel updates when a
   backend reports a reading, and nothing else asks. A one-turn probe session does emit
   one — measured, it works — but it costs about 11,600 cache-creation tokens a shot,

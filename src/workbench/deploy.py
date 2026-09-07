@@ -42,6 +42,7 @@ from workbench.config import (
     deploy_branch,
     ensure_data_dir,
     host,
+    is_node,
     port,
     repo_root,
     restore_from,
@@ -318,6 +319,16 @@ def rebuild_and_restart() -> DeployFailed | None:
     if preflight.returncode != 0:
         return _fail("importing the new code", preflight)
 
+    if is_node():
+        # A node holds no database and serves no app, so everything between
+        # here and the restart is about something that is not on this machine.
+        # Its units still have to converge — that is how a change to the
+        # deployer or to the drop-in reaches a node at all.
+        unit_error = refresh_units()
+        if unit_error is not None:
+            return unit_error
+        return converge_node()
+
     restore_error = restore_snapshot()
     if restore_error is not None:
         return restore_error
@@ -348,6 +359,40 @@ def rebuild_and_restart() -> DeployFailed | None:
     return restart_service()
 
 
+def converge_node() -> DeployFailed | None:
+    """Bring a node back in line with what the repo says, and say it is alive.
+
+    The same convergence rule the units follow: decide from state rather than
+    from what this tick happened to pull, so a drop-in edited by hand comes
+    back and a changed template takes effect without anyone logging in.
+
+    What it deliberately does *not* do is pull a model. A changed
+    `WORKBENCH_LOCAL_MODEL` means gigabytes over a home connection, and a timer
+    that starts that unattended at 3am is a surprise rather than a deploy — the
+    doctor reports the missing model instead, which is the same split as the
+    GPU driver.
+    """
+    from workbench import install_node
+
+    try:
+        install_node.install_inference_server()
+    except Exception as error:
+        # Never fatal to a deploy. The node is still updated and still
+        # reachable; a model server that needs attention is a thing to say,
+        # not a reason to leave the checkout half-deployed.
+        logger.warning("Could not converge the model server: %s", error)
+
+    try:
+        # Every tick, not only the ones that pulled something. This is what
+        # keeps `nodes.last_seen_at` a heartbeat rather than a record of the
+        # last deploy — a node that has stopped updating is the one thing a
+        # head can notice on its own, since nothing here polls.
+        install_node.register_with_head()
+    except Exception as error:
+        logger.warning("Could not register with the head: %s", error)
+    return None
+
+
 def deploy() -> DeployResult:
     """One deployment attempt. Safe to call when there is nothing to do."""
     advanced = advance_checkout()
@@ -371,6 +416,17 @@ def deploy() -> DeployResult:
             if failure is not None:
                 return failure
 
+            # A node's own convergence, on every tick and for the same
+            # reason: state, not events. It also re-registers, which is what
+            # keeps `nodes.last_seen_at` a heartbeat — a node that stopped
+            # deploying is the one failure a head can notice by itself, since
+            # nothing here polls.
+            if is_node():
+                failure = converge_node()
+                if failure is not None:
+                    return failure
+                return advanced
+
             # And converge acceptance, for the same reason and a sharper one.
             # Acceptance used to run only on the tick that advanced the
             # checkout — so a deploy that pulled a commit and then failed
@@ -385,7 +441,7 @@ def deploy() -> DeployResult:
             # the worst symptom: new code and new units on disk, an old process
             # still serving, and nothing anywhere looking wrong. Converged the
             # same way — from what the service *is*, not from what this tick
-            # happened to do.
+            # happened to do. Both are about the app, which a node has not got.
             failure = converge_service()
             if failure is not None:
                 return failure
@@ -399,7 +455,8 @@ def deploy() -> DeployResult:
     if failure is not None:
         return failure
 
-    run_acceptance()
+    if not is_node():
+        run_acceptance()
     return Deployed(advanced.revision)
 
 

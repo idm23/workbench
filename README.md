@@ -9,10 +9,10 @@ project, and tasks worked either by hand or by a Claude agent, with a written su
 tree of tasks you can add, complete, and delete from a phone. A project can be cloned to the server,
 and each task can be given its own git worktree.
 
-Agents exist: `workbench/agents/` drives Claude behind a vendor-neutral seam, a run is carried out
-by its own systemd unit, and a run's page streams output live and replays whatever a sleeping phone
-missed. The service runs as a dedicated unprivileged account that owns nothing but its own
-deployment under `/srv`.
+Agents exist: `workbench/agents/` drives Claude — or a model served on your own GPU — behind a
+vendor-neutral seam, a run is carried out by its own systemd unit, and a run's page streams output
+live and replays whatever a sleeping phone missed. The service runs as a dedicated unprivileged
+account that owns nothing but its own deployment under `/srv`.
 
 **No agent has yet completed a run on the real server.** Signing one in needs a browser login that
 no installer can perform, so `./install.sh` finishes by saying so with the exact command, and
@@ -44,9 +44,20 @@ safe: the one you cloned hands off to the deployment rather than copying over it
 It finishes by printing whatever still needs a person — signing the agent in, adding a deploy key,
 publishing over Tailscale. `python -m workbench.doctor` re-checks all of it at any time.
 
-`install.sh` itself is a short shell bootstrap whose only job is getting `uv` onto the machine —
-the actual work lives in `src/workbench/install.py`, which imports `workbench.config` so the port
-and database path cannot drift from what the running app uses.
+**On a second machine with a GPU**, the same clone makes a worker node instead — a model server
+the head drives, so a run can spend a GPU rather than a rate-limit window:
+
+```sh
+./install.sh --role=node
+```
+
+That one installs Ollama, binds it where the head can reach it, pulls a model, and keeps itself
+updated. It runs no web app and holds no database. See `docs/nodes.md`.
+
+`install.sh` itself is a short shell bootstrap whose only job is getting `uv` onto the machine and
+picking which installer to hand off to — `install_core.py` or `install_node.py`, sharing everything
+in `install.py`. They import `workbench.config`, so the port and database path cannot drift from
+what the running app uses.
 
 Re-running it is safe — every step checks before acting, and your data is untouched.
 
@@ -60,12 +71,16 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | | |
 |---|---|
 | `install.sh` | The only entry point — a ~12-line bootstrap that installs `uv` and hands off. |
-| `src/workbench/install.py` | The installer proper. Python, so it shares config with the app. |
+| `src/workbench/install.py` | What both installers are made of. Python, so it shares config with the app. |
+| `src/workbench/install_core.py` | The head's install: the app, the database, the runs. |
+| `src/workbench/install_node.py` | A node's install: a GPU serving a model, and nothing else. |
 | `src/workbench/app.py` | The web application: routes and templates. |
+| `src/workbench/agents/` | The backends behind one seam: `claude.py`, and `local.py` for your own GPU. |
 | `src/workbench/database/` | `models.py` (the schema) and `db.py` (engine and sessions). |
 | `src/workbench/git/` | `github.py`, `worktrees.py`, `revision.py` — everything that shells to git. |
 | `src/workbench/tasks/` | `tree.py` (the shape a page renders) and `store.py` (every write). |
 | `src/workbench/api.py` | The JSON routes, over the same operations as the forms. |
+| `src/workbench/nodes.py` | Which machine serves a model, and how this one reaches it. |
 | `src/workbench/deploy.py` | Pulls, migrates, and restarts. Run on a timer; see below. |
 | `src/workbench/doctor.py` | What still needs a person, and whether they have done it. |
 | `src/workbench/config.py` | Everything read from the environment, with repo-relative defaults. |
@@ -74,6 +89,7 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `deploy/*.template` | The systemd units, rendered with detected paths. |
 | `CLAUDE.md` | Design doc, decisions, and open questions. |
 | `docs/deployment-setup.md` | Turning the pipeline on, once. |
+| `docs/nodes.md` | What a worker node is, and how to add one. |
 | `docs/server-conventions.md` | How the home server launches things, and why. |
 | `docs/learning-notes.md` | What building this taught me about systemd, git, and SQLite. |
 

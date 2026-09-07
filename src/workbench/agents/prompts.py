@@ -86,9 +86,14 @@ def execute_prompt(title: str, body: str | None = None) -> str:
         f"{title!r} without having watched you work. Mention anything you left "
         "undone or were unsure about.",
         "",
-        "Use the workbench-outcome skill to report whether this task finished, "
-        "failed, or needs re-planning before you stop — an unreported run is "
-        "never assumed to have succeeded.",
+        # The obligation, not the mechanism. How a backend reports an outcome
+        # is the backend's business — a skill for one, a tool for another —
+        # and naming one of them here would put a vendor's vocabulary in the
+        # module that exists precisely to have none. Each backend appends its
+        # own sentence saying how.
+        "Report whether this task finished, failed, or needs re-planning "
+        "before you stop — an unreported run is never assumed to have "
+        "succeeded.",
     ]
     return "\n".join(parts)
 
@@ -116,6 +121,45 @@ def continuation_prompt(title: str) -> str:
         "This conversation stays open for a while: reply to each message and "
         "then wait for the next one rather than assuming you are finished."
     )
+
+
+def seeded_continuation_prompt(title: str, message: str) -> str:
+    """Reopening a finished run with something specific to say.
+
+    Same framing as `continuation_prompt` — the session is resumed, the work
+    is over, and this is a follow-up conversation rather than a second
+    attempt at `title` — but skips the empty "say you're here" round trip
+    `continuation_prompt` asks for when nobody had anything particular in
+    mind. Here someone did, and the whole point of seeding it was for the
+    agent to see it as the first line of this conversation rather than a
+    second message it has to wait for.
+    """
+    return (
+        f"That run is finished and this is a follow-up conversation about it, "
+        f"not a new attempt at {title!r}.\n"
+        "\n"
+        f"{message}\n"
+        "\n"
+        "This conversation stays open for a while: reply to each message and "
+        "then wait for the next one rather than assuming you are finished."
+    )
+
+
+#: Ask the agent to decompose the task the way a plan run's structured output
+#: would have, using the same skill a project conversation already relies on
+#: to touch the task list through the API rather than only describing it.
+SPLIT_SHORTCUT = (
+    "Split this task into subtasks using the workbench-tasks skill, the way "
+    "a plan run's structured output would have, and briefly explain the "
+    "breakdown you chose."
+)
+
+#: Ask the agent to look at CI on the branch it already committed to, and fix
+#: whatever it finds failing rather than only reporting it.
+CHECK_CI_SHORTCUT = (
+    "Check whether CI is passing on this task's branch and pull request. If "
+    "anything is failing, look into why and fix it."
+)
 
 
 def prompt_for(phase: RunPhase, title: str, body: str | None = None) -> str:

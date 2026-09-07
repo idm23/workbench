@@ -530,7 +530,7 @@ def test_a_check_that_crashes_becomes_unknown_rather_than_a_traceback(monkeypatc
     def explode():
         raise RuntimeError("probe exploded")
 
-    monkeypatch.setattr(doctor, "CHECKS", (explode,))
+    monkeypatch.setattr(doctor, "HEAD_CHECKS", (explode,))
 
     results = doctor.run_checks(network=False)
 
@@ -543,7 +543,7 @@ def test_offline_skips_the_checks_that_need_a_network(monkeypatch):
     monkeypatch.setattr(
         doctor, "check_github_token_works", lambda: pytest.fail("the network was reached")
     )
-    monkeypatch.setattr(doctor, "CHECKS", (doctor.check_snapshot_source,))
+    monkeypatch.setattr(doctor, "HEAD_CHECKS", (doctor.check_snapshot_source,))
 
     assert doctor.run_checks(network=False)
 

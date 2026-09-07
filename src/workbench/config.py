@@ -85,6 +85,153 @@ def worktrees_dir() -> Path:
     return data_dir() / "worktrees"
 
 
+#: What an install is for. A head runs the app, the database and the runs; a
+#: node lends the head something it does not have — a GPU today, and whatever
+#: the next machine is good at after that.
+#:
+#: Deliberately not a list of features. "What is this machine" is one question
+#: with one answer, and the moment a node needs to differ in a second way (its
+#: units, its deploy steps, its checks) a role is what those all key off.
+ROLE_HEAD = "head"
+ROLE_NODE = "node"
+ROLES = (ROLE_HEAD, ROLE_NODE)
+
+
+def role_marker() -> Path:
+    """The file recording what the installer made this machine.
+
+    A file rather than a unit's `Environment=`, because the question is asked
+    by things nobody started from a unit: `python -m workbench.doctor` run by
+    hand on a node must answer as a node, and an environment variable that only
+    exists inside systemd would have it answering as a head.
+    """
+    return data_dir() / "role"
+
+
+def role() -> str:
+    """Head or node, from the environment or from what the installer wrote.
+
+    Defaults to head, because that is what every existing install is and what
+    a checkout on a laptop should behave as. An unrecognised value is a
+    misconfiguration worth saying out loud rather than quietly treating as a
+    head — a node that believes it is a head installs the wrong units.
+    """
+    configured = os.environ.get("WORKBENCH_ROLE", "").strip().lower()
+    if not configured:
+        try:
+            configured = role_marker().read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            return ROLE_HEAD
+    if not configured:
+        return ROLE_HEAD
+    if configured not in ROLES:
+        logger.warning("Unknown role %r; treating this as a %s.", configured, ROLE_HEAD)
+        return ROLE_HEAD
+    return configured
+
+
+def is_node() -> bool:
+    return role() == ROLE_NODE
+
+
+def head_marker() -> Path:
+    """The file recording which head this node reports to.
+
+    Beside `data/role` and for the same reason: the node's deploy timer
+    re-registers on every tick, and it has to know where to send that without
+    anyone re-running the installer with the flag again.
+    """
+    return data_dir() / "head"
+
+
+def head_url() -> str | None:
+    """Where this node's head is, or None if it was never told.
+
+    None is an ordinary state, not an error: a node installed without `--head`
+    still serves models perfectly well — it is simply not registered, so a
+    person has to point the head at it by hand. The doctor says so.
+    """
+    configured = os.environ.get("WORKBENCH_HEAD_URL", "").strip()
+    if not configured:
+        try:
+            configured = head_marker().read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return configured.rstrip("/") or None
+
+
+#: Where a local model answers, and what to ask it for. An OpenAI-compatible
+#: URL rather than a vendor name, because Ollama, `llama-server` and vLLM all
+#: speak it and the choice between them should not reach any code: swapping
+#: one for another is a different value here, not a different backend.
+#:
+#: The default is loopback because that is the case needing no configuration
+#: at all — a machine serving its own inference. A head reaching a worker node
+#: sets this, or (once nodes are registered) learns it from one.
+DEFAULT_INFERENCE_URL = "http://127.0.0.1:11434/v1"
+
+#: The model the local backend asks for when nothing names another. Sized to
+#: fit, with room for context, in the 8 GB of VRAM this was first built
+#: against — bigger models are a per-machine decision rather than a default
+#: that quietly falls back to CPU.
+#:
+#: Which model is not a matter of benchmarks, and this default was changed once
+#: already on evidence. `qwen2.5-coder:7b` is the better coder on paper and
+#: cannot drive a run at all: it writes every tool call as prose, so Ollama's
+#: parser never sees one. `qwen3:8b` uses the tool-call channel properly and
+#: completes the task — measured, on the node, with
+#: `scripts/test_local_model.py`, which exists to keep that judgement
+#: reproducible rather than remembered.
+#:
+#: It is the default for fitting rather than for winning. `gpt-oss:20b` did the
+#: same task in half the wall clock on the same card, because a mixture of
+#: experts activates a fraction of itself per token — but it wants 13 GB of
+#: weights against this one's 5.2, which is a bet on a machine nobody has
+#: described yet. A node with the memory should say so out loud through
+#: WORKBENCH_LOCAL_MODEL; see docs/nodes.md.
+DEFAULT_LOCAL_MODEL = "qwen3:8b"
+
+#: How long one request to a local model may take. Generous compared to a
+#: hosted API on purpose: a MoE with its experts offloaded to system RAM can
+#: spend minutes on a single long turn, and a timeout that fires mid-run costs
+#: the whole run rather than the turn.
+DEFAULT_INFERENCE_TIMEOUT_SECONDS = 600
+
+
+def inference_base_url() -> str:
+    """The OpenAI-compatible endpoint the local backend talks to."""
+    configured = os.environ.get("WORKBENCH_INFERENCE_URL", "").strip()
+    return (configured or DEFAULT_INFERENCE_URL).rstrip("/")
+
+
+def local_model() -> str:
+    """Which model the local backend asks that endpoint for."""
+    return os.environ.get("WORKBENCH_LOCAL_MODEL", "").strip() or DEFAULT_LOCAL_MODEL
+
+
+def inference_timeout_seconds() -> float:
+    raw = os.environ.get("WORKBENCH_INFERENCE_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_INFERENCE_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("WORKBENCH_INFERENCE_TIMEOUT_SECONDS is not a number: %r", raw)
+        return DEFAULT_INFERENCE_TIMEOUT_SECONDS
+
+
+def sessions_dir() -> Path:
+    """Where a backend keeps a conversation it has to remember itself.
+
+    Under `data/` with everything else this machine generates, and pointedly
+    *not* inside a worktree: a worktree is disposable, and a transcript stored
+    in one would take the conversation with it when the task's checkout is
+    removed. That is the whole difference between this and a backend whose
+    sessions are keyed to the directory they ran in.
+    """
+    return data_dir() / "sessions"
+
+
 def default_agent_backend() -> str:
     """Which agent backend to use when a project does not name one.
 
