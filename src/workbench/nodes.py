@@ -42,6 +42,23 @@ INFERENCE_PATH = "/v1"
 
 
 @dataclass(frozen=True)
+class Endpoint:
+    """A node that answered just now, and what it says it is holding.
+
+    `model` is the point of this being a type rather than a URL. A node knows
+    which weights it actually pulled; a head only knows what it was configured
+    for, and when those differ it is the head that is wrong — it asks for a
+    model the node has never heard of and the run dies at the first request.
+    """
+
+    url: str
+    #: What the node last reported serving. None when it never said.
+    model: str | None
+    #: Whose it is, for the notice on the run.
+    node: str
+
+
+@dataclass(frozen=True)
 class Registration:
     """What a node says about itself. Plain data, straight off the wire."""
 
@@ -118,7 +135,7 @@ def known_nodes(db: Session) -> list[Node]:
     return list(db.execute(select(Node).order_by(Node.name)).scalars().all())
 
 
-def inference_url(db: Session) -> str | None:
+def inference_endpoint(db: Session) -> Endpoint | None:
     """A node that will serve a model right now, or None.
 
     None is an ordinary answer, not a failure: a machine with no nodes serves
@@ -147,6 +164,6 @@ def inference_url(db: Session) -> str | None:
                 node.last_good_address = address
                 db.commit()
                 logger.info("Node %s answers at %s.", node.name, address)
-            return url
+            return Endpoint(url=url, model=node.model, node=node.name)
         logger.warning("Node %s did not answer on any of %s.", node.name, node.addresses)
     return None

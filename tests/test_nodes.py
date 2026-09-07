@@ -19,7 +19,7 @@ from workbench.nodes import (
     INFERENCE,
     Registration,
     candidates,
-    inference_url,
+    inference_endpoint,
     known_nodes,
     register,
     url_for,
@@ -132,9 +132,38 @@ def test_the_first_address_that_answers_wins_and_is_remembered(db, monkeypatch):
 
     monkeypatch.setattr(nodes, "_answers", answers)
 
-    assert inference_url(db) == url_for("100.120.132.42")
+    chosen = inference_endpoint(db)
+
+    assert chosen is not None
+    assert chosen.url == url_for("100.120.132.42")
+    assert chosen.node == "homebox-node-1"
+    assert chosen.model == "qwen2.5-coder:7b"
     assert tried == [url_for("192.168.1.155"), url_for("100.120.132.42")]
     assert known_nodes(db)[0].last_good_address == "100.120.132.42"
+
+
+def test_the_endpoint_carries_what_the_node_is_serving(db, monkeypatch):
+    """The head only knows what it was configured for; the node knows which
+    weights it actually pulled. When those differ it is the head that is wrong,
+    so the answer has to travel with the address."""
+    register(db, a_node(model="gpt-oss:20b"))
+    monkeypatch.setattr(nodes, "_answers", lambda _url: True)
+
+    chosen = inference_endpoint(db)
+
+    assert chosen is not None
+    assert chosen.model == "gpt-oss:20b"
+
+
+def test_a_node_that_never_said_what_it_serves_reports_none(db, monkeypatch):
+    """Not a guess. None means "ask for whatever you were going to ask for"."""
+    register(db, a_node(model=None))
+    monkeypatch.setattr(nodes, "_answers", lambda _url: True)
+
+    chosen = inference_endpoint(db)
+
+    assert chosen is not None
+    assert chosen.model is None
 
 
 def test_the_remembered_route_costs_one_request(db, monkeypatch):
@@ -145,7 +174,7 @@ def test_the_remembered_route_costs_one_request(db, monkeypatch):
 
     monkeypatch.setattr(nodes, "_answers", lambda url: tried.append(url) or True)
 
-    inference_url(db)
+    inference_endpoint(db)
 
     assert tried == [url_for("100.120.132.42")]
 
@@ -154,13 +183,13 @@ def test_a_node_that_cannot_do_it_is_not_asked(db, monkeypatch):
     register(db, a_node(capabilities=["storage"]))
     monkeypatch.setattr(nodes, "_answers", lambda _url: pytest.fail("probed the wrong node"))
 
-    assert inference_url(db) is None
+    assert inference_endpoint(db) is None
 
 
 def test_no_nodes_is_an_answer_not_a_failure(db):
     """A single machine is a perfectly good Workbench: the caller falls back to
     its own configuration."""
-    assert inference_url(db) is None
+    assert inference_endpoint(db) is None
 
 
 def test_a_node_that_answers_nowhere_is_reported_as_none(db, monkeypatch, caplog):
@@ -168,7 +197,7 @@ def test_a_node_that_answers_nowhere_is_reported_as_none(db, monkeypatch, caplog
     monkeypatch.setattr(nodes, "_answers", lambda _url: False)
 
     with caplog.at_level("WARNING"):
-        assert inference_url(db) is None
+        assert inference_endpoint(db) is None
 
     assert "did not answer" in caplog.text
 

@@ -47,7 +47,13 @@ from workbench.agents.protocol import (
     SubtaskProposal,
 )
 from workbench.agents.registry import UnknownBackend, get_backend
-from workbench.config import agent_environment, billing_mode, github_token, input_idle_seconds
+from workbench.config import (
+    agent_environment,
+    billing_mode,
+    github_token,
+    input_idle_seconds,
+    local_model_override,
+)
 from workbench.database.db import session_scope
 from workbench.database.models import (
     Run,
@@ -70,7 +76,7 @@ from workbench.git.worktrees import (
     run_setup_command,
     uncommitted_diffstat,
 )
-from workbench.nodes import inference_url
+from workbench.nodes import Endpoint, inference_endpoint
 from workbench.runs.store import append_event, fetch_new_inputs, finish_run, mark_running
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, resolve_origin
 
@@ -179,6 +185,11 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
     if isinstance(backend, UnknownBackend):
         return NotPrepared(backend.message)
 
+    # A conversation runs on the same backend as anything else, so it gets the
+    # same node. Left out, a project conversation on the local backend would be
+    # the one path that ignored the machine holding the weights.
+    node = _endpoint(db, run)
+
     if task is not None:
         # Continuing one task's finished run. It must run in *that* worktree:
         # a session token is keyed to the directory it was issued in, so
@@ -200,7 +211,8 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
                     else continuation_prompt(task.title)
                 ),
                 resume_token=resume_token_for(db, task, run.backend),
-                model=run.model,
+                model=_model_for(run, node),
+                endpoint=node.url if node else None,
                 run_id=run.id,
                 task_id=task.id,
                 project_id=project.id,
@@ -214,14 +226,15 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
             phase=RunPhase.CONVERSATION,
             prompt=conversation_prompt(project.owner, project.repo),
             resume_token=resume_token_for_project(db, project.id, run.backend),
-            model=run.model,
+            model=_model_for(run, node),
+            endpoint=node.url if node else None,
             run_id=run.id,
             project_id=project.id,
         ),
     )
 
 
-def _endpoint(db: Session, run: Run) -> str | None:
+def _endpoint(db: Session, run: Run) -> Endpoint | None:
     """A worker node that will serve this run, if one answers.
 
     Asked here rather than inside the backend because a backend may not touch
@@ -235,10 +248,35 @@ def _endpoint(db: Session, run: Run) -> str | None:
     is answerable from the event log a year later rather than from whatever
     `/etc/workbench/env` says today.
     """
-    chosen = inference_url(db)
+    chosen = inference_endpoint(db)
     if chosen is not None:
-        append_event(db, run.id, RunEventKind.NOTICE, {"text": f"Serving this run from {chosen}."})
+        serving = f" serving {chosen.model}" if chosen.model else ""
+        append_event(
+            db,
+            run.id,
+            RunEventKind.NOTICE,
+            {"text": f"Serving this run from {chosen.node} at {chosen.url}{serving}."},
+        )
     return chosen
+
+
+def _model_for(run: Run, node: Endpoint | None) -> str | None:
+    """Which model to ask for, in order of who is most likely to be right.
+
+    An explicit choice on the run wins, then an operator's explicit
+    `WORKBENCH_LOCAL_MODEL` on this machine, then whatever the node reports it
+    is actually holding. Only when none of those says anything does the
+    backend's own default apply, by being handed None.
+
+    The node outranks a *default* rather than a decision, and that ordering is
+    the whole point: a head configured for nothing in particular was asking
+    every node for its own default and failing on any node that had pulled
+    something else — which is exactly what happens the first time someone gives
+    a node more memory and a bigger model.
+    """
+    if run.model:
+        return run.model
+    return local_model_override() or (node.model if node else None)
 
 
 def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
@@ -308,6 +346,7 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     if isinstance(backend, UnknownBackend):
         return NotPrepared(backend.message)
 
+    node = _endpoint(db, run)
     return Prepared(
         backend=backend,
         request=AgentRequest(
@@ -315,8 +354,8 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
             phase=run.phase,
             prompt=prompt_for(run.phase, task.title, task.body),
             resume_token=resume_token_for(db, task, run.backend),
-            model=run.model,
-            endpoint=_endpoint(db, run),
+            model=_model_for(run, node),
+            endpoint=node.url if node else None,
             run_id=run.id,
             task_id=task.id,
         ),

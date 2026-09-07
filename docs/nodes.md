@@ -25,8 +25,18 @@ On a fresh Ubuntu Server machine with an NVIDIA card:
 ```sh
 git clone https://github.com/idm23/workbench.git
 cd workbench
-./install.sh --role=node --head http://homebox-core:8787
+./install.sh --role=node --head https://homebox-core.tail4c4cf3.ts.net
 ```
+
+**Yes, it needs a clone, and not only to bootstrap.** That checkout is what the node
+updates *from*: its deploy timer fetches and fast-forwards it every five minutes, which is
+how a node picks up changes without anyone logging into it. The installer relocates it to
+`/srv/workbench` and leaves the one you cloned alone.
+
+**`--head` is the URL you open Workbench on, not `http://<head>:8787`.** The head's app
+binds `127.0.0.1` and is published by `tailscale serve`, so the port form reaches nothing
+from another machine however right it looks. If registration fails the node says so, and
+says this, at the end of the install.
 
 That creates the `workbench` account, relocates the checkout to `/srv/workbench`, records
 `data/role`, installs Ollama, binds it where the head can reach it, pulls the model, and
@@ -63,8 +73,14 @@ Two things it will not do, both on purpose:
 
   **If your node has 16 GB of memory or more, use `gpt-oss:20b`.** It is twice as quick
   here despite not fitting on the card, because a mixture of experts activates only a
-  fraction of itself per token. Put `WORKBENCH_LOCAL_MODEL=gpt-oss:20b` in the node's
-  environment before installing, or `ollama pull` it and set the variable on the head.
+  fraction of itself per token:
+
+  ```sh
+  WORKBENCH_LOCAL_MODEL=gpt-oss:20b ./install.sh --role=node --head <the head's URL>
+  ```
+
+  Nothing needs saying on the head: the node registers what it pulled, and the head asks
+  for that.
 
 Re-running `./install.sh --role=node` is safe and is how you pick up a changed drop-in or
 a new model.
@@ -89,6 +105,12 @@ in `/etc/workbench/env`, then `sudo systemctl restart workbench`. Per project,
 `projects.agent_backend` overrides the machine-wide default, so one project can use the
 node while everything else uses Claude. `WORKBENCH_INFERENCE_URL` still works and still
 wins when set — it is how you point at a model server that is not a registered node.
+
+**You do not have to tell the head which model.** It uses whatever the node reports it is
+serving, so pulling a different one on the node is the whole change. Setting
+`WORKBENCH_LOCAL_MODEL` on the head overrides that — a decision outranks a node's report,
+where the built-in default does not — which also means setting it to something your node
+has not pulled is how you get a run that fails at its first request.
 
 **Addresses are offered LAN first.** Head and node are one hop apart on the same home
 network, so that is the direct route; the tailnet is the fallback, and the head finds out
@@ -132,6 +154,7 @@ journalctl -u ollama -f
 | A node stopped updating itself | `systemctl list-timers workbench-deploy.timer`, then `journalctl -u workbench-deploy -n 50` |
 | A node is missing from `/services` | It was installed without `--head`, or could not reach it — `journalctl -u workbench-deploy -n 50` on the node says which |
 | A node's `last seen` is hours old | Its deploy timer has stopped; the node re-registers on every tick, so a stale time means the timer, not the model server |
+| Runs fail asking for a model the node hasn't got | `WORKBENCH_LOCAL_MODEL` is set on the head and overrides what the node reports — unset it, or pull that model on the node |
 
 ## The security note worth reading once
 
