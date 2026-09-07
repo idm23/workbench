@@ -204,9 +204,21 @@ def inference_base_url() -> str:
     return (configured or DEFAULT_INFERENCE_URL).rstrip("/")
 
 
+def local_model_override() -> str | None:
+    """The model this machine was explicitly told to use, if it was told.
+
+    Separate from `local_model()` because "the operator chose this" and "nobody
+    said, so here is the default" are different answers, and only the first
+    should outrank what a worker node reports it actually has loaded. Without
+    the distinction a head silently asks every node for its own default, which
+    is a run that fails at the first request on any node holding anything else.
+    """
+    return os.environ.get("WORKBENCH_LOCAL_MODEL", "").strip() or None
+
+
 def local_model() -> str:
     """Which model the local backend asks that endpoint for."""
-    return os.environ.get("WORKBENCH_LOCAL_MODEL", "").strip() or DEFAULT_LOCAL_MODEL
+    return local_model_override() or DEFAULT_LOCAL_MODEL
 
 
 def inference_timeout_seconds() -> float:
