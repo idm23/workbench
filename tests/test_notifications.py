@@ -6,6 +6,8 @@ hear about them, and what happens when a push fails — because the one thing a
 notification must never do is affect the run it is about.
 """
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy.orm import Session
 
@@ -325,3 +327,39 @@ def test_a_configured_subject_wins(monkeypatch):
     from workbench.config import vapid_subject
 
     assert vapid_subject() == "mailto:ian@example.com"
+
+
+# --- Serving the worker ------------------------------------------------------
+
+
+def test_the_service_worker_is_served_from_the_root(tmp_path, monkeypatch):
+    """Its scope is the directory it is served from. At `/static/sw.js` it
+    could only ever control `/static/…`, so subscribing from a user page waited
+    on a worker that would never control it — the button stayed disabled and
+    nothing said why."""
+    from fastapi.testclient import TestClient
+
+    from workbench.app import app
+
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "sw.db"))
+    with TestClient(app) as client:
+        response = client.get("/sw.js")
+
+    assert response.status_code == 200
+    assert "text/javascript" in response.headers["content-type"]
+    assert "showNotification" in response.text
+
+
+def test_the_subscription_script_registers_the_root_worker():
+    """Pinned because the failure is silent: a worker registered under
+    `/static` installs perfectly and then controls nothing that matters."""
+    source = (
+        Path(__file__).resolve().parent.parent / "src/workbench/static/notifications.js"
+    ).read_text()
+    # Comments stripped: one of them explains why `ready` is not used, and a
+    # test that cannot tell an explanation from a call is one that fails for
+    # being right about it.
+    script = "\n".join(line for line in source.splitlines() if not line.strip().startswith("//"))
+
+    assert 'register("/sw.js")' in script
+    assert "serviceWorker.ready" not in script
