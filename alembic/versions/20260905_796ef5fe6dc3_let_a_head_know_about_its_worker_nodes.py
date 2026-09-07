@@ -10,6 +10,11 @@ one connection rather than a walk down the list.
 Nothing existing changes, and an install with no nodes behaves exactly as it
 did: an empty table reads as "this machine serves its own inference, or none".
 
+Chained onto `9e50b690215c` rather than the revision this was written against.
+Both were authored off the same parent while the other was in flight, and two
+revisions claiming one parent is two heads — which `alembic upgrade head`
+refuses outright, on the machine, at deploy time.
+
 Revision ID: 796ef5fe6dc3
 Revises: e29fd55e07f0
 Create Date: 2026-09-05 14:19:40.612765
@@ -23,7 +28,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "796ef5fe6dc3"
-down_revision: str | None = "e29fd55e07f0"
+down_revision: str | None = "9e50b690215c"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
