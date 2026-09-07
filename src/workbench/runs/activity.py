@@ -129,6 +129,53 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
     }
 
 
+@dataclass(frozen=True)
+class Discussable:
+    """The run a task's Discuss button would reopen.
+
+    A task accumulates runs; this is the one a person means when they point at
+    a row and say "talk to whoever did that".
+    """
+
+    run_id: int
+
+    #: Whether that run produced a plan. The only case where offering "Split"
+    #: means anything — there is nothing to split otherwise.
+    has_plan: bool
+
+
+def discussable_by_task(db: Session, project_id: int) -> dict[int, Discussable]:
+    """The newest run on each task that can be reopened as a conversation.
+
+    Same gate the run's own page uses: a session to resume, and a run that has
+    actually stopped. Without `resume_token` a conversation would answer from
+    no context at all, which looks identical from the outside and is much
+    worse; and a run still going has nothing to reopen because it has not
+    finished saying anything yet.
+
+    **Filtered before taking the newest, which is the opposite of
+    `activity_by_task` and deliberate.** That one takes the newest across every
+    run and only then asks whether it is worth marking, because an old
+    `awaiting_review` surviving a later success would go on offering to approve
+    finished work. Here the interesting run is precisely the finished one, and
+    a run started since does not make the last conversation unreachable — it is
+    still the thing a person wants to talk to while the new one is thinking.
+    """
+    rows = db.execute(
+        select(Run.id, Run.task_id, Run.status, Run.plan)
+        .join(Task, Task.id == Run.task_id)
+        .where(Task.project_id == project_id, Run.resume_token.is_not(None))
+        .order_by(Run.id)
+    ).all()
+
+    # Ascending, so a later row overwrites an earlier one and the newest wins.
+    return {
+        task_id: Discussable(run_id=run_id, has_plan=bool(plan))
+        for run_id, task_id, status, plan in rows
+        if status.is_terminal or status is RunStatus.AWAITING_REVIEW
+    }
+
+
 def pr_url_by_task(db: Session, project_id: int) -> dict[int, str]:
     """The most recent pull request opened for each of a project's tasks.
 

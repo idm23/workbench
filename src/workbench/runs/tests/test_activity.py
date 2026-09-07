@@ -10,7 +10,7 @@ rather than how it is rendered.
 import pytest
 
 from workbench.database.models import Project, RunPhase, RunStatus, Task, User
-from workbench.runs.activity import activity_by_task
+from workbench.runs.activity import activity_by_task, discussable_by_task
 from workbench.runs.store import create_run, finish_run
 
 
@@ -104,3 +104,76 @@ def test_another_projects_runs_are_not_included(db, task):
     plan(db, theirs, RunStatus.AWAITING_REVIEW)
 
     assert activity_by_task(db, task.project_id) == {}
+
+
+# --- Which run a Discuss button reopens -------------------------------------
+
+
+def test_a_finished_run_is_discussable_even_though_it_is_not_marked(db, task):
+    """The whole point. `activity_by_task` deliberately ignores a succeeded
+    run, which is why a finished task offers nothing on the tree — and a
+    finished run is exactly the one someone wants to talk to."""
+    run = plan(db, task, RunStatus.SUCCEEDED, resume_token="session-abc")
+
+    talk = discussable_by_task(db, task.project_id)
+
+    assert talk[task.id].run_id == run.id
+
+
+def test_a_plan_awaiting_review_is_discussable(db, task):
+    """The moment someone reads a plan and disagrees with it."""
+    run = plan(db, task, RunStatus.AWAITING_REVIEW, resume_token="session-abc", plan="## Plan")
+
+    talk = discussable_by_task(db, task.project_id)
+
+    assert talk[task.id].run_id == run.id
+    assert talk[task.id].has_plan
+
+
+def test_a_run_with_no_plan_offers_nothing_to_split(db, task):
+    plan(db, task, RunStatus.SUCCEEDED, resume_token="session-abc")
+
+    assert not discussable_by_task(db, task.project_id)[task.id].has_plan
+
+
+def test_a_run_with_no_session_is_not_discussable(db, task):
+    """Without a session to resume, a conversation answers from no context at
+    all — which looks identical from the outside and is much worse."""
+    plan(db, task, RunStatus.SUCCEEDED)
+
+    assert discussable_by_task(db, task.project_id) == {}
+
+
+def test_a_run_still_going_is_not_discussable(db, task):
+    """Nothing to reopen: it has not finished saying anything yet."""
+    create_run(db, task, RunPhase.PLAN, backend="fake")
+
+    assert discussable_by_task(db, task.project_id) == {}
+
+
+def test_the_newest_finished_run_wins(db, task):
+    plan(db, task, RunStatus.AWAITING_REVIEW, resume_token="older")
+    newer = plan(db, task, RunStatus.SUCCEEDED, resume_token="newer")
+
+    assert discussable_by_task(db, task.project_id)[task.id].run_id == newer.id
+
+
+def test_a_run_started_since_does_not_hide_the_last_conversation(db, task):
+    """Filtered before taking the newest, unlike `activity_by_task`. A run in
+    flight has nothing to reopen, and it must not make the conversation that
+    preceded it unreachable — that is still the thing worth talking to while
+    the new one thinks."""
+    finished = plan(db, task, RunStatus.SUCCEEDED, resume_token="session-abc")
+    create_run(db, task, RunPhase.EXECUTE, backend="fake")
+
+    assert discussable_by_task(db, task.project_id)[task.id].run_id == finished.id
+
+
+def test_another_projects_runs_are_not_discussable_here(db, task):
+    other = Project(user=User(name="someone"), owner="them", repo="theirs", github_url="u")
+    theirs = Task(project=other, title="Theirs")
+    db.add_all([other, theirs])
+    db.commit()
+    plan(db, theirs, RunStatus.SUCCEEDED, resume_token="session-abc")
+
+    assert discussable_by_task(db, task.project_id) == {}
