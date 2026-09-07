@@ -15,7 +15,12 @@ from typing import Annotated
 from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
@@ -227,6 +232,30 @@ def create_user(db: DbSession, name: Annotated[str, Form()]) -> RedirectResponse
         db.rollback()
         return _redirect("/", error=f"There is already a user called {cleaned}.")
     return _redirect("/")
+
+
+@app.get("/sw.js", include_in_schema=False)
+def service_worker() -> FileResponse:
+    """The push service worker, served from the root rather than `/static`.
+
+    A service worker's scope defaults to the directory it was served from, so
+    `/static/sw.js` can only ever control `/static/…`. That is not a detail:
+    `navigator.serviceWorker.ready` waits for a worker controlling *this page*,
+    so subscribing from `/users/1` against a `/static`-scoped worker waits
+    forever — the button stays disabled, nothing is added, and no error is
+    raised anywhere. Which is exactly what it did.
+
+    Served at the root so its scope is the whole app, which is also what makes
+    tapping a notification focus a tab that is already open rather than
+    opening a second one.
+    """
+    return FileResponse(
+        Path(__file__).parent / "static" / "sw.js",
+        media_type="text/javascript",
+        # The browser re-checks the worker on every registration; a cached copy
+        # is how a fixed worker stays broken.
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/services", response_class=HTMLResponse)
