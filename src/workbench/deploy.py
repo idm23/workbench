@@ -42,6 +42,7 @@ from workbench.config import (
     deploy_branch,
     ensure_data_dir,
     host,
+    is_node,
     port,
     repo_root,
     restore_from,
@@ -318,6 +319,16 @@ def rebuild_and_restart() -> DeployFailed | None:
     if preflight.returncode != 0:
         return _fail("importing the new code", preflight)
 
+    if is_node():
+        # A node holds no database and serves no app, so everything between
+        # here and the restart is about something that is not on this machine.
+        # Its units still have to converge — that is how a change to the
+        # deployer or to the drop-in reaches a node at all.
+        unit_error = refresh_units()
+        if unit_error is not None:
+            return unit_error
+        return converge_inference_server()
+
     restore_error = restore_snapshot()
     if restore_error is not None:
         return restore_error
@@ -346,6 +357,31 @@ def rebuild_and_restart() -> DeployFailed | None:
         return unit_error
 
     return restart_service()
+
+
+def converge_inference_server() -> DeployFailed | None:
+    """Bring a node's model server back in line with what the repo says.
+
+    The same convergence rule the units follow: decide from state rather than
+    from what this tick happened to pull, so a drop-in edited by hand comes
+    back and a changed template takes effect without anyone logging in.
+
+    What it deliberately does *not* do is pull a model. A changed
+    `WORKBENCH_LOCAL_MODEL` means gigabytes over a home connection, and a timer
+    that starts that unattended at 3am is a surprise rather than a deploy — the
+    doctor reports the missing model instead, which is the same split as the
+    GPU driver.
+    """
+    from workbench import install_node
+
+    try:
+        install_node.install_inference_server()
+    except Exception as error:
+        # Never fatal to a deploy. The node is still updated and still
+        # reachable; a model server that needs attention is a thing to say,
+        # not a reason to leave the checkout half-deployed.
+        logger.warning("Could not converge the model server: %s", error)
+    return None
 
 
 def deploy() -> DeployResult:
@@ -386,20 +422,26 @@ def deploy() -> DeployResult:
             # still serving, and nothing anywhere looking wrong. Converged the
             # same way — from what the service *is*, not from what this tick
             # happened to do.
-            failure = converge_service()
-            if failure is not None:
-                return failure
+            # Both of these are about the app: whether the running process
+            # is older than the checkout, and whether staging has reported on
+            # this revision. A node runs neither, so on one they would compare
+            # against a service that was never installed.
+            if not is_node():
+                failure = converge_service()
+                if failure is not None:
+                    return failure
 
-            if acceptance_is_outstanding():
-                logger.info("Acceptance has not reported on this revision yet")
-                run_acceptance()
+                if acceptance_is_outstanding():
+                    logger.info("Acceptance has not reported on this revision yet")
+                    run_acceptance()
         return advanced
 
     failure = rebuild_and_restart()
     if failure is not None:
         return failure
 
-    run_acceptance()
+    if not is_node():
+        run_acceptance()
     return Deployed(advanced.revision)
 
 

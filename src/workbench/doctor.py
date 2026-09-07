@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -50,6 +51,7 @@ import httpx
 from workbench.config import (
     deployment_root,
     instance,
+    is_node,
     port,
     repo_root,
     restore_from,
@@ -857,9 +859,89 @@ def _serves_port(config: object, wanted: int) -> bool:
     return False
 
 
+#: The registry name of the backend that knows how to talk to a model served
+#: here. A node's whole job is to answer for it, so the check below asks that
+#: backend rather than reimplementing a probe — the same reason
+#: `check_agent_credential` asks whichever backend is configured.
+INFERENCE_BACKEND = "local"
+
+
+def check_gpu() -> Check:
+    """Whether this node has the thing it exists to lend, and what it is.
+
+    A warning rather than a failure when there is no GPU: a node without one
+    still serves, on the CPU, and is merely slow. What it must not be is
+    silent, because "why does every run take twenty minutes" is a question
+    nobody should have to answer from first principles.
+    """
+    key = "gpu"
+    title = "This node has a GPU to lend"
+
+    if shutil.which("nvidia-smi") is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="No nvidia-smi here, so a model on this node runs on the CPU.",
+            fix="sudo ubuntu-drivers install",
+        )
+
+    probe = _run(
+        ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"]
+    )
+    if probe is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="nvidia-smi is installed but could not be run.",
+        )
+    if probe.returncode != 0:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                "nvidia-smi did not answer. A driver installed since the last boot "
+                "needs one before the card is usable."
+            ),
+        )
+
+    first = probe.stdout.strip().splitlines()
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=first[0].strip() if first else "A GPU is present.",
+    )
+
+
+def check_inference_endpoint() -> Check:
+    """Whether a model server answers here, and has the model configured.
+
+    Asked of the backend rather than with a probe of its own, so the wording a
+    node prints and the wording a head prints about that node come from one
+    place — and so that swapping Ollama for llama-server changes neither.
+    """
+    from workbench.agents.registry import UnknownBackend, get_backend
+
+    key = "inference-endpoint"
+    title = "A model server is answering"
+
+    backend = get_backend(INFERENCE_BACKEND)
+    if isinstance(backend, UnknownBackend):
+        return Check(key=key, title=title, state=CheckState.FAIL, detail=backend.message)
+
+    status = backend.credential_status()
+    if status.logged_in:
+        return Check(key=key, title=title, state=CheckState.OK, detail=status.detail)
+    state = CheckState.UNKNOWN if status.method == "unknown" else CheckState.FAIL
+    return Check(key=key, title=title, state=state, detail=status.detail)
+
+
 #: Every check, in the order a person reads them: what this machine is, then
 #: whether the agent can work, then whether the outside world can be reached.
-CHECKS = (
+HEAD_CHECKS = (
     check_deployment,
     check_home_directory,
     check_agent_credential,
@@ -871,6 +953,24 @@ CHECKS = (
     check_github_token_works,
     check_tailscale_serve,
 )
+
+#: What a node is asked instead. Most of the list above is about work a node
+#: does not do: it holds no credential because it runs no agent, makes no
+#: commits, opens no pull requests, and publishes no web app. Answering those
+#: anyway would fill a node's report with failures that are all correct and
+#: none actionable, which is the fastest way to teach someone to skim it.
+NODE_CHECKS = (
+    check_deployment,
+    check_home_directory,
+    check_gpu,
+    check_inference_endpoint,
+)
+
+
+def checks_for_this_machine() -> tuple[Callable[[], Check], ...]:
+    """Which list applies here. See `config.role()` for how that is decided."""
+    return NODE_CHECKS if is_node() else HEAD_CHECKS
+
 
 #: The checks that need to reach the network, skipped by `--offline`.
 #:
@@ -884,7 +984,7 @@ NETWORK_CHECKS = frozenset({"deploy-key", "github-token-works"})
 def run_checks(*, network: bool = True) -> list[Check]:
     """Every check, in order. Never raises; a broken check is `UNKNOWN`."""
     results = []
-    for check in CHECKS:
+    for check in checks_for_this_machine():
         try:
             result = check()
         except Exception:

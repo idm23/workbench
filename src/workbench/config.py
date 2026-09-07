@@ -85,6 +85,55 @@ def worktrees_dir() -> Path:
     return data_dir() / "worktrees"
 
 
+#: What an install is for. A head runs the app, the database and the runs; a
+#: node lends the head something it does not have — a GPU today, and whatever
+#: the next machine is good at after that.
+#:
+#: Deliberately not a list of features. "What is this machine" is one question
+#: with one answer, and the moment a node needs to differ in a second way (its
+#: units, its deploy steps, its checks) a role is what those all key off.
+ROLE_HEAD = "head"
+ROLE_NODE = "node"
+ROLES = (ROLE_HEAD, ROLE_NODE)
+
+
+def role_marker() -> Path:
+    """The file recording what the installer made this machine.
+
+    A file rather than a unit's `Environment=`, because the question is asked
+    by things nobody started from a unit: `python -m workbench.doctor` run by
+    hand on a node must answer as a node, and an environment variable that only
+    exists inside systemd would have it answering as a head.
+    """
+    return data_dir() / "role"
+
+
+def role() -> str:
+    """Head or node, from the environment or from what the installer wrote.
+
+    Defaults to head, because that is what every existing install is and what
+    a checkout on a laptop should behave as. An unrecognised value is a
+    misconfiguration worth saying out loud rather than quietly treating as a
+    head — a node that believes it is a head installs the wrong units.
+    """
+    configured = os.environ.get("WORKBENCH_ROLE", "").strip().lower()
+    if not configured:
+        try:
+            configured = role_marker().read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            return ROLE_HEAD
+    if not configured:
+        return ROLE_HEAD
+    if configured not in ROLES:
+        logger.warning("Unknown role %r; treating this as a %s.", configured, ROLE_HEAD)
+        return ROLE_HEAD
+    return configured
+
+
+def is_node() -> bool:
+    return role() == ROLE_NODE
+
+
 #: Where a local model answers, and what to ask it for. An OpenAI-compatible
 #: URL rather than a vendor name, because Ollama, `llama-server` and vLLM all
 #: speak it and the choice between them should not reach any code: swapping

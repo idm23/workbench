@@ -1,9 +1,17 @@
-"""Install Workbench: an account, a deployment, a service, and a health check.
+"""Everything both installs are made of: an account, a deployment, units.
 
-Run via ./install.sh, which installs uv and then hands off here. Written in
-Python rather than shell so that it can import workbench.config — the port and
-database path come from the same place the running app reads them, rather than
-being repeated in a second language where they can drift.
+There are two entry points, not one — `install_core` for the machine that runs
+Workbench, `install_node` for a machine that lends it a GPU — and this module
+is what they share. It has no `main()` of its own on purpose: a single
+installer with a role flag threaded through it was the alternative, and the
+half a reader has to hold in their head while reading the other half is
+exactly what that costs.
+
+Run via ./install.sh, which installs uv, picks the entry point from `--role`,
+and hands off. Written in Python rather than shell so that it can import
+workbench.config — the port and database path come from the same place the
+running app reads them, rather than being repeated in a second language where
+they can drift.
 
 Idempotent: every step checks before acting, so re-running is a no-op.
 
@@ -46,13 +54,15 @@ from workbench.config import (
     deployment_root,
     host,
     instance,
+    is_node,
     port,
     repo_root,
+    role_marker,
     run_unit_prefix,
     service_account,
     service_name,
 )
-from workbench.logs import BOLD, RED, YELLOW, configure_console_logging, paint
+from workbench.logs import BOLD, YELLOW, paint
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +83,29 @@ DEPLOY_INTERVAL = "5min"
 def units() -> tuple[tuple[str, str], ...]:
     """Every unit this instance installs, as (unit filename, template name).
 
-    Computed rather than constant because the names carry the instance: a
-    staging install writes `workbench-staging.service` alongside production's
-    `workbench.service`, and the two must never resolve to the same file.
+    Computed rather than constant for two reasons. The names carry the
+    instance: a staging install writes `workbench-staging.service` alongside
+    production's `workbench.service`, and the two must never resolve to the
+    same file. And they carry the role: a node runs no app and executes no
+    runs, so installing those units there would leave a service failing on a
+    database that does not exist.
+
+    Read by the deployer as well as the installer, which is why it consults
+    `config.role()` rather than taking an argument — the deploy that re-renders
+    units on a node has nobody to pass one.
     """
-    return (
-        (f"{service_name()}.service", "workbench.service.template"),
+    deployer = (
         (f"{deploy_unit_name()}.service", "workbench-deploy.service.template"),
         (f"{deploy_unit_name()}.timer", "workbench-deploy.timer.template"),
+    )
+    if is_node():
+        # The timer and nothing else. Self-updating is not optional on a node:
+        # a machine that cannot pull its own changes is a permanent manual
+        # step, which is the thing this project exists not to have.
+        return deployer
+    return (
+        (f"{service_name()}.service", "workbench.service.template"),
+        *deployer,
         # A template unit, never enabled: started on demand as
         # `workbench-run@<run id>.service`. One per run, so each gets its own
         # cgroup and survives the app restarting under it.
@@ -220,7 +245,7 @@ def check_invocation() -> None:
         )
 
 
-def become_root() -> None:
+def become_root(entry: str) -> None:
     """Re-exec under sudo, because everything from here needs it.
 
     Creating an account, writing under /srv, and chowning a tree to another
@@ -248,7 +273,10 @@ def become_root() -> None:
     forwarded.append(f"WORKBENCH_UV={shutil.which('uv') or ''}")
 
     info("escalating with sudo for the rest of the install")
-    argv = ["sudo", "env", *forwarded, sys.executable, "-m", "workbench.install", *sys.argv[1:]]
+    # `entry` rather than a fixed module: the role is which installer is
+    # running, so re-exec the one that is running rather than trusting a flag
+    # to survive sudo's environment scrubbing.
+    argv = ["sudo", "env", *forwarded, sys.executable, "-m", entry, *sys.argv[1:]]
     os.execvp("sudo", argv)
 
 
@@ -359,6 +387,26 @@ def ensure_data_directory(account: pwd.struct_passwd) -> None:
         if entry.is_file():
             run(["chown", owned, str(entry)], privileged=True)
     info(f"{target} now belongs to {account.pw_name}")
+
+
+def record_role(name: str, account: pwd.struct_passwd) -> None:
+    """Write down what this machine was installed as.
+
+    Read back by `config.role()`, which every later question keys off: which
+    units belong here, what a deploy should do, which doctor checks apply. A
+    file rather than a unit's environment, because a person running the doctor
+    by hand on a node must get the node's answer, and an environment variable
+    that only exists inside systemd would give them the head's.
+
+    Owned by the service account like everything else under `data/` — this
+    runs as root, and a root-owned marker in a directory the service rewrites
+    is the same trap as a root-owned database.
+    """
+    marker = role_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{name}\n", encoding="utf-8")
+    os.chown(marker, account.pw_uid, account.pw_gid)
+    info(f"this machine is a {name}")
 
 
 def _service_passwd() -> pwd.struct_passwd:
@@ -606,7 +654,7 @@ def _forget_stale_worktrees(target: Path, source: Path) -> None:
         info(f"cleared {cleared} worktree path(s) that pointed at {source}")
 
 
-def hand_off_to(target: Path) -> None:
+def hand_off_to(target: Path, entry: str) -> None:
     """Re-exec the installer from the deployment, and never come back.
 
     `repo_root()` is derived from this module's own location, so simply
@@ -624,7 +672,10 @@ def hand_off_to(target: Path) -> None:
     }
     step(f"Continuing the install at {target}")
     os.chdir(target)
-    argv = [sys.executable, "-m", "workbench.install", *sys.argv[1:]]
+    # Same module that got us here, for the same reason `become_root` takes
+    # one: a node that relocated and came back as a head would install the
+    # wrong units on the machine it had just moved to.
+    argv = [sys.executable, "-m", entry, *sys.argv[1:]]
     os.execve(sys.executable, argv, environment)
 
 
@@ -965,7 +1016,16 @@ def install_polkit_rule() -> bool:
     return True
 
 
+def enable_deploy_timer() -> None:
+    """What makes a merge to the deploy branch reach this machine without
+    anyone logging in. Both roles want it — a node that cannot update itself
+    is a manual step for as long as it exists."""
+    run(["systemctl", "enable", "--now", "--quiet", f"{deploy_unit_name()}.timer"], privileged=True)
+    info(f"deploying from '{deploy_branch()}' automatically, every {DEPLOY_INTERVAL}")
+
+
 def install_service() -> None:
+    """The head's units: the app, the run template's authorisation, the timer."""
     install_units()
     install_polkit_rule()
 
@@ -973,10 +1033,7 @@ def install_service() -> None:
     run(["systemctl", "restart", service_name()], privileged=True)
     info(f"service enabled and started as user '{service_user()}'")
 
-    # Enabling the timer is what makes a merge to the deploy branch reach this
-    # machine without anyone logging in.
-    run(["systemctl", "enable", "--now", "--quiet", f"{deploy_unit_name()}.timer"], privileged=True)
-    info(f"deploying from '{deploy_branch()}' automatically, every {DEPLOY_INTERVAL}")
+    enable_deploy_timer()
 
 
 def health_check(timeout: float = HEALTH_TIMEOUT_SECONDS) -> str | None:
@@ -1041,124 +1098,3 @@ def report_outstanding() -> bool:
     # no second rendering of these findings to drift from the first.
     result = service_run([str(_venv_bin("python")), "-m", "workbench.doctor"], stream=True)
     return result.returncode == 0
-
-
-def report_success() -> None:
-    """What is now true, and what to type next.
-
-    The interpreter named here is the *deployment's*, not `sys.executable`.
-    They differ, and the difference is not cosmetic: this process was started
-    by `uv run` from whichever checkout someone typed `./install.sh` in, and
-    that path survives both the escalation and the handoff to /srv. Printing it
-    would tell a person to re-check their install using the abandoned
-    checkout's virtualenv — which resolves `repo_root()` to the abandoned
-    checkout and then reports, correctly and uselessly, that it is not the
-    deployment.
-    """
-    logger.info("\n%s", paint(BOLD, f"Workbench is running at http://{host()}:{port()}"))
-    logger.info(
-        "%s",
-        f"""
-Merges to '{deploy_branch()}' now deploy themselves, within {DEPLOY_INTERVAL}. Nothing
-needs running here again — the timer fetches, migrates, and restarts.
-
-    systemctl list-timers {deploy_unit_name()}.timer     # when the next check lands
-    sudo systemctl start {deploy_unit_name()}            # deploy right now
-    journalctl -u {deploy_unit_name()} -n 50 --no-pager  # what the last one did
-    sudo systemctl disable --now {deploy_unit_name()}.timer   # stop deploying
-
-To reach it from a phone over Tailscale (optional, and not automated because
-it needs a browser login to your own tailnet):
-
-    sudo tailscale set --operator=$USER   # once, if you have not already
-    tailscale serve --bg {port()}
-
-Useful commands:
-
-    {_venv_bin("python")} -m workbench.doctor   # re-check the steps below
-
-    systemctl status {service_name()}
-    journalctl -u {service_name()} -f
-""",
-    )
-
-
-def main() -> int:
-    configure_console_logging()
-    os.chdir(repo_root())
-
-    try:
-        check_invocation()
-
-        step("Checking prerequisites")
-        check_prerequisites()
-
-        # Everything from here creates an account, writes under /srv, or
-        # chowns a tree to another user. Asked for once, before any output is
-        # captured, so the password prompt is visible rather than a hang.
-        become_root()
-
-        if needs_relocation():
-            # The account is created only here, because this is the only place
-            # anything is given to it. A checkout that is already the
-            # deployment has an owner, and that owner *is* the service account
-            # by definition — `service_user()` reads it. Creating a second,
-            # unused account in that case would leave `User=` and the polkit
-            # rule naming one identity while another owned the files.
-            step("Preparing the service account")
-            account = ensure_service_account()
-
-            step(f"Moving the deployment to {deployment_root()}")
-            hand_off_to(relocate(account))
-            return 0  # unreachable: hand_off_to execs
-
-        account = _service_passwd()
-        info(f"deployment at {repo_root()}, owned by '{account.pw_name}'")
-
-        step("Building the environment")
-        build_environment(ensure_uv_for_owner(account))
-
-        step("Preparing the agent's state directory")
-        ensure_agent_state_dir(account)
-
-        step("Preparing the account's git identity and SSH key")
-        ensure_agent_identity(account)
-
-        step("Preparing the database")
-        ensure_data_directory(account)
-        apply_migrations()
-        info("migrations applied")
-
-        step("Installing the service")
-        if not systemd_is_running():
-            warn("systemd is not running here (normal inside a container).")
-            info("Skipping the service. Start Workbench manually with:")
-            info(f"    .venv/bin/uvicorn workbench.app:app --host {host()} --port {port()}")
-            logger.info("\n%s\n", paint(BOLD, "Install complete (without the service)."))
-
-            # Still says what a person has to do by hand. Whether systemd is
-            # present has no bearing on whether anyone has signed the agent in,
-            # and an install that stays silent about it on one path is one that
-            # can quietly stop saying it at all — which is what this early
-            # return did until the container harness caught it.
-            step("Checking what still needs a person")
-            report_outstanding()
-            return 0
-
-        install_service()
-
-        step("Waiting for the service to answer")
-        wait_for_health()
-        report_success()
-
-        step("Checking what still needs a person")
-        report_outstanding()
-        return 0
-
-    except InstallError as error:
-        logger.error("\n%s %s\n", paint(RED, "error:"), error)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

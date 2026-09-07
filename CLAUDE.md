@@ -29,9 +29,12 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 ## Reproducibility is a project goal
 
 A fresh Ubuntu Server 26.04 machine, a `git clone`, and `./install.sh` must produce a
-running service. Nothing else. If a step is needed, it belongs in that script rather
-than in a document — the bar is that this repo could be handed to someone with a spare
-machine and work without a conversation.
+running service. Nothing else. **And the same clone with `--role=node` must produce a
+node**, so the promise scales the way the hardware does: hand someone N machines, one
+becomes the head and the other N-1 become nodes, from this repository and one command
+each. If a step is needed, it belongs in that script rather than in a document — the bar
+is that this repo could be handed to someone with a spare machine and work without a
+conversation.
 
 Three consequences that shaped real decisions:
 
@@ -321,6 +324,76 @@ is Docker Compose for self-contained services, but Workbench's job is to manipul
 host — worktrees, build tools, `systemctl` — so it runs natively. The full rationale is
 in `docs/server-conventions.md`.
 
+## Machines: a head and its nodes
+
+One repository, two things it can make of a machine. A **head** runs Workbench — the app,
+the database, the worktrees, the runs. A **node** lends the head something it does not
+have; today that is a GPU serving an OpenAI-compatible endpoint for `agents/local.py`,
+and the shape is meant to hold when the next machine is good at something else.
+
+A node runs no web app, holds no database, and executes no runs. It answers
+`/v1/chat/completions` and keeps itself up to date, and that is deliberately the whole of
+it: the smaller the node's job, the less there is to go wrong on a machine nobody is
+looking at.
+
+**The role is one recorded fact, and three things read it.** `install_node` writes
+`data/role`, `config.role()` reads it, and `install.units()`, `deploy.rebuild_and_restart()`
+and `doctor.checks_for_this_machine()` all key off that one answer. A file rather than
+`Environment=` in a unit, because the question is asked by things nobody started from a
+unit — `python -m workbench.doctor` run by hand on a node has to answer as a node, and an
+environment variable that only exists inside systemd would have it answering as a head.
+
+What each reader does with it is worth stating, because all three are the same mistake
+avoided from different angles: a node installing the head's units would leave a web
+service failing on a database that was never created; a node's deploy migrating would
+create a schema nothing reads and then let `alembic check` decide whether a deploy
+succeeded on a machine with no stake in the answer; and a node asked the head's questions
+would report a missing deploy key, a missing pull request token and an unauthenticated
+agent — all correct, none actionable, which is the fastest way to teach someone to skim
+the one report that matters.
+
+**The installer is split by name, not by flag.** `install.py` is what both share and has
+no `main()` at all; `install_core.py` and `install_node.py` are the two flows. The
+alternative was one `main()` with a role branch threaded through it, which is the version
+where you cannot read half without holding the other half in your head. Two mechanics
+follow from the split rather than from taste: `become_root` and `hand_off_to` each take
+the module to come back as, so the role survives sudo's environment scrubbing and the
+re-exec after relocation *structurally* — a node that relocated and came back as a head
+would install the wrong units on the machine it had just moved to.
+
+**The LAN is the path, and the tailnet is the fallback.** Head and node sit on the same
+home network — `192.168.1.x`, one hop — so that is the direct route, while the tailnet
+adds WireGuard and a dependency on a coordination server to reach a machine in the next
+room.
+
+The tailnet is a real fallback rather than a theoretical one: both machines are on it and
+resolve by MagicDNS. But it was *not* reachable from the laptop this was written on until
+partway through the work, which is the reason the head probes an ordered list of
+addresses rather than being told one. A name that resolves today is not a name that
+resolves tomorrow, and the failure mode of assuming otherwise is a run that dies at the
+first request with a DNS error.
+
+**So the model server binds `0.0.0.0`, and that is a decision rather than a default.**
+`OLLAMA_HOST` takes one address; serving the LAN and the tailnet and loopback means
+serving all of them. The consequence belongs in the open: the endpoint is
+unauthenticated, so anything on the home network can spend that GPU. That is a wider
+audience than the two-device tailnet the "no auth at the app layer" note below was written
+against, and if it ever matters the mitigation is a firewall rule on the node rather than
+a setting in Workbench.
+
+**Two things a node install owns, and two it deliberately does not.** It owns the systemd
+drop-in that decides where Ollama listens, and the model pull. It does not own the GPU
+driver — a driver install is reboot-shaped, so `check_gpu` reports it with the exact
+command, exactly as the agent login is reported — and it does not own Ollama's own unit,
+because that is replaced on upgrade and a drop-in is not. Ollama itself is driven rather
+than reimplemented: its CUDA handling is the part we least want to maintain, and
+`llama-server` or vLLM fit behind the same URL if it disappoints.
+
+**Still manual: telling the head where its node is.** `WORKBENCH_INFERENCE_URL` in
+`/etc/workbench/env`, by hand, today. Nodes registering themselves — a `nodes` table, an
+address list the head probes in preference order — is the next slice, and it is what makes
+adding a laptop a matter of running the installer on the laptop and nothing on the head.
+
 ## Deployment
 
 - systemd unit, `Restart=always`, logs to journald. systemd 259 supports
@@ -389,9 +462,11 @@ in `docs/server-conventions.md`.
   "Add to Home Screen" behave like a real app on a phone. Never `tailscale funnel` —
   that exposes it publicly.
 - **There is no auth at the app layer.** This is only acceptable because the server sits
-  on a two-device personal tailnet. `tailscale serve` publishes to the entire tailnet,
-  and this app is remote code execution by design. Revisit before joining the server to
-  any shared tailnet.
+  on a two-device personal tailnet. `tailscale serve` publishes to the entire tailnet, and
+  this app is remote code execution by design. Revisit before joining the server to any
+  shared tailnet. Note that a node's model server widens this further: it binds every
+  interface, so it is reachable by the whole home LAN rather than by the tailnet alone —
+  see Machines above.
 - Backups: only the SQLite file is irreplaceable (repos are on GitHub, worktrees are
   disposable). Use `sqlite3 workbench.db ".backup ..."` on a timer, not `cp` — WAL
   mode makes a naive copy of a live database unsafe. Then restic/borg offsite. The
