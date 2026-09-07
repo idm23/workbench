@@ -370,6 +370,14 @@ regenerated: the public half travels into every subscription a browser makes, so
 it silently orphans every device already subscribed, and `scripts/test_fresh_install.py`
 asserts a re-install leaves it alone.
 
+**And the deployer generates it too, which is the third time that lesson has been
+learned here.** The units were the first, the polkit rule the second: something the
+installer created, that a machine updated by the timer therefore never got. This one
+failed the same way and was caught the same way — notifications reached production, the
+unit was correctly re-rendered to read `/etc/workbench/env`, and the page still said
+there were no keys, because nobody had a reason to re-run `install.sh`. Anything the
+installer creates that a deploy does not converge is a step waiting to be forgotten.
+
 **Data model**, as built rather than as sketched:
 
 ```

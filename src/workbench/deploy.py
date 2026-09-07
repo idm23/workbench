@@ -681,7 +681,33 @@ def refresh_units() -> DeployFailed | None:
         # that becomes a result again. Broad on purpose: a deploy must report
         # every failure into the journal rather than exit on a traceback.
         return DeployFailed("installing systemd units", str(error))
+
+    converge_notification_keys()
     return None
+
+
+def converge_notification_keys() -> None:
+    """Generate the push keypair on a machine updated by the timer.
+
+    The third thing to arrive by deploy that the installer alone used to
+    create, after the units and the polkit rule — and it failed the same way
+    both of those did. Push notifications reached production, the unit was
+    re-rendered to read `/etc/workbench/env`, and the page still said there
+    were no keys, because only `install.sh` wrote them and nobody had a reason
+    to run it.
+
+    Idempotent and non-rotating: it writes only when there is nothing there,
+    because the public half lives inside every subscription a browser has
+    already made.
+
+    Never fails a deploy. A machine without push keys sends no notifications
+    and is otherwise completely fine, which is not worth leaving a checkout
+    half-deployed over.
+    """
+    try:
+        install.ensure_notification_keys(repo_owner())
+    except Exception as error:
+        logger.warning("Could not generate push notification keys: %s", error)
 
 
 def main() -> int:
