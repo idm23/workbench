@@ -32,6 +32,7 @@ from workbench.deploy import (
     deploy,
     record_acceptance_reported,
     record_serving,
+    refresh_units,
     repo_owner,
     restart_service,
     restore_snapshot,
@@ -783,3 +784,41 @@ def test_what_is_recorded_is_a_revision_that_answered(deployable, monkeypatch):
 
     assert isinstance(failure, DeployFailed)
     assert not (deployable / "data" / "serving-revision").exists()
+
+
+def test_a_deploy_generates_push_keys_that_are_missing(monkeypatch):
+    """The third thing to arrive by deploy that only the installer used to
+    create, after the units and the polkit rule — and it failed the same way
+    both of those did: notifications reached production, the unit was
+    re-rendered to read the env file, and the page still said there were no
+    keys because nobody had a reason to re-run `install.sh`."""
+    called: list[int] = []
+    monkeypatch.setattr("workbench.install.systemd_is_running", lambda: True)
+    monkeypatch.setattr("workbench.install.install_units", lambda: set())
+    monkeypatch.setattr("workbench.install.install_polkit_rule", lambda: False)
+    monkeypatch.setattr(
+        "workbench.install.ensure_notification_keys", lambda account: called.append(1)
+    )
+    monkeypatch.setattr("workbench.deploy.repo_owner", lambda: None)
+
+    assert refresh_units() is None
+    assert called == [1]
+
+
+def test_a_deploy_survives_push_keys_it_cannot_generate(monkeypatch, caplog):
+    """A machine without them sends no notifications and is otherwise fine,
+    which is not worth leaving a checkout half-deployed over."""
+
+    def explode(account):
+        raise RuntimeError("no /etc/workbench")
+
+    monkeypatch.setattr("workbench.install.systemd_is_running", lambda: True)
+    monkeypatch.setattr("workbench.install.install_units", lambda: set())
+    monkeypatch.setattr("workbench.install.install_polkit_rule", lambda: False)
+    monkeypatch.setattr("workbench.install.ensure_notification_keys", explode)
+    monkeypatch.setattr("workbench.deploy.repo_owner", lambda: None)
+
+    with caplog.at_level("WARNING"):
+        assert refresh_units() is None
+
+    assert "no /etc/workbench" in caplog.text
