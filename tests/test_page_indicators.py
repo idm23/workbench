@@ -317,3 +317,92 @@ def test_the_panel_says_how_old_the_reading_is(client, session):
     a_rate_limit_event(session)
 
     assert "as of" in project_page(client, session)
+
+
+# --- Discuss / Split / Check CI on the tree ---------------------------------
+
+
+def a_finished_run(
+    db, *, plan=None, pr_url=None, resume_token: str | None = "session-abc", **kwargs
+):
+    """A run someone could reopen: it has stopped, and it left a session."""
+    run = a_run(db, status=RunStatus.SUCCEEDED, **kwargs)
+    run.resume_token = resume_token
+    run.plan = plan
+    run.pr_url = pr_url
+    db.commit()
+    return run
+
+
+def test_a_finished_run_can_be_discussed_from_the_tree(client, session):
+    """The gap this closes: a succeeded run is not marked on the tree, so
+    until now a task whose work was done offered no way back to the agent
+    that did it."""
+    run = a_finished_run(session)
+
+    page = _squashed(project_page(client, session))
+
+    assert f'data-open-discuss data-run="{run.id}"' in page
+    assert ">Discuss<" in page
+
+
+def test_a_plan_can_be_split_from_the_tree(client, session):
+    run = a_finished_run(session, plan="## Plan\n\nDo the thing.")
+
+    page = _squashed(project_page(client, session))
+
+    assert f'action="/runs/{run.id}/continue"' in page
+    assert 'name="shortcut" value="split"' in page
+    assert ">Split<" in page
+
+
+def test_a_run_with_no_plan_offers_no_split(client, session):
+    """There is nothing to split."""
+    a_finished_run(session)
+
+    assert ">Split<" not in _squashed(project_page(client, session))
+
+
+def test_check_ci_appears_once_there_is_a_pull_request(client, session):
+    a_finished_run(session, pr_url="https://github.com/idm23/workbench/pull/1")
+
+    page = _squashed(project_page(client, session))
+
+    assert ">Check CI<" in page
+    assert 'name="shortcut" value="check_ci"' in page
+
+
+def test_no_pull_request_means_no_check_ci(client, session):
+    a_finished_run(session)
+
+    assert ">Check CI<" not in _squashed(project_page(client, session))
+
+
+def test_a_run_that_left_no_session_offers_nothing_to_talk_to(client, session):
+    """A conversation with no session answers from no context at all, which
+    looks identical from the outside and is much worse."""
+    a_finished_run(session, resume_token=None)
+
+    page = _squashed(project_page(client, session))
+
+    # The attribute pair, not the bare word: the poll-guard script names the
+    # dialog's id too, so `"discuss-dialog" not in page` would be testing that
+    # script rather than the buttons.
+    assert "data-open-discuss data-run=" not in page
+    assert '<dialog id="discuss-dialog">' not in page
+
+
+def test_the_dialog_is_rendered_once_for_the_whole_page(client, session):
+    """One dialog pointed at whichever run opened it — a dialog per row would
+    be dozens of identical forms in the markup."""
+    a_finished_run(session)
+    a_finished_run(session, title="Something else")
+
+    page = _squashed(project_page(client, session))
+
+    assert page.count('<dialog id="discuss-dialog">') == 1
+    assert page.count("data-open-discuss data-run=") == 2
+
+
+def test_a_page_with_nothing_to_discuss_has_no_dialog(client, session):
+    assert '<dialog id="discuss-dialog">' not in _squashed(project_page(client, session))
