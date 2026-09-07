@@ -886,7 +886,7 @@ def check_head() -> Check:
             title=title,
             state=CheckState.WARN,
             detail="No head configured, so nothing knows this node exists.",
-            fix="./install.sh --role=node --head http://<head>:8787",
+            fix="./install.sh --role=node --head <the URL you open Workbench on>",
         )
     return Check(
         key=key,
@@ -906,7 +906,7 @@ def check_inference_node() -> Check:
     before a run needs it.
     """
     from workbench.database.db import session_scope
-    from workbench.nodes import inference_url, known_nodes
+    from workbench.nodes import inference_endpoint, known_nodes
 
     key = "inference-node"
     title = "A worker node is answering"
@@ -914,7 +914,7 @@ def check_inference_node() -> Check:
     try:
         with session_scope() as db:
             known = len(known_nodes(db))
-            chosen = inference_url(db) if known else None
+            chosen = inference_endpoint(db) if known else None
     except Exception as error:
         return Check(
             key=key,
@@ -932,7 +932,7 @@ def check_inference_node() -> Check:
                 "No worker nodes are registered, so runs use whatever "
                 "WORKBENCH_INFERENCE_URL points at on this machine."
             ),
-            fix="./install.sh --role=node --head http://<this-machine>:8787   # on the node",
+            fix="./install.sh --role=node --head <this Workbench's URL>   # on the node",
         )
     if chosen is None:
         return Check(
@@ -944,7 +944,13 @@ def check_inference_node() -> Check:
                 "backend will fail until one does."
             ),
         )
-    return Check(key=key, title=title, state=CheckState.OK, detail=f"Serving from {chosen}.")
+    serving = f" serving {chosen.model}" if chosen.model else ""
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=f"{chosen.node} answers at {chosen.url}{serving}.",
+    )
 
 
 def check_gpu() -> Check:

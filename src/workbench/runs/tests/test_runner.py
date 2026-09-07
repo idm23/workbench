@@ -23,6 +23,7 @@ from workbench.agents.protocol import (
 from workbench.agents.registry import UnknownBackend
 from workbench.agents.tests.fake import FakeBackend
 from workbench.database.models import (
+    Run,
     RunEvent,
     RunEventKind,
     RunOutcome,
@@ -30,10 +31,12 @@ from workbench.database.models import (
     RunStatus,
     TaskStatus,
 )
+from workbench.nodes import Endpoint
 from workbench.runs import runner as runner_module
 from workbench.runs.runner import (
     Interrupted,
     NotPrepared,
+    _model_for,
     execute,
     main,
     prepare,
@@ -1182,3 +1185,45 @@ def test_an_unseeded_conversation_still_gets_the_generic_check_in(db, run, check
     execute(db, followup)
 
     assert "not a new attempt" in backend.requests[-1].prompt
+
+
+# --- Which model a run asks a node for --------------------------------------
+
+
+def _endpoint_serving(model: str | None) -> Endpoint:
+    return Endpoint(url="http://192.168.1.155:11434/v1", model=model, node="homebox-node-1")
+
+
+def test_a_node_decides_the_model_when_nobody_else_has(monkeypatch):
+    """The failure this replaced: a head configured for nothing in particular
+    asked every node for its own default, so a node holding anything else
+    failed at the first request. The node knows which weights it pulled."""
+    monkeypatch.delenv("WORKBENCH_LOCAL_MODEL", raising=False)
+    run = Run(phase=RunPhase.EXECUTE, backend="local")
+
+    assert _model_for(run, _endpoint_serving("gpt-oss:20b")) == "gpt-oss:20b"
+
+
+def test_an_explicit_setting_on_this_machine_outranks_the_node(monkeypatch):
+    """A default is not a decision, but `WORKBENCH_LOCAL_MODEL` is: someone
+    typed it, and a node reporting otherwise does not overrule them."""
+    monkeypatch.setenv("WORKBENCH_LOCAL_MODEL", "qwen3:8b")
+    run = Run(phase=RunPhase.EXECUTE, backend="local")
+
+    assert _model_for(run, _endpoint_serving("gpt-oss:20b")) == "qwen3:8b"
+
+
+def test_the_run_itself_outranks_everything(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_LOCAL_MODEL", "qwen3:8b")
+    run = Run(phase=RunPhase.EXECUTE, backend="local", model="something:else")
+
+    assert _model_for(run, _endpoint_serving("gpt-oss:20b")) == "something:else"
+
+
+def test_with_no_node_and_no_setting_the_backend_decides(monkeypatch):
+    """None rather than this machine's default, so the choice stays in one
+    place — `config.local_model()`, inside the backend."""
+    monkeypatch.delenv("WORKBENCH_LOCAL_MODEL", raising=False)
+    run = Run(phase=RunPhase.EXECUTE, backend="local")
+
+    assert _model_for(run, None) is None

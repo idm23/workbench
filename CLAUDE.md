@@ -398,7 +398,8 @@ than reimplemented: its CUDA handling is the part we least want to maintain, and
 `llama-server` or vLLM fit behind the same URL if it disappoints.
 
 **Nodes register themselves, and the head probes rather than trusts.** `./install.sh
---role=node --head http://<head>:8787` writes the head's address beside the role marker,
+--role=node --head <the URL you open Workbench on>` writes the head's address beside the
+role marker,
 POSTs the node's name, addresses, capabilities, model and GPU to `/api/nodes`, and repeats
 that on every deploy tick. Adding a machine is therefore something you do *on that
 machine*; nothing is typed on the head.
@@ -419,6 +420,18 @@ Three decisions inside that are worth keeping.
   reading a table and probing an address. A machine with no nodes registered gets `None`
   and behaves exactly as it did before there were any: the backend uses
   `WORKBENCH_INFERENCE_URL`, which is still there and still wins when set.
+- **The node also decides which model, unless someone said otherwise.** A head knows what
+  it was configured for; a node knows which weights it actually pulled, and when those
+  disagree it is the head that is wrong — it asks for a model the node has never heard of
+  and the run dies at the first request. So the order is: the run's own `model`, then an
+  explicit `WORKBENCH_LOCAL_MODEL` on the head, then whatever the node reports, and only
+  then a default. The node outranks a *default* rather than a decision.
+
+**The head's address is not `http://<host>:8787`,** and that is worth writing down because
+it looks like it should be. The app binds `127.0.0.1` and `tailscale serve` publishes it,
+so a node registering against that form reaches nothing. Whatever you open Workbench on is
+what `--head` wants. The node says so in the warning it prints when registration fails,
+which is the only place anyone will be reading at the time.
 
 `last_seen_at` is a heartbeat rather than a record of the last deploy, because the node
 re-registers on every tick including the ones that pull nothing. That is the only way a
