@@ -419,3 +419,53 @@ def test_the_schemas_are_what_chat_completions_expects():
     assert all("name" in schema["function"] for schema in schemas)
     # Serialisable, because that is what actually goes over the wire.
     assert json.loads(json.dumps(schemas))
+
+
+def test_asking_a_question_reports_it_as_an_outcome(context, monkeypatch):
+    """It rides the outcome API rather than a route of its own: a question is
+    the agent saying how the run went, recorded live so it survives the
+    process that asked it."""
+    sent: dict[str, Any] = {}
+
+    def fake_post(url: str, json: dict, timeout: float):
+        sent.update(url=url, **json)
+        return httpx.Response(204, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    call(context, "read_file", path="src/app.py")
+
+    result = call(context, "ask_user", question="Should this replace the old endpoint?")
+
+    assert not result.is_error
+    assert sent["outcome"] == "needs_answer"
+    assert sent["detail"] == "Should this replace the old endpoint?"
+    assert "Stop now" in result.text
+
+
+def test_a_question_before_looking_at_anything_is_refused(context, monkeypatch):
+    """Asking before reading is not a question, it is a reflex — and every one
+    of them costs a person their attention."""
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("it asked anyway"))
+
+    result = call(context, "ask_user", question="What do you want?")
+
+    assert result.is_error
+    assert "has not looked at anything" in result.text
+
+
+def test_an_empty_question_is_refused(context, monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("it asked anyway"))
+    call(context, "read_file", path="src/app.py")
+
+    assert call(context, "ask_user", question="   ").is_error
+
+
+def test_a_plan_run_cannot_ask(context):
+    """It could not act on the answer if it got one: the phase is read-only,
+    and the plan's job is to name the fork clearly enough that the execute run
+    knows what to ask about."""
+    result = dispatch(RunPhase.PLAN, "ask_user", {"question": "Which one?"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "not available in this phase" in result.text

@@ -81,6 +81,7 @@ MAX_TURNS_CONVERSATION = 500
 #: nothing for `install.py` to do.
 _PLUGIN_DIR = Path(__file__).parent / "plugin"
 _OUTCOME_SKILL = "workbench-outcome"
+_QUESTION_SKILL = "workbench-question"
 _TASKS_SKILL = "workbench-tasks"
 
 #: What a plan run's structured response must contain. Enforced by the SDK,
@@ -343,7 +344,12 @@ def prompt_for(request: AgentRequest) -> str:
     """
     if request.phase is not RunPhase.EXECUTE:
         return request.prompt
-    return f"{request.prompt}\n\nUse the workbench-outcome skill to report it."
+    return (
+        f"{request.prompt}\n"
+        "\n"
+        "Use the workbench-outcome skill to report it, and the "
+        "workbench-question skill if you need to ask something first."
+    )
 
 
 def _options(request: AgentRequest) -> ClaudeAgentOptions:
@@ -369,10 +375,11 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
         options["plugins"] = [{"type": "local", "path": str(_PLUGIN_DIR)}]
         options["skills"] = [_TASKS_SKILL]
     else:
-        # The outcome-reporting skill only makes sense once tools can
-        # actually run, which plan mode does not allow.
+        # These only make sense once tools can actually run, which plan mode
+        # does not allow — which is also why a plan run cannot ask a question
+        # and is still told to state its interpretation instead.
         options["plugins"] = [{"type": "local", "path": str(_PLUGIN_DIR)}]
-        options["skills"] = [_OUTCOME_SKILL]
+        options["skills"] = [_OUTCOME_SKILL, _QUESTION_SKILL]
     return ClaudeAgentOptions(**options)
 
 

@@ -562,6 +562,27 @@ def test_no_other_phase_is_told_about_the_outcome_skill():
         assert backend_module.prompt_for(a_request(phase=phase)) == "Do the thing"
 
 
+def test_the_question_skill_files_exist():
+    """A skill path that silently does not exist leaves the agent with no way
+    to ask and no error saying so — the same failure the outcome skill's own
+    test exists to prevent."""
+    skill_md = backend_module._PLUGIN_DIR / "skills" / "workbench-question" / "SKILL.md"
+
+    assert skill_md.is_file()
+    assert "needs_answer" in skill_md.read_text()
+
+
+def test_a_plan_run_is_not_offered_the_question_skill(monkeypatch):
+    """It could not use it: plan mode runs no tools at all, which is also why
+    the plan prompt still tells it to state its interpretation instead."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
+
+    drain(ClaudeBackend().run(a_request(phase=RunPhase.PLAN)))
+
+    assert not captured["options"].skills
+
+
 def test_execute_loads_the_outcome_skill(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
@@ -571,7 +592,7 @@ def test_execute_loads_the_outcome_skill(monkeypatch):
     assert captured["options"].plugins == [
         {"type": "local", "path": str(backend_module._PLUGIN_DIR)}
     ]
-    assert captured["options"].skills == ["workbench-outcome"]
+    assert captured["options"].skills == ["workbench-outcome", "workbench-question"]
 
 
 def test_plan_does_not_load_the_outcome_skill(monkeypatch):

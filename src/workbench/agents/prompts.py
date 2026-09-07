@@ -39,8 +39,9 @@ def plan_prompt(title: str, body: str | None = None) -> str:
         "your plan before anything is carried out.",
         "",
         "If the task is ambiguous, state the interpretation you are planning "
-        "against rather than stopping to ask; there is nobody attached to this "
-        "session to answer.",
+        "against rather than stopping to ask. Planning runs read-only and can "
+        "call nothing, so there is no way to ask from here — an execute run "
+        "can, and a plan that names the fork clearly is what lets it.",
         "",
         "If this task is genuinely better carried out as several separate "
         "pieces, list them as subtasks rather than one large plan — but do not "
@@ -94,6 +95,15 @@ def execute_prompt(title: str, body: str | None = None) -> str:
         "Report whether this task finished, failed, or needs re-planning "
         "before you stop — an unreported run is never assumed to have "
         "succeeded.",
+        "",
+        # Stated as a bound rather than an invitation. The failure being
+        # designed against is not silence, it is an agent that asks about
+        # everything, which costs a person their attention every time and is
+        # worse than one that decides and says so.
+        "If you hit a fork you genuinely cannot settle — one where the answer "
+        "changes what gets built — ask instead of guessing, and stop there. A "
+        "detail you could pick yourself and mention in your summary is not one "
+        "of those.",
     ]
     return "\n".join(parts)
 
