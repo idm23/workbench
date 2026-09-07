@@ -80,6 +80,7 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `src/workbench/git/` | `github.py`, `worktrees.py`, `revision.py` — everything that shells to git. |
 | `src/workbench/tasks/` | `tree.py` (the shape a page renders) and `store.py` (every write). |
 | `src/workbench/api.py` | The JSON routes, over the same operations as the forms. |
+| `src/workbench/nodes.py` | Which machine serves a model, and how this one reaches it. |
 | `src/workbench/deploy.py` | Pulls, migrates, and restarts. Run on a timer; see below. |
 | `src/workbench/doctor.py` | What still needs a person, and whether they have done it. |
 | `src/workbench/config.py` | Everything read from the environment, with repo-relative defaults. |

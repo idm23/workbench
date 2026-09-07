@@ -97,8 +97,20 @@ def test_a_node_is_not_asked_about_work_it_does_not_do(marker):
     assert "check_tailscale_serve" not in keys
 
 
-def test_a_head_is_asked_the_list_it_always_was(marker):
+def test_a_head_is_asked_the_list_it_always_was(marker, monkeypatch):
+    monkeypatch.delenv("WORKBENCH_AGENT_BACKEND", raising=False)
+
     assert doctor.checks_for_this_machine() == doctor.HEAD_CHECKS
+
+
+def test_a_head_that_uses_a_local_model_is_asked_about_its_nodes(marker, monkeypatch):
+    """And only then. Asking unconditionally would put a warning about worker
+    nodes on every machine that has never wanted one."""
+    monkeypatch.setenv("WORKBENCH_AGENT_BACKEND", "local")
+
+    names = [check.__name__ for check in doctor.checks_for_this_machine()]
+
+    assert names[-1] == "check_inference_node"
 
 
 def test_a_node_deploy_does_not_migrate_a_database_it_has_not_got(monkeypatch, tmp_path):
@@ -119,7 +131,7 @@ def test_a_node_deploy_does_not_migrate_a_database_it_has_not_got(monkeypatch, t
         deploy, "_run", lambda argv, **_kwargs: (commands.append(argv), Completed())[1]
     )
     monkeypatch.setattr(deploy, "refresh_units", lambda: None)
-    monkeypatch.setattr(deploy, "converge_inference_server", lambda: None)
+    monkeypatch.setattr(deploy, "converge_node", lambda: None)
     monkeypatch.setattr(
         deploy, "restart_service", lambda: pytest.fail("a node restarted an app it never installed")
     )
@@ -145,12 +157,25 @@ def test_a_node_deploy_still_syncs_and_converges_its_units(monkeypatch):
         deploy, "_run", lambda argv, **_kwargs: (commands.append(argv), Completed())[1]
     )
     monkeypatch.setattr(deploy, "refresh_units", lambda: refreshed.append(1))
-    monkeypatch.setattr(deploy, "converge_inference_server", lambda: None)
+    monkeypatch.setattr(deploy, "converge_node", lambda: None)
 
     deploy.rebuild_and_restart()
 
     assert refreshed == [1]
     assert any("sync" in " ".join(argv) for argv in commands)
+
+
+def test_a_node_reregisters_on_every_deploy_tick(monkeypatch):
+    """Not only when something was pulled. `nodes.last_seen_at` is the one
+    failure a head can notice by itself — nothing polls — so a node that is
+    alive has to keep saying so."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    registered: list[int] = []
+    monkeypatch.setattr("workbench.install_node.install_inference_server", lambda: True)
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: registered.append(1))
+
+    assert deploy.converge_node() is None
+    assert registered == [1]
 
 
 def test_a_broken_model_server_does_not_fail_a_deploy(monkeypatch, caplog):
@@ -162,8 +187,9 @@ def test_a_broken_model_server_does_not_fail_a_deploy(monkeypatch, caplog):
         raise RuntimeError("ollama is not installed")
 
     monkeypatch.setattr("workbench.install_node.install_inference_server", explode)
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
 
     with caplog.at_level("WARNING"):
-        assert deploy.converge_inference_server() is None
+        assert deploy.converge_node() is None
 
     assert "ollama is not installed" in caplog.text

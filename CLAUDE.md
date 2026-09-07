@@ -1,8 +1,8 @@
 # Workbench
 
 A personal tool for managing software projects on a home server. Lists projects,
-shows a todo tree per project, and lets a task be worked on either by hand or by a
-Claude agent — with a written summary either way.
+shows a todo tree per project, and lets a task be worked on by hand, by Claude, or by a
+model running on a GPU in the next room — with a written summary either way.
 
 Runs on an always-on Ubuntu box, reachable only over Tailscale.
 
@@ -24,6 +24,14 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > conversation path are all proven against the machine rather than a stub. What the first
 > real use found was not any of those: it was the credential expiring on a clock nothing
 > was watching, with every page still reporting a healthy login. See Deployment below.
+> **There are now two backends and two kinds of machine.** `agents/local.py` drives a
+> model served over a plain OpenAI-compatible endpoint, which is the first thing to test
+> the swappability the seam was built for — it imports no SDK, so the rule that keeps
+> Claude behind an adapter constrains it too. And `./install.sh --role=node` turns a
+> second machine into a worker that serves that model, registers itself, and keeps itself
+> updated. What running a real 7B first found was not the plumbing either: it was that a
+> small model writes its tool calls as prose, claims to have finished things it never
+> started, and reaches verdicts without reading anything. See Machines below.
 > See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
@@ -389,10 +397,32 @@ because that is replaced on upgrade and a drop-in is not. Ollama itself is drive
 than reimplemented: its CUDA handling is the part we least want to maintain, and
 `llama-server` or vLLM fit behind the same URL if it disappoints.
 
-**Still manual: telling the head where its node is.** `WORKBENCH_INFERENCE_URL` in
-`/etc/workbench/env`, by hand, today. Nodes registering themselves — a `nodes` table, an
-address list the head probes in preference order — is the next slice, and it is what makes
-adding a laptop a matter of running the installer on the laptop and nothing on the head.
+**Nodes register themselves, and the head probes rather than trusts.** `./install.sh
+--role=node --head http://<head>:8787` writes the head's address beside the role marker,
+POSTs the node's name, addresses, capabilities, model and GPU to `/api/nodes`, and repeats
+that on every deploy tick. Adding a machine is therefore something you do *on that
+machine*; nothing is typed on the head.
+
+Three decisions inside that are worth keeping.
+
+- **Addresses are an ordered list, not a field per network.** A node advertises every
+  route to itself, LAN first, and the head tries them in order and writes down which
+  answered (`last_good_address`, tried first next time, so the common case is one
+  connection). Which route works is a property of where the asking happens, not of the
+  node — and on this pair of machines the answer already changed once mid-project. A
+  route that stops working now costs one failed connection instead of a run.
+- **A re-registration forgets a remembered route that is no longer offered.** Otherwise a
+  node that moved network keeps a `last_good_address` on the old one, and every run pays
+  the timeout before falling back.
+- **The runner asks, and the backend is told.** `AgentRequest.endpoint` carries the chosen
+  node, because a backend may not touch the database and choosing between nodes means
+  reading a table and probing an address. A machine with no nodes registered gets `None`
+  and behaves exactly as it did before there were any: the backend uses
+  `WORKBENCH_INFERENCE_URL`, which is still there and still wins when set.
+
+`last_seen_at` is a heartbeat rather than a record of the last deploy, because the node
+re-registers on every tick including the ones that pull nothing. That is the only way a
+head notices a node has gone away — nothing here polls.
 
 ## Deployment
 

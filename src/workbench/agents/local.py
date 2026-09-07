@@ -195,14 +195,16 @@ def _head_of(worktree: Path) -> str | None:
     return found.stdout.strip() if found.returncode == 0 else None
 
 
-def _client() -> httpx.AsyncClient:
+def _client(base_url: str | None = None) -> httpx.AsyncClient:
     """The connection to the model server.
 
     A function rather than an inline constructor so a test can hand back one
     wired to a transport instead of a socket — the same reason the Claude
     adapter keeps `_cli_path()` separate from the code that uses it.
     """
-    return httpx.AsyncClient(base_url=inference_base_url(), timeout=inference_timeout_seconds())
+    return httpx.AsyncClient(
+        base_url=base_url or inference_base_url(), timeout=inference_timeout_seconds()
+    )
 
 
 def _probe() -> httpx.Client:
@@ -541,6 +543,10 @@ class LocalBackend:
         """
         phase = request.phase
         model = request.model or local_model()
+        # What the runner picked, else this machine's own configuration. The
+        # fallback is what keeps a single-machine install working with no nodes
+        # registered at all.
+        base_url = request.endpoint or inference_base_url()
         token = request.resume_token or uuid.uuid4().hex
         context = ToolContext(
             worktree=request.worktree,
@@ -578,7 +584,7 @@ class LocalBackend:
         #: distrusts a self-reported outcome without it.
         ended_cleanly = False
 
-        async with _client() as client:
+        async with _client(base_url) as client:
             while turns < _max_turns(phase):
                 turns += 1
                 payload = {
@@ -600,9 +606,7 @@ class LocalBackend:
                         # Nothing was attempted: there is no summary to write,
                         # no diff to take, and nothing to record but the fact
                         # that no model answered.
-                        yield AgentUnavailable(
-                            f"No model server answered at {inference_base_url()}: {exc}"
-                        )
+                        yield AgentUnavailable(f"No model server answered at {base_url}: {exc}")
                         return
                     yield AgentFailed(
                         f"The model server stopped answering: {exc}",
