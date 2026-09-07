@@ -28,6 +28,7 @@ from workbench.runs.lifecycle import (
     NotStarted,
     TooManyRuns,
     cancel_run,
+    continue_run,
     reap,
     start_conversation,
     start_run,
@@ -388,3 +389,30 @@ def _a_task(db, sibling, title: str):
     db.add(task)
     db.commit()
     return task
+
+
+# --- Continuing a finished run with a seed message --------------------------
+
+
+def test_continuing_with_a_message_stores_it_as_the_seed(db, run, executor):
+    run.status = RunStatus.SUCCEEDED
+    run.resume_token = "session-abc"
+    db.commit()
+
+    result = continue_run(db, run, message="Please check CI on this branch.")
+
+    assert isinstance(result, Run)
+    assert result.seed_message == "Please check CI on this branch."
+    assert result.phase is RunPhase.CONVERSATION
+
+
+def test_continuing_with_no_message_leaves_the_seed_unset(db, run, executor):
+    """The bare-click path that already existed must not change."""
+    run.status = RunStatus.SUCCEEDED
+    run.resume_token = "session-abc"
+    db.commit()
+
+    result = continue_run(db, run)
+
+    assert isinstance(result, Run)
+    assert result.seed_message is None

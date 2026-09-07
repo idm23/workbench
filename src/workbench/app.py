@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from workbench.agents.prompts import CHECK_CI_SHORTCUT, SPLIT_SHORTCUT
 from workbench.api import router as api_router
 from workbench.config import instance, systemd_available
 from workbench.database.db import get_db
@@ -595,13 +596,30 @@ def sync_task(db: DbSession, task_id: int) -> RedirectResponse:
     return _redirect(target, error=f"{result.message} {result.stderr}".strip())
 
 
+#: Canned shortcuts a person can pick instead of typing something, keyed by
+#: the value their button submits. The actual wording lives in
+#: `agents.prompts` — the one place prompt text belongs — so this is only a
+#: lookup from a form value to it.
+_CONTINUE_SHORTCUTS = {"split": SPLIT_SHORTCUT, "check_ci": CHECK_CI_SHORTCUT}
+
+
 @app.post("/runs/{run_id}/continue")
-def continue_finished_run(db: DbSession, run_id: int) -> RedirectResponse:
+def continue_finished_run(
+    db: DbSession,
+    run_id: int,
+    message: Annotated[str, Form()] = "",
+    shortcut: Annotated[str, Form()] = "",
+) -> RedirectResponse:
     """Reopen a finished run as a conversation.
 
     A plan or execute run ends the moment the agent is done rather than
     waiting five minutes on the chance somebody types — so this is how a
     dialog gets started, deliberately, when one is actually wanted.
+
+    `message` and `shortcut` are both optional, and both seed the same way:
+    typed feedback takes priority when both are somehow present, a canned
+    shortcut is next, and a bare click — today's only path — falls back to
+    `continue_run`'s own generic check-in prompt.
 
     Redirects to the *new* run, because that is where the conversation is.
     The old one keeps its own page and its own record.
@@ -611,7 +629,8 @@ def continue_finished_run(db: DbSession, run_id: int) -> RedirectResponse:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
 
     target = f"/runs/{run_id}"
-    result = continue_run(db, source)
+    seed = message.strip() or _CONTINUE_SHORTCUTS.get(shortcut) or None
+    result = continue_run(db, source, message=seed)
     if isinstance(result, Run):
         return _redirect(f"/runs/{result.id}")
     # Every refusal — the cap, a run already in flight on this task, a run
