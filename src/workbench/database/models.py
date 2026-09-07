@@ -130,6 +130,19 @@ class RunStatus(StrEnum):
         return self in _TERMINAL_RUN_STATUSES
 
     @property
+    def is_continuable(self) -> bool:
+        """Whether this run's session can be reopened to talk to.
+
+        Deliberately wider than `is_terminal`, and the difference is the whole
+        point of the Discuss button: a plan `awaiting_review` is exactly the
+        run someone wants to argue with, and it is paused rather than
+        finished. Asking `is_terminal` here — which is what the code did until
+        a page offered the button and the call refused it — turns the most
+        useful case into "that run has not finished yet".
+        """
+        return self in _CONTINUABLE_RUN_STATUSES
+
+    @property
     def is_active(self) -> bool:
         """The run occupies a slot against the concurrency limit."""
         return self in _ACTIVE_RUN_STATUSES
@@ -137,6 +150,12 @@ class RunStatus(StrEnum):
 
 _TERMINAL_RUN_STATUSES = frozenset({RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED})
 _ACTIVE_RUN_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
+
+#: Runs whose session can be reopened as a conversation. Terminal ones, plus
+#: `awaiting_review` — which is the case a person most wants: a plan they have
+#: read and disagree with, where the alternative to arguing is approving
+#: something they did not want.
+_CONTINUABLE_RUN_STATUSES = _TERMINAL_RUN_STATUSES | {RunStatus.AWAITING_REVIEW}
 
 
 class RunOutcome(StrEnum):
