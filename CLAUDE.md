@@ -301,6 +301,28 @@ is keyed to the directory it was issued in. A new run rather than a resurrection
 old one, so the record of what happened stays what happened. So a dialog is something a
 person chooses, not something every run waits around on the chance of.
 
+**An agent can now ask a question, and that is the same decision rather than a reversal
+of it.** Agents said outright, in real runs here, that there was no way to reach the
+person — and every prompt told them so, because asking did nothing. Now an execute run
+that hits a fork it cannot settle reports `needs_answer` through the same outcome API as
+everything else, and **stops**: status `awaiting_answer`, holding no concurrency slot,
+work left on its branch, no pull request. Answering it from the task tree is the
+continuation that already existed, seeded with the answer, resuming the same session — so
+the agent gets its own question back in context.
+
+Stopping rather than waiting is the whole point. A run that blocked on a question while
+staying `running` would be `input_idle_seconds` again with a better excuse.
+
+Three details that are decisions rather than mechanics. **`awaiting_answer` is its own
+status**, not a second meaning for `awaiting_review`: both wait on a person, but one wants
+a plan approved and the other wants a question answered, and they offer different buttons.
+**A plan run cannot ask** — the phase is genuinely read-only and can call nothing — which
+is why `plan_prompt` still tells it to state its interpretation, and why naming the fork
+clearly in a plan is what lets the execute run ask about it. And **the prompts bound the
+behaviour rather than inviting it**: an agent that asks about everything costs a person
+their attention every time, which is worse than one that decides and says so, so both
+backends are told to ask only where the answer changes what gets built.
+
 **Data model**, as built rather than as sketched:
 
 ```

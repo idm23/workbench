@@ -177,3 +177,37 @@ def test_another_projects_runs_are_not_discussable_here(db, task):
     plan(db, theirs, RunStatus.SUCCEEDED, resume_token="session-abc")
 
     assert discussable_by_task(db, task.project_id) == {}
+
+
+def test_a_question_is_marked_on_the_tree_and_carries_its_text(db, task):
+    """A question nobody reads is a run nobody unblocks."""
+    run = plan(db, task, RunStatus.AWAITING_ANSWER)
+    run.outcome_detail = "Should this replace the old endpoint?"
+    db.commit()
+
+    marked = activity_by_task(db, task.project_id)[task.id]
+
+    assert marked.is_question
+    assert marked.question == "Should this replace the old endpoint?"
+    assert marked.label == "question"
+
+
+def test_a_question_is_not_a_plan_awaiting_approval(db, task):
+    """Both want a person and they want different things — one wants
+    approving, the other answering, and the row offers a different button."""
+    plan(db, task, RunStatus.AWAITING_ANSWER)
+
+    marked = activity_by_task(db, task.project_id)[task.id]
+
+    assert marked.is_question
+    assert not marked.needs_attention
+
+
+def test_only_a_question_carries_question_text(db, task):
+    """`outcome_detail` is used by other outcomes too — a failure's reason
+    should not surface as something to answer."""
+    run = plan(db, task, RunStatus.FAILED)
+    run.outcome_detail = "Tests fail and I could not find why."
+    db.commit()
+
+    assert activity_by_task(db, task.project_id)[task.id].question is None

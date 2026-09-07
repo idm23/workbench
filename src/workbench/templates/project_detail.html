@@ -222,13 +222,29 @@
               {% endif %}
             </div>
 
+            {% if busy and busy.question %}
+              {# Shown rather than linked. A question nobody reads is a run
+                 nobody unblocks, and the entire cost of asking one was a
+                 person's attention in the first place. #}
+              <div class="msg notice">{{ busy.question }}</div>
+            {% endif %}
+
             <div class="task-actions">
               {% set pr_url = pr_urls.get(node.task.id) %}
               {% if pr_url %}
                 <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
               {% endif %}
               {{ talk_actions(node.task.id, pr_url) }}
-              {% if busy and busy.needs_attention and busy.phase == 'plan' %}
+              {% if busy and busy.is_question %}
+                {# The agent asked something and stopped. Answering resumes its
+                   session, which is the same machinery Discuss uses — so this
+                   is that button under the name it has here, next to the thing
+                   it is about. #}
+                <button type="button" class="slim" data-open-discuss data-run="{{ busy.run_id }}">Answer</button>
+                <form method="post" action="/runs/{{ busy.run_id }}/cancel">
+                  <button class="slim secondary" type="submit">Discard</button>
+                </form>
+              {% elif busy and busy.needs_attention and busy.phase == 'plan' %}
                 {# A plan a person has not yet acted on. What approving does
                    depends on what the plan decided: decompose, or carry out
                    directly — the button says which before it is pressed. #}
