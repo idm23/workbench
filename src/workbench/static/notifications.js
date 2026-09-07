@@ -29,6 +29,32 @@
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
+  // Waits for the worker this registration installed, rather than for
+  // `navigator.serviceWorker.ready` — which resolves only once a worker
+  // controls *this page*, and so never resolved at all while the worker was
+  // scoped to /static. Subscribing needs an active worker, not a controlling
+  // one, and this waits for exactly that.
+  function activated(registration) {
+    if (registration.active) return Promise.resolve(registration);
+    var worker = registration.installing || registration.waiting;
+    if (!worker) return Promise.resolve(registration);
+    return new Promise(function (resolve, reject) {
+      var timer = window.setTimeout(function () {
+        reject(new Error("The service worker did not start. Try reloading the page."));
+      }, 10000);
+      worker.addEventListener("statechange", function () {
+        if (worker.state === "activated") {
+          window.clearTimeout(timer);
+          resolve(registration);
+        }
+        if (worker.state === "redundant") {
+          window.clearTimeout(timer);
+          reject(new Error("The service worker failed to install."));
+        }
+      });
+    });
+  }
+
   button.addEventListener("click", function () {
     if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
       say("This browser cannot receive push notifications.");
@@ -45,14 +71,15 @@
             "Notifications are blocked for this site. Allow them in your browser settings."
           );
         }
-        return navigator.serviceWorker.register("/static/sw.js");
+        // Served from the root, so its scope is the whole app rather than
+        // /static — see the route that serves it.
+        return navigator.serviceWorker.register("/sw.js");
       })
+      .then(activated)
       .then(function (registration) {
-        return navigator.serviceWorker.ready.then(function () {
-          return registration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: decodeKey(button.dataset.vapidKey),
-          });
+        return registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: decodeKey(button.dataset.vapidKey),
         });
       })
       .then(function (subscription) {
