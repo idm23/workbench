@@ -1481,3 +1481,83 @@ def test_archiving_a_missing_task_is_a_404(client, session):
 
 def test_the_archive_page_of_a_missing_project_is_a_404(client, session):
     assert client.get("/projects/9999/archive").status_code == 404
+
+
+# --- The Discuss / Split / Check CI buttons ---------------------------------
+
+
+def _awaiting_review_plan(session, *, resume_token="session-abc") -> Run:
+    from workbench.database.models import RunPhase
+    from workbench.runs.store import create_run, finish_run
+
+    run = create_run(session, a_task(session), RunPhase.PLAN, backend="claude")
+    finish_run(
+        session,
+        run,
+        RunStatus.AWAITING_REVIEW,
+        plan="## Plan\n\nDo the thing.",
+        resume_token=resume_token,
+    )
+    return run
+
+
+def test_an_awaiting_review_plan_offers_discuss_and_split(client, session):
+    """A plan nobody has approved yet is exactly when Split is wanted, so the
+    buttons are not gated on the run being terminal."""
+    run = _awaiting_review_plan(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert f'action="/runs/{run.id}/continue"' in page
+    assert "Discuss" in page
+    assert ">Split<" in page
+    assert 'name="shortcut" value="split"' in page
+
+
+def test_the_shortcut_wording_never_reaches_the_browser(client, session):
+    """The button submits a name; the sentence behind it lives in
+    `agents.prompts`. Shipping the text to the page and back would be a second
+    copy of prompt wording, in the one place nobody would think to look."""
+    from workbench.agents.prompts import SPLIT_SHORTCUT
+
+    page = client.get(f"/runs/{_awaiting_review_plan(session).id}").text
+
+    assert SPLIT_SHORTCUT not in page
+
+
+def test_a_finished_execute_run_with_a_pr_offers_check_ci(client, session):
+    from workbench.runs.store import finish_run
+
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    finish_run(
+        session, run, RunStatus.SUCCEEDED, pr_url="https://github.com/idm23/workbench/pull/1"
+    )
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert ">Check CI<" in page
+    assert 'name="shortcut" value="check_ci"' in page
+
+
+def test_a_finished_execute_run_with_no_pr_offers_no_check_ci(client, session):
+    """Discuss is still worth offering — Check CI is not, because there is no
+    pull request to check."""
+    run = a_finished_run(session)
+    run.resume_token = "session-abc"
+    session.commit()
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert ">Discuss<" in page
+    assert "Check CI" not in page
+
+
+def test_a_run_with_no_session_offers_no_discuss_buttons(client, session):
+    """Without a session to resume there is nothing to say anything *to*."""
+    run = a_finished_run(session)
+
+    page = client.get(f"/runs/{run.id}").text
+
+    assert "discuss-dialog" not in page
+    assert ">Split<" not in page
