@@ -103,6 +103,12 @@ ENDPOINT_TIMEOUT_SECONDS = 60.0
 #: over a LAN, and a head that is off should cost a warning rather than a wait.
 REGISTER_TIMEOUT_SECONDS = 10
 
+#: How to spell the head's address, wherever this has to say so. Not
+#: `http://<host>:8787`: the head's app binds loopback and is published by
+#: `tailscale serve`, so that form reaches nothing from another machine — and
+#: it is exactly what someone writes when guessing.
+HEAD_HINT = "--head <the URL you open Workbench on>"
+
 #: What this node advertises it can do. The string the head matches on — see
 #: `workbench.nodes.INFERENCE`, which is the same word from the other side.
 INFERENCE_CAPABILITY = "inference"
@@ -323,7 +329,7 @@ def register_with_head() -> None:
     head = head_url()
     if head is None:
         info("no head configured, so this node is not registered with one.")
-        info("Re-run with --head http://<head>:8787 to register it.")
+        info(f"Re-run with {HEAD_HINT} to register it.")
         return
 
     payload = json.dumps(
@@ -351,6 +357,12 @@ def register_with_head() -> None:
             warn(f"the head at {head} answered {answer.status} to this registration.")
     except (urllib.error.URLError, OSError) as error:
         warn(f"could not register with the head at {head}: {error}")
+        # Named because it is the likely cause and the least guessable one: the
+        # head's app binds loopback and is published by `tailscale serve`, so
+        # `http://<host>:8787` reaches nothing from another machine however
+        # correct it looks.
+        info("Is that the URL you actually open Workbench on? The head's app binds")
+        info("127.0.0.1, so a bare http://<host>:8787 answers only on the head itself.")
         info("The node still serves models; its deploy timer will try again.")
 
 
