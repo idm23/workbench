@@ -27,7 +27,13 @@ from workbench.database.models import Run, RunEvent, RunPhase, RunStatus, Task
 #:
 #: Deliberately applied *after* picking a task's newest run rather than as a
 #: filter on the query — see `activity_by_task`.
-MARKED_STATUSES = (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.AWAITING_REVIEW, RunStatus.FAILED)
+MARKED_STATUSES = (
+    RunStatus.QUEUED,
+    RunStatus.RUNNING,
+    RunStatus.AWAITING_REVIEW,
+    RunStatus.AWAITING_ANSWER,
+    RunStatus.FAILED,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,11 @@ class TaskActivity:
     #: rather than fetched separately so the page can decide "Execute" vs
     #: "Approve & create N subtasks" without a second query per row.
     proposed_subtasks: dict | None = None
+
+    #: What the agent asked, when it asked something. Shown on the row rather
+    #: than behind a link: a question nobody reads is a run nobody unblocks,
+    #: and the whole cost of asking is a person's attention.
+    question: str | None = None
     #: A plan run's own output text, when it has finished one. Carried here for
     #: the same reason as `proposed_subtasks`: the "ready to execute" summary
     #: at the top of the page needs to show it, and this is the query that
@@ -63,6 +74,8 @@ class TaskActivity:
             return "queued"
         if self.status is RunStatus.AWAITING_REVIEW:
             return "review"
+        if self.status is RunStatus.AWAITING_ANSWER:
+            return "question"
         if self.status is RunStatus.FAILED:
             return "failed"
         return "planning" if self.phase is RunPhase.PLAN else "working"
@@ -76,6 +89,17 @@ class TaskActivity:
         the reader's attention on things that are not moving.
         """
         return self.status is RunStatus.RUNNING
+
+    @property
+    def is_question(self) -> bool:
+        """The agent asked something and stopped.
+
+        Its own property rather than a second meaning for `needs_attention`,
+        for the reason that one states: both want a person, and they want
+        different things from them. A plan wants approving; a question wants
+        answering, and the row offers a different button.
+        """
+        return self.status is RunStatus.AWAITING_ANSWER
 
     @property
     def needs_attention(self) -> bool:
@@ -104,7 +128,15 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
     another agent against finished work and nothing on the page ever moved.
     """
     rows = db.execute(
-        select(Run.id, Run.task_id, Run.phase, Run.status, Run.proposed_subtasks, Run.plan)
+        select(
+            Run.id,
+            Run.task_id,
+            Run.phase,
+            Run.status,
+            Run.proposed_subtasks,
+            Run.plan,
+            Run.outcome_detail,
+        )
         .join(Task, Task.id == Run.task_id)
         .where(Task.project_id == project_id)
         .order_by(Run.id)
@@ -118,8 +150,9 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
             status=status,
             proposed_subtasks=proposed_subtasks,
             plan=plan,
+            question=detail if status is RunStatus.AWAITING_ANSWER else None,
         )
-        for run_id, task_id, phase, status, proposed_subtasks, plan in rows
+        for run_id, task_id, phase, status, proposed_subtasks, plan, detail in rows
     }
 
     return {
@@ -172,7 +205,7 @@ def discussable_by_task(db: Session, project_id: int) -> dict[int, Discussable]:
     return {
         task_id: Discussable(run_id=run_id, has_plan=bool(plan))
         for run_id, task_id, status, plan in rows
-        if status.is_terminal or status is RunStatus.AWAITING_REVIEW
+        if status.is_continuable
     }
 
 

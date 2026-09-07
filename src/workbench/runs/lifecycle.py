@@ -220,7 +220,7 @@ def continue_run(
     task = source.task
     if task is None:
         return NotContinuable("Only a run that belongs to a task can be continued.")
-    if not source.status.is_terminal:
+    if not source.status.is_continuable:
         return NotContinuable("That run has not finished yet.")
     if source.resume_token is None:
         # Nothing to resume into. Starting cold would look identical from

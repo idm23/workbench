@@ -714,6 +714,25 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
                 num_turns=ending.num_turns,
             )
 
+        case AgentFinished() if run.agent_outcome is RunOutcome.NEEDS_ANSWER:
+            # The agent asked something and stopped rather than guessing. The
+            # work so far stays on the branch — this is a pause, not a
+            # failure, and answering resumes the same session from the task
+            # tree. Deliberately no pull request: nobody has said the work is
+            # right, and the question is usually about whether it is.
+            task.status = TaskStatus.BLOCKED
+            return finish_run(
+                db,
+                run,
+                RunStatus.AWAITING_ANSWER,
+                summary=ending.text,
+                diffstat=_worktree_diffstat(worktree, base_branch) if worktree else None,
+                resume_token=ending.resume_token,
+                model=ending.model,
+                total_cost_usd=ending.total_cost_usd,
+                num_turns=ending.num_turns,
+            )
+
         case AgentFinished() if run.agent_outcome is RunOutcome.FAILED:
             task.status = TaskStatus.BLOCKED
             return finish_run(

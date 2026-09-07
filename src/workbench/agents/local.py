@@ -47,6 +47,7 @@ from workbench.agents.protocol import (
     SubtaskProposal,
 )
 from workbench.agents.tools import (
+    OUTCOME_TOOLS,
     PlanSubmitted,
     ToolContext,
     ToolResult,
@@ -241,17 +242,17 @@ def system_prompt(phase: RunPhase) -> str:
         "task cannot be done. A verdict reached without reading anything is a "
         "guess, and this run has no one to correct it.\n"
         "\n"
-        "Nobody is attached to this session. Do not ask questions — decide, say "
-        "which interpretation you chose, and carry on. Work in small steps, and "
+        "Nobody is watching this session as it runs. Work in small steps, and "
         "check what you changed afterwards."
     )
     if phase is RunPhase.PLAN:
         return (
             f"{common}\n"
             "\n"
-            "This is a planning run and you have read-only tools only. When your "
-            "investigation is done, call submit_plan exactly once with the plan "
-            "in prose. That ends the run."
+            "This is a planning run and you have read-only tools only, so there "
+            "is no way to ask anything from here: decide, and say which "
+            "interpretation you chose. When your investigation is done, call "
+            "submit_plan exactly once with the plan in prose. That ends the run."
         )
     if phase is RunPhase.CONVERSATION:
         return (
@@ -267,7 +268,13 @@ def system_prompt(phase: RunPhase) -> str:
         "it, commit it with run_command, then call report_outcome once. Do not "
         "push and do not open a pull request — Workbench does both once you "
         "finish. After report_outcome, reply with your summary and no further "
-        "tool calls: that reply ends the run and is what a reviewer reads."
+        "tool calls: that reply ends the run and is what a reviewer reads.\n"
+        "\n"
+        "If you hit a fork you genuinely cannot settle, and the answer changes "
+        "what gets built, call ask_user instead of guessing and stop there. Not "
+        "for a detail you could choose and mention — every question costs a "
+        "person their attention, and asking about everything is worse than "
+        "deciding and saying so."
     )
 
 
@@ -663,6 +670,12 @@ class LocalBackend:
                     if (
                         phase is RunPhase.EXECUTE
                         and nudges < MAX_NUDGES
+                        # A run that has reported an outcome stopped on
+                        # purpose. Asking it to carry on is not a nudge, it is
+                        # an argument with a decision — and after a question it
+                        # is worse, because the thing it is waiting for is a
+                        # person, not a reminder.
+                        and context.used.isdisjoint(OUTCOME_TOOLS)
                         and nothing_happened(context)
                     ):
                         nudges += 1

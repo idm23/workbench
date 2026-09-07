@@ -10,6 +10,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -116,6 +117,17 @@ class RunStatus(StrEnum):
     # Earns its keep: a plan run stops here and waits for a person, which is
     # the whole point of the plan/execute split.
     AWAITING_REVIEW = "awaiting_review"
+    # The agent asked something and stopped. Distinct from `awaiting_review`,
+    # which means a plan is ready to read: both wait on a person, but one
+    # wants a decision about work already done and the other wants an answer
+    # before any is. They also offer different buttons, which is the practical
+    # reason they cannot share a status.
+    #
+    # Deliberately not terminal and deliberately not active: nothing further
+    # happens without a person, and it holds no concurrency slot while it
+    # waits — a run blocked on a question that kept a slot would be the
+    # five-minute input window all over again.
+    AWAITING_ANSWER = "awaiting_answer"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -130,6 +142,19 @@ class RunStatus(StrEnum):
         return self in _TERMINAL_RUN_STATUSES
 
     @property
+    def is_continuable(self) -> bool:
+        """Whether this run's session can be reopened to talk to.
+
+        Deliberately wider than `is_terminal`, and the difference is the whole
+        point of the Discuss button: a plan `awaiting_review` is exactly the
+        run someone wants to argue with, and it is paused rather than
+        finished. Asking `is_terminal` here — which is what the code did until
+        a page offered the button and the call refused it — turns the most
+        useful case into "that run has not finished yet".
+        """
+        return self in _CONTINUABLE_RUN_STATUSES
+
+    @property
     def is_active(self) -> bool:
         """The run occupies a slot against the concurrency limit."""
         return self in _ACTIVE_RUN_STATUSES
@@ -137,6 +162,15 @@ class RunStatus(StrEnum):
 
 _TERMINAL_RUN_STATUSES = frozenset({RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED})
 _ACTIVE_RUN_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
+
+#: Runs whose session can be reopened as a conversation. Terminal ones, plus
+#: `awaiting_review` — which is the case a person most wants: a plan they have
+#: read and disagree with, where the alternative to arguing is approving
+#: something they did not want.
+_CONTINUABLE_RUN_STATUSES = _TERMINAL_RUN_STATUSES | {
+    RunStatus.AWAITING_REVIEW,
+    RunStatus.AWAITING_ANSWER,
+}
 
 
 class RunOutcome(StrEnum):
@@ -151,6 +185,10 @@ class RunOutcome(StrEnum):
     FINISHED = "finished"
     FAILED = "failed"
     NEEDS_REPLANNING = "needs_replanning"
+    # The agent hit a fork it could not settle and asked rather than guessed.
+    # The question itself is `outcome_detail`, which is where the agent's own
+    # words about an outcome already go.
+    NEEDS_ANSWER = "needs_answer"
 
 
 def _stored_values(enum_type: type[StrEnum]) -> list[str]:
@@ -619,3 +657,59 @@ class Node(Base):
 
     def __repr__(self) -> str:
         return f"<Node {self.name} {self.capabilities}>"
+
+
+class DeviceSubscription(Base):
+    """One browser that has agreed to be told things.
+
+    A Web Push subscription: an endpoint at the browser vendor's push service
+    plus the two keys that encrypt a payload only that browser can read. The
+    browser mints it, so "which device" is a question this never has to answer
+    — it holds whatever the browser handed over and sends there.
+
+    Per device rather than per person, because that is the useful granularity:
+    a phone is worth interrupting and a desktop that is already showing the run
+    is not.
+    """
+
+    __tablename__ = "device_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    #: Where the push goes. Unique because re-subscribing the same browser
+    #: yields the same endpoint, and a second row for it would send twice.
+    endpoint: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+
+    #: The browser's public key and auth secret, used to encrypt the payload.
+    #: Opaque here — they mean something to the push service and to the
+    #: browser, and nothing to this application.
+    p256dh: Mapped[str] = mapped_column(String(200))
+    auth: Mapped[str] = mapped_column(String(100))
+
+    #: What to call it in a list of devices. Whatever the browser could tell
+    #: us, which is not much, so it is editable rather than derived.
+    label: Mapped[str] = mapped_column(String(100), default="This device")
+
+    #: Which notifications this device wants. A list rather than a pair of
+    #: booleans: the vocabulary grows, and a device that only wants to be
+    #: interrupted for questions is the obvious first thing someone asks for.
+    event_kinds: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: Turned off rather than deleted, so a device can be silenced without
+    #: having to be subscribed again from that device — which is the one thing
+    #: you cannot do remotely.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    #: When a push to this endpoint last succeeded, and why it last did not.
+    #: A subscription expires silently from this side — the push service knows,
+    #: and says so with a 404 or 410 that nobody would otherwise read.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    last_error: Mapped[str | None] = mapped_column(Text, default=None)
+
+    user: Mapped[User] = relationship()
+
+    def __repr__(self) -> str:
+        return f"<DeviceSubscription {self.label} user={self.user_id}>"

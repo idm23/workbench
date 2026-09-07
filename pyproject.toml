@@ -30,6 +30,11 @@ dependencies = [
     # Required by FastAPI to read form submissions. Omitting it makes every
     # form POST fail with an opaque 400 rather than a missing-dependency error.
     "python-multipart>=0.0.20",
+    # Web Push, for notifying a phone that a run finished or asked something.
+    # Verified to install on this project's Python before being committed to,
+    # as CLAUDE.md requires of any new dependency — note it is not as narrow as
+    # it looks, pulling ~19 packages including aiohttp.
+    "pywebpush>=2.0",
     "sqlalchemy>=2.0.52",
     # Plain uvicorn, not uvicorn[standard]: the extra pulls compiled uvloop and
     # httptools, the most likely things to lack a wheel on a new Python, for no

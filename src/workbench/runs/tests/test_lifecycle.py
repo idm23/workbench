@@ -416,3 +416,29 @@ def test_continuing_with_no_message_leaves_the_seed_unset(db, run, executor):
 
     assert isinstance(result, Run)
     assert result.seed_message is None
+
+
+def test_a_plan_awaiting_review_can_be_discussed(db, run, executor):
+    """The case the button is actually for, and the one that refused. A plan a
+    person has read and disagrees with is paused, not finished — asking
+    `is_terminal` here made the most useful case answer "that run has not
+    finished yet", while the page offered the button anyway."""
+    run.status = RunStatus.AWAITING_REVIEW
+    run.resume_token = "session-abc"
+    db.commit()
+
+    result = continue_run(db, run, message="I disagree with step 2")
+
+    assert isinstance(result, Run)
+    assert result.seed_message == "I disagree with step 2"
+
+
+def test_a_run_still_going_still_cannot_be_discussed(db, run, executor):
+    """Widened, not opened: there is nothing to reopen mid-run."""
+    run.status = RunStatus.RUNNING
+    run.resume_token = "session-abc"
+    db.commit()
+
+    result = continue_run(db, run, message="hello")
+
+    assert not isinstance(result, Run)

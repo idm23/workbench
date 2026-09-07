@@ -49,7 +49,7 @@
    open to `awaiting_review`: a plan nobody has approved yet is the normal
    state of an "executable plan", and that is exactly when Discuss/Split are
    meant to be usable — see `continue_run` in runs/lifecycle.py. #}
-{% set can_discuss = (run.status.is_terminal or run.status == 'awaiting_review') and run.resume_token and task %}
+{% set can_discuss = run.status.is_continuable and run.resume_token and task %}
 
 {% if run.plan %}
   <h2 class="section">Plan</h2>

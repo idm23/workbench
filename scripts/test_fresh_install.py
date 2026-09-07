@@ -135,6 +135,9 @@ DEPLOYMENT = "/srv/workbench"
 #: The account the deployment ends up owned by, and served as.
 ACCOUNT = "workbench"
 
+#: Secrets and machine-wide settings, which the installer writes push keys into.
+ENV_FILE = "/etc/workbench/env"
+
 #: The node install, run as a second instance in the same container. Its own
 #: account, directory and unit names fall out of WORKBENCH_INSTANCE, which is
 #: the same isolation staging uses to sit beside production on one machine.
@@ -205,6 +208,16 @@ def run_test(image: str, from_github: bool, container: str) -> None:
     # has, and the one that cost a debugging session to find.
     if "personal-access-tokens" not in install_output:
         raise TestFailureError("the install did not say how to get the pull request token")
+
+    step("Confirming push notification keys were generated")
+    # Nothing about a VAPID keypair needs a person, so the reproducibility rule
+    # says the installer generates one rather than naming it as a step.
+    _expect(
+        container,
+        f"grep -q WORKBENCH_VAPID_PRIVATE_KEY {ENV_FILE}",
+        "the install generated no push notification keys",
+    )
+    keys_before = docker_quiet("exec", container, "bash", "-c", f"grep VAPID {ENV_FILE} | sort")
 
     step("Confirming the deployment moved, and belongs to its own account")
     _expect(container, f"id {ACCOUNT}", "the service account was not created")
@@ -306,6 +319,18 @@ def run_test(image: str, from_github: bool, container: str) -> None:
     )
     if survived != 0:
         raise TestFailureError("the user created before the re-install is gone")
+
+    step("Confirming the re-installs left the push keys alone")
+    # The one that matters. The public half travels into every subscription a
+    # browser makes, so regenerating on a re-install would silently orphan
+    # every device already subscribed — they keep the old key, and every push
+    # is rejected by a service that has no reason to explain why.
+    keys_after = docker_quiet("exec", container, "bash", "-c", f"grep VAPID {ENV_FILE} | sort")
+    if keys_after != keys_before:
+        raise TestFailureError(
+            "re-running the install changed the push keys, orphaning every "
+            "device already subscribed"
+        )
 
     install_a_node(container)
 
