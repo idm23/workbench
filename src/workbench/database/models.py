@@ -116,6 +116,17 @@ class RunStatus(StrEnum):
     # Earns its keep: a plan run stops here and waits for a person, which is
     # the whole point of the plan/execute split.
     AWAITING_REVIEW = "awaiting_review"
+    # The agent asked something and stopped. Distinct from `awaiting_review`,
+    # which means a plan is ready to read: both wait on a person, but one
+    # wants a decision about work already done and the other wants an answer
+    # before any is. They also offer different buttons, which is the practical
+    # reason they cannot share a status.
+    #
+    # Deliberately not terminal and deliberately not active: nothing further
+    # happens without a person, and it holds no concurrency slot while it
+    # waits — a run blocked on a question that kept a slot would be the
+    # five-minute input window all over again.
+    AWAITING_ANSWER = "awaiting_answer"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -155,7 +166,10 @@ _ACTIVE_RUN_STATUSES = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
 #: `awaiting_review` — which is the case a person most wants: a plan they have
 #: read and disagree with, where the alternative to arguing is approving
 #: something they did not want.
-_CONTINUABLE_RUN_STATUSES = _TERMINAL_RUN_STATUSES | {RunStatus.AWAITING_REVIEW}
+_CONTINUABLE_RUN_STATUSES = _TERMINAL_RUN_STATUSES | {
+    RunStatus.AWAITING_REVIEW,
+    RunStatus.AWAITING_ANSWER,
+}
 
 
 class RunOutcome(StrEnum):
@@ -170,6 +184,10 @@ class RunOutcome(StrEnum):
     FINISHED = "finished"
     FAILED = "failed"
     NEEDS_REPLANNING = "needs_replanning"
+    # The agent hit a fork it could not settle and asked rather than guessed.
+    # The question itself is `outcome_detail`, which is where the agent's own
+    # words about an outcome already go.
+    NEEDS_ANSWER = "needs_answer"
 
 
 def _stored_values(enum_type: type[StrEnum]) -> list[str]:

@@ -403,6 +403,35 @@ def test_needs_replanning_pauses_for_a_person_and_blocks_the_task(db, run, check
     assert run.error is None
 
 
+def test_a_question_pauses_the_run_and_holds_no_slot(db, run, checkout, backend):
+    """The whole design: a run that asks stops rather than waits. Waiting was
+    tried — `input_idle_seconds` — and cost a concurrency slot for five minutes
+    on the chance somebody typed."""
+    run.agent_outcome = RunOutcome.NEEDS_ANSWER
+    run.outcome_detail = "Should this replace the old endpoint, or sit beside it?"
+    db.commit()
+
+    execute(db, run)
+
+    assert run.status is RunStatus.AWAITING_ANSWER
+    assert run.task.status is TaskStatus.BLOCKED
+    assert not run.status.is_terminal
+    assert run.status.is_continuable
+    assert run.error is None
+
+
+def test_a_question_opens_no_pull_request(db, run, checkout, backend):
+    """A pause, not a finish. Nobody has said the work is right, and the
+    question is usually about whether it is."""
+    run.agent_outcome = RunOutcome.NEEDS_ANSWER
+    run.outcome_detail = "Which of these two shapes did you want?"
+    db.commit()
+
+    execute(db, run)
+
+    assert run.pr_url is None
+
+
 def test_a_reported_failure_fails_the_run_and_blocks_the_task(db, run, checkout, backend):
     run.agent_outcome = RunOutcome.FAILED
     run.outcome_detail = "Tests fail and I could not find why."
