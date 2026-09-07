@@ -36,6 +36,7 @@ from workbench.install import (
     ensure_agent_identity,
     ensure_agent_state_dir,
     ensure_data_directory,
+    ensure_notification_keys,
     ensure_service_account,
     ensure_uv_for_owner,
     hand_off_to,
@@ -142,6 +143,9 @@ def main() -> int:
 
         step("Preparing the account's git identity and SSH key")
         ensure_agent_identity(account)
+
+        step("Preparing push notifications")
+        ensure_notification_keys(account)
 
         step("Preparing the database")
         ensure_data_directory(account)

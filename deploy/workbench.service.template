@@ -15,6 +15,18 @@ WorkingDirectory=__REPO__
 # The venv's uvicorn is invoked directly rather than through `uv run`, so the
 # service does not depend on uv being installed or on PATH at boot.
 ExecStart=__REPO__/.venv/bin/uvicorn workbench.app:app --host __HOST__ --port __PORT__
+# Secrets and machine-wide settings, the same file the deployer and every run
+# unit read. `-` because a fresh install has no such file, and a unit that
+# insisted on one would turn a missing setting into a service that will not
+# start.
+#
+# The web process needs it for the same reason the others do, and the reason is
+# worth stating because this line was missing while the others had it: it hands
+# the browser the VAPID public key to subscribe with, and it calls `finish_run`
+# itself when a run is cancelled or fails to start. Without it, subscribing
+# silently does nothing on a machine that is configured perfectly — which is
+# exactly how the pull request token failed, from the other side.
+EnvironmentFile=-/etc/workbench/env
 Environment=WORKBENCH_DB=__REPO__/data/workbench.db
 Environment=PYTHONDONTWRITEBYTECODE=1
 

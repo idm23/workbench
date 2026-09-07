@@ -588,7 +588,17 @@ def configured_github_token() -> ConfiguredToken:
     Parsed rather than sourced. systemd reads this file itself; it does not run
     a shell over it, so neither does this.
     """
-    from_environment = os.environ.get("WORKBENCH_GITHUB_TOKEN", "").strip()
+    return configured_setting("WORKBENCH_GITHUB_TOKEN")
+
+
+def configured_setting(name: str) -> ConfiguredToken:
+    """One setting as a *unit* would see it. See `configured_github_token`.
+
+    Shared by every check that asks about `/etc/workbench/env`, so the reading
+    rule — environment first, file second, unreadable is its own answer — is
+    stated once rather than per setting.
+    """
+    from_environment = os.environ.get(name, "").strip()
     if from_environment:
         return from_environment
 
@@ -601,9 +611,8 @@ def configured_github_token() -> ConfiguredToken:
         return TokenUnreadable(f"{ENV_FILE} could not be read: {error.strerror}.")
 
     for line in content.splitlines():
-        stripped = line.strip()
-        name, separator, value = stripped.partition("=")
-        if separator and name.strip() == "WORKBENCH_GITHUB_TOKEN":
+        found, separator, value = line.strip().partition("=")
+        if separator and found.strip() == name:
             return value.strip().strip("\"'") or None
 
     return None
@@ -953,6 +962,53 @@ def check_inference_node() -> Check:
     )
 
 
+def check_notification_keys() -> Check:
+    """Whether this machine can send a push notification at all.
+
+    Nothing about this needs a person — unlike the tailnet and the agent's
+    login, a VAPID keypair is generated locally by the installer — so a missing
+    one is a re-run rather than a browser trip, and the fix says so.
+
+    A warning rather than a failure: an install with no keys sends nothing and
+    is otherwise completely fine. Reads the env file for the same reason the
+    token check does — the keys live in a *unit's* environment, and a person
+    running this by hand has no such thing.
+    """
+    key = "notification-keys"
+    title = "This machine can send notifications"
+
+    private = configured_setting("WORKBENCH_VAPID_PRIVATE_KEY")
+    public = configured_setting("WORKBENCH_VAPID_PUBLIC_KEY")
+    if isinstance(private, TokenUnreadable):
+        return Check(key=key, title=title, state=CheckState.UNKNOWN, detail=private.message)
+
+    if private and public:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail="Push keys are configured; devices can subscribe.",
+        )
+    if private or public:
+        # Half a keypair is worse than none: a browser can subscribe against a
+        # public key nothing can sign for, and every push it then waits for
+        # silently never arrives.
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL,
+            detail="Only half the push keypair is set, so subscriptions cannot be sent to.",
+            fix="./install.sh",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="No push keys, so notifications are off. Nothing else is affected.",
+        fix="./install.sh",
+    )
+
+
 def check_gpu() -> Check:
     """Whether this node has the thing it exists to lend, and what it is.
 
@@ -1038,6 +1094,7 @@ HEAD_CHECKS = (
     check_deploy_key,
     check_github_token,
     check_github_token_works,
+    check_notification_keys,
     check_tailscale_serve,
 )
 
