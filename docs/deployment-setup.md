@@ -175,11 +175,21 @@ On the server:
 ```sh
 sudo install -d -m 755 /etc/workbench
 sudo touch /etc/workbench/env && sudo chmod 600 /etc/workbench/env
-sudo tee /etc/workbench/env >/dev/null <<'EOF'
+sudo tee -a /etc/workbench/env >/dev/null <<'EOF'
 WORKBENCH_GITHUB_TOKEN=github_pat_...
 EOF
 sudo systemctl restart workbench-staging
 ```
+
+`-a` rather than truncating: the installer writes this file too. It generates the Web Push
+keypair here — `WORKBENCH_VAPID_PRIVATE_KEY` and `WORKBENCH_VAPID_PUBLIC_KEY` — which
+needs no browser login and so is automated rather than named as a step. Overwriting them
+would silently orphan every device already subscribed, because the public half lives
+inside each subscription the browser made.
+
+Every unit reads this file, the web service included. That last one was missing while the
+others had it, which would have left the page unable to offer a subscription on a machine
+that could send perfectly well.
 
 ## Step 6 — Prove the status appears, then require it
 

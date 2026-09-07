@@ -268,4 +268,25 @@ def finish_run(
     db.commit()
     append_event(db, run.id, RunEventKind.STATUS, {"status": status.value})
     logger.info("Run %s finished: %s", run.id, status.value)
+    _tell_someone(db, run)
     return run
+
+
+def _tell_someone(db: Session, run: Run) -> None:
+    """Push a notification about this ending, if anyone asked to hear about it.
+
+    Here rather than in the runner because this is the one place every terminal
+    transition passes through — the runner has a dozen call sites and the web
+    process has its own, and a hook per site is a hook that gets missed.
+
+    Never allowed to affect the run. A notification that cannot be sent is a
+    person not being told, which is worth a log line and nothing more; the
+    import is local for the same reason it is in `notifications` itself, so
+    that recording a status does not pull a push library into every process.
+    """
+    try:
+        from workbench.notifications import about_run_and_notify
+
+        about_run_and_notify(db, run)
+    except Exception:
+        logger.exception("Could not notify about run %s.", run.id)

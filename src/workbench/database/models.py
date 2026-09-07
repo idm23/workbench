@@ -10,6 +10,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -656,3 +657,59 @@ class Node(Base):
 
     def __repr__(self) -> str:
         return f"<Node {self.name} {self.capabilities}>"
+
+
+class DeviceSubscription(Base):
+    """One browser that has agreed to be told things.
+
+    A Web Push subscription: an endpoint at the browser vendor's push service
+    plus the two keys that encrypt a payload only that browser can read. The
+    browser mints it, so "which device" is a question this never has to answer
+    — it holds whatever the browser handed over and sends there.
+
+    Per device rather than per person, because that is the useful granularity:
+    a phone is worth interrupting and a desktop that is already showing the run
+    is not.
+    """
+
+    __tablename__ = "device_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    #: Where the push goes. Unique because re-subscribing the same browser
+    #: yields the same endpoint, and a second row for it would send twice.
+    endpoint: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+
+    #: The browser's public key and auth secret, used to encrypt the payload.
+    #: Opaque here — they mean something to the push service and to the
+    #: browser, and nothing to this application.
+    p256dh: Mapped[str] = mapped_column(String(200))
+    auth: Mapped[str] = mapped_column(String(100))
+
+    #: What to call it in a list of devices. Whatever the browser could tell
+    #: us, which is not much, so it is editable rather than derived.
+    label: Mapped[str] = mapped_column(String(100), default="This device")
+
+    #: Which notifications this device wants. A list rather than a pair of
+    #: booleans: the vocabulary grows, and a device that only wants to be
+    #: interrupted for questions is the obvious first thing someone asks for.
+    event_kinds: Mapped[list] = mapped_column(JSON, default=list)
+
+    #: Turned off rather than deleted, so a device can be silenced without
+    #: having to be subscribed again from that device — which is the one thing
+    #: you cannot do remotely.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    #: When a push to this endpoint last succeeded, and why it last did not.
+    #: A subscription expires silently from this side — the push service knows,
+    #: and says so with a 404 or 410 that nobody would otherwise read.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    last_error: Mapped[str | None] = mapped_column(Text, default=None)
+
+    user: Mapped[User] = relationship()
+
+    def __repr__(self) -> str:
+        return f"<DeviceSubscription {self.label} user={self.user_id}>"

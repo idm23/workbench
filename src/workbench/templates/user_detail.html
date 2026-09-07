@@ -34,6 +34,70 @@
   <p class="empty">No projects yet. Add one below.</p>
 {% endif %}
 
+<h2 class="section">Notifications</h2>
+{# The device list lives here because this is the closest thing the app has to
+   a settings page, and inventing a second one for four rows would be worse
+   than the slight mismatch. #}
+{% if devices %}
+  <ul class="items">
+    {% for device in devices %}
+      <li>
+        <div class="row-title">
+          <span>{{ device.label }}</span>
+          <span class="status {{ 'finished' if device.enabled else 'queued' }}">
+            {{ 'on' if device.enabled else 'off' }}
+          </span>
+        </div>
+        <div class="row-meta">
+          {% if device.last_error %}
+            {{ device.last_error }}
+          {% elif device.last_seen_at %}
+            last notified {{ device.last_seen_at.strftime("%d %b %H:%M") }}
+          {% else %}
+            not notified yet
+          {% endif %}
+        </div>
+        <div class="task-actions">
+          <form method="post" action="/devices/{{ device.id }}/toggle">
+            <button class="slim secondary" type="submit">
+              {{ 'Silence' if device.enabled else 'Unsilence' }}
+            </button>
+          </form>
+          <form method="post" action="/devices/{{ device.id }}/delete">
+            <button class="slim danger" type="submit">Forget</button>
+          </form>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">No devices yet. Enable them on whichever you want to be told on.</p>
+{% endif %}
+
+{% if vapid_public_key %}
+  {# Only the browser can mint a subscription, so this is a button rather than
+     a form: there is nothing for the server to receive until the browser has
+     said yes. On iOS it works only once the app is on the home screen —
+     Safari delivers push to an installed web app, never to a tab. #}
+  <p>
+    <button type="button" id="enable-notifications"
+            data-vapid-key="{{ vapid_public_key }}"
+            data-subscribe-url="/users/{{ user.id }}/devices"
+            data-device-label="This device">Enable notifications on this device</button>
+  </p>
+  <p class="hint" id="notification-status">
+    Told when a run finishes, and when one stops to ask you something. On iPhone,
+    add Workbench to your home screen first — Safari only delivers notifications
+    to an installed app.
+  </p>
+  <script src="/static/notifications.js"></script>
+{% else %}
+  <p class="hint">
+    This machine has no push keys, so notifications are off. Re-run
+    <span class="mono">./install.sh</span> to generate them.
+  </p>
+{% endif %}
+
 <form method="post" action="/users/{{ user.id }}/projects">
   <label for="reference">Add a project</label>
   <input type="text" id="reference" name="reference"

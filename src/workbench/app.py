@@ -24,9 +24,10 @@ from sqlalchemy.orm import Session, selectinload
 
 from workbench.agents.prompts import CHECK_CI_SHORTCUT, SPLIT_SHORTCUT
 from workbench.api import router as api_router
-from workbench.config import instance, systemd_available
+from workbench.config import instance, systemd_available, vapid_public_key
 from workbench.database.db import get_db
 from workbench.database.models import (
+    DeviceSubscription,
     Project,
     Run,
     RunEventKind,
@@ -54,6 +55,7 @@ from workbench.git.worktrees import (
     sync_worktree,
 )
 from workbench.nodes import known_nodes
+from workbench.notifications import devices_for, forget, set_enabled, subscribe
 from workbench.rendering import render_markdown
 from workbench.runs.activity import (
     activity_by_task,
@@ -261,8 +263,63 @@ def show_user(
     return templates.TemplateResponse(
         request,
         "user_detail.html",
-        {**_shared(db), "user": user, "error": error, "notice": notice},
+        {
+            **_shared(db),
+            "user": user,
+            "error": error,
+            "notice": notice,
+            # The closest thing this app has to a settings page, which is why
+            # the device list lives here rather than behind a new one.
+            "devices": devices_for(db, user.id),
+            # None when this machine never generated keys, which is what the
+            # template checks to decide whether to offer the button at all.
+            "vapid_public_key": vapid_public_key(),
+        },
     )
+
+
+@app.post("/users/{user_id}/devices")
+def subscribe_device(
+    db: DbSession,
+    user_id: int,
+    endpoint: Annotated[str, Form()],
+    p256dh: Annotated[str, Form()],
+    auth: Annotated[str, Form()],
+    label: Annotated[str, Form()] = "This device",
+) -> RedirectResponse:
+    """Record a subscription the browser just minted.
+
+    Posted by `static/notifications.js` rather than by a form a person fills
+    in: only the browser can create a subscription, so this route exists to
+    receive one rather than to make one.
+    """
+    user = _get_user_or_404(db, user_id)
+    subscribe(db, user, endpoint=endpoint, p256dh=p256dh, auth=auth, label=label)
+    return _redirect(f"/users/{user.id}", notice="This device will be notified.")
+
+
+@app.post("/devices/{device_id}/toggle")
+def toggle_device(db: DbSession, device_id: int) -> RedirectResponse:
+    """Silence a device, or start telling it things again.
+
+    Toggling rather than deleting is the point: a device can be silenced from
+    anywhere, and re-subscribed only from itself.
+    """
+    device = db.get(DeviceSubscription, device_id)
+    if device is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No device with id {device_id}.")
+    set_enabled(db, device, not device.enabled)
+    return _redirect(f"/users/{device.user_id}")
+
+
+@app.post("/devices/{device_id}/delete")
+def delete_device(db: DbSession, device_id: int) -> RedirectResponse:
+    device = db.get(DeviceSubscription, device_id)
+    if device is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No device with id {device_id}.")
+    user_id = device.user_id
+    forget(db, device)
+    return _redirect(f"/users/{user_id}", notice="That device was forgotten.")
 
 
 @app.post("/users/{user_id}/projects")
