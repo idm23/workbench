@@ -55,7 +55,12 @@ from workbench.git.worktrees import (
 )
 from workbench.nodes import known_nodes
 from workbench.rendering import render_markdown
-from workbench.runs.activity import activity_by_task, pr_url_by_task, project_activity_fingerprint
+from workbench.runs.activity import (
+    activity_by_task,
+    discussable_by_task,
+    pr_url_by_task,
+    project_activity_fingerprint,
+)
 from workbench.runs.lifecycle import (
     NotCancellable,
     active_run_for_project,
@@ -329,6 +334,10 @@ def show_project(
     # A finished task's pull request, if one was opened — surfaced directly on
     # the tree rather than only on the run that opened it.
     pr_urls = pr_url_by_task(db, project.id)
+    # Which run each task's Discuss button would reopen. A separate question
+    # from `activity`: that one is about runs worth marking, and the run worth
+    # talking to is usually one that has finished, which is never marked.
+    discussable = discussable_by_task(db, project.id)
     # What the page started with, so the poll script below can tell "nothing
     # has changed" from "something has" without re-rendering anything itself.
     activity_version = project_activity_fingerprint(db, project.id)
@@ -347,6 +356,7 @@ def show_project(
             "archived_count": archived_count,
             "activity": activity,
             "pr_urls": pr_urls,
+            "discussable": discussable,
             "activity_version": activity_version,
             # Tasks one click away from starting or continuing execution —
             # promoted above the tree so the thing most worth doing on the

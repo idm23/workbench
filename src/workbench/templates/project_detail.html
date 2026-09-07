@@ -5,6 +5,38 @@
 {% block back %}<a class="back" href="/users/{{ project.user_id }}">&lsaquo; {{ project.user.name }}</a>{% endblock %}
 
 {% block content %}
+{% macro talk_actions(task_id, pr_url=None) %}
+  {#- The Discuss / Split / Check CI trio, wherever a task appears on this
+      page. One macro rather than three copies: the tree lists the same task in
+      up to two places at once (promoted above, and again in the tree itself),
+      and three copies of a button is three places for its form action to
+      drift from the route that handles it.
+
+      Everything here reopens the *same* run — the newest one on this task with
+      a session to resume — because "talk to whoever did this" means that run
+      and not a fresh agent with no memory of it. -#}
+  {% set talk = discussable.get(task_id) %}
+  {% if talk %}
+    {# Opens the one dialog at the foot of the page, told which run it is for.
+       A dialog per row would be dozens of identical forms in the markup. #}
+    <button type="button" class="slim secondary" data-open-discuss data-run="{{ talk.run_id }}">Discuss</button>
+    {% if talk.has_plan %}
+      {# Only next to a run that produced a plan: there is nothing to split
+         otherwise. Fires immediately, like every other action button here. #}
+      <form method="post" action="/runs/{{ talk.run_id }}/continue">
+        <input type="hidden" name="shortcut" value="split">
+        <button class="slim secondary" type="submit">Split</button>
+      </form>
+    {% endif %}
+    {% if pr_url %}
+      <form method="post" action="/runs/{{ talk.run_id }}/continue">
+        <input type="hidden" name="shortcut" value="check_ci">
+        <button class="slim secondary" type="submit">Check CI</button>
+      </form>
+    {% endif %}
+  {% endif %}
+{% endmacro %}
+
 <h1 class="mono" style="font-size: clamp(1.3rem, 6vw, 1.8rem);">{{ project.owner }}/{{ project.repo }}</h1>
 <p class="sub">
   {% if project.description %}{{ project.description }}{% else %}No description.{% endif %}
@@ -57,6 +89,7 @@
             <div class="task-title">{{ item.node.task.title }}</div>
             <div class="task-actions">
               <a class="slim" href="{{ item.pr_url }}" target="_blank" rel="noopener">View PR</a>
+              {{ talk_actions(item.node.task.id, item.pr_url) }}
               <form method="post" action="/tasks/{{ item.node.task.id }}/sync">
                 <button class="slim secondary" type="submit">Sync</button>
               </form>
@@ -99,6 +132,10 @@
                 <form method="post" action="/runs/{{ item.run_id }}/approve">
                   <button class="slim" type="submit">{% if item.proposed_subtask_count %}Approve ({{ item.proposed_subtask_count }} subtask{{ 's' if item.proposed_subtask_count != 1 }}){% else %}Execute{% endif %}</button>
                 </form>
+                {# Beside Approve on purpose: this is the moment someone reads a
+                   plan and disagrees with it, and the alternative to arguing
+                   with it is approving something they did not want. #}
+                {{ talk_actions(item.node.task.id) }}
               {% else %}
                 <form method="post" action="/tasks/{{ item.node.task.id }}/runs"
                       style="display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;">
@@ -190,6 +227,7 @@
               {% if pr_url %}
                 <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
               {% endif %}
+              {{ talk_actions(node.task.id, pr_url) }}
               {% if busy and busy.needs_attention and busy.phase == 'plan' %}
                 {# A plan a person has not yet acted on. What approving does
                    depends on what the plan decided: decompose, or carry out
@@ -347,6 +385,39 @@
   })();
 </script>
 {% endif %}
+{% if discussable %}
+  {# One dialog for the whole page, pointed at whichever run opened it. The
+     run page has the same dialog with a fixed action, because there is only
+     ever one run there; here the action is set on the way in. #}
+  <dialog id="discuss-dialog">
+    <form method="post" id="discuss-form">
+      <label for="discuss-message">Say something to the agent</label>
+      <textarea id="discuss-message" name="message" rows="4" required
+                placeholder="Feedback on the plan, or anything else…"></textarea>
+      <div class="dialog-actions">
+        <button type="button" class="secondary" id="discuss-cancel">Cancel</button>
+        <button type="submit">Send</button>
+      </div>
+    </form>
+  </dialog>
+  <script>
+    (function () {
+      var dialog = document.getElementById("discuss-dialog");
+      var form = document.getElementById("discuss-form");
+      document.querySelectorAll("[data-open-discuss]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          form.action = "/runs/" + button.dataset.run + "/continue";
+          document.getElementById("discuss-message").value = "";
+          dialog.showModal();
+        });
+      });
+      document.getElementById("discuss-cancel").addEventListener("click", function () {
+        dialog.close();
+      });
+    })();
+  </script>
+{% endif %}
+
 <script>
   // The task tree is rendered once per request from a snapshot — nothing
   // pushes an update to an open tab. This is the project-scoped analogue of
@@ -357,6 +428,14 @@
     var marker = document.getElementById("task-tree") || document.getElementById("activity-version");
     if (!marker) return;
     var startVersion = marker.dataset.activityVersion;
+
+    function isDiscussing() {
+      // An open dialog counts as mid-type even before anything is typed into
+      // it: a reload closes it, and someone who has just opened it is reading
+      // the plan they are about to argue with.
+      var dialog = document.getElementById("discuss-dialog");
+      return !!(dialog && dialog.open);
+    }
 
     function isMidType(el) {
       // "Add a task"'s title/body are the one thing on this page a person is
@@ -379,7 +458,7 @@
         .then(function (response) { return response.json(); })
         .then(function (data) {
           if (data.version === startVersion) return;
-          if (isMidType(document.activeElement)) return; // try again next tick
+          if (isMidType(document.activeElement) || isDiscussing()) return; // next tick
           // Same key base.html's own scroll-restore script reads back on
           // load — a poll-triggered reload never fires the `submit` event
           // that script stashes position on, so without this the tree would
