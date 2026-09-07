@@ -317,6 +317,12 @@ def report_run_outcome(db: DbSession, run_id: int, incoming: OutcomeIn) -> None:
     Only an execute run reports here: the plan phase runs under real
     read-only plan mode, which cannot call this at all, and decomposes
     through structured output instead.
+
+    `needs_answer` arrives the same way, carrying the question in `detail`.
+    That it shares this route rather than getting one of its own is the point:
+    a question is a thing the agent reports about how the run went, recorded
+    live so it survives the process, and `record()` turns it into a status the
+    same way it turns the others into theirs.
     """
     run = _run_or_404(db, run_id)
     if run.status is not RunStatus.RUNNING:

@@ -391,6 +391,34 @@ def _nothing_looked_at(context: ToolContext, tool: str) -> ToolResult | None:
     )
 
 
+def _ask_user(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    """Ask the person a question, and end the run waiting for the answer.
+
+    Reported through the same endpoint as any other outcome, because that is
+    what it is: the agent saying how the run went. Recorded live, so the
+    question survives the process that asked it.
+
+    The refusal below is the same one `report_outcome` gets, and matters more
+    here: a question asked before reading anything is not a question, it is a
+    reflex, and every one of them costs a person their attention.
+    """
+    if (refusal := _nothing_looked_at(context, "ask_user")) is not None:
+        return refusal
+
+    question = str(args.get("question") or "").strip()
+    if not question:
+        return ToolResult("`question` must not be empty.", is_error=True)
+
+    result = _report(context, {"outcome": "needs_answer", "detail": question})
+    if result.is_error:
+        return result
+    return ToolResult(
+        "Asked. Stop now: say briefly what you were doing and what you need to "
+        "know, and make no further tool calls. The run ends here and resumes "
+        "with the answer."
+    )
+
+
 def _report_outcome(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     """Tell Workbench how the task went, through its own API.
 
@@ -424,8 +452,13 @@ def _report_outcome(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
             "say what stopped you.",
             is_error=True,
         )
-    payload = {"outcome": outcome, "detail": str(args.get("detail") or "") or None}
+    return _report(context, {"outcome": outcome, "detail": str(args.get("detail") or "") or None})
 
+
+def _report(context: ToolContext, payload: dict[str, Any]) -> ToolResult:
+    """POST one outcome to Workbench's own API. Shared by both tools that
+    report one, so there is a single place that knows the route and a single
+    behaviour when it cannot be reached."""
     try:
         response = httpx.post(
             f"{context.api_base}/api/runs/{context.run_id}/outcome",
@@ -440,7 +473,7 @@ def _report_outcome(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
             "your summary; do not retry more than once.",
             is_error=True,
         )
-    return ToolResult(f"Recorded outcome: {outcome}.")
+    return ToolResult(f"Recorded outcome: {payload['outcome']}.")
 
 
 def _submit_plan(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
@@ -588,6 +621,30 @@ TOOLS: dict[str, Tool] = {
             handler=_report_outcome,
         ),
         Tool(
+            name="ask_user",
+            description=(
+                "Ask the person a question and stop. Use this only for a fork you "
+                "genuinely cannot settle and that changes what gets built — not for "
+                "a detail you could choose and mention in your summary. The run ends "
+                "here and resumes with their answer, so ask everything you need in "
+                "one question."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": (
+                            "What you need to know, and enough context to answer it "
+                            "without reading the transcript."
+                        ),
+                    },
+                },
+                "required": ["question"],
+            },
+            handler=_ask_user,
+        ),
+        Tool(
             name="submit_plan",
             description=(
                 "Deliver the plan and end the planning run. Call this exactly once, "
@@ -618,6 +675,13 @@ TOOLS: dict[str, Tool] = {
     )
 }
 
+#: The tools that end a run by reporting how it went. A run that has called
+#: one of these has finished on purpose, which is what makes stopping right
+#: afterwards correct rather than a stall — see the nudge in `agents/local.py`,
+#: which fired twice at a run that had just asked a question and was waiting
+#: for the answer.
+OUTCOME_TOOLS = frozenset({"report_outcome", "ask_user"})
+
 #: What the plan phase gets: enough to investigate, nothing that writes and no
 #: shell. See the module docstring — this tuple *is* the read-only guarantee.
 READ_ONLY_TOOLS = ("list_files", "read_file", "search", "submit_plan")
@@ -633,6 +697,7 @@ WORKING_TOOLS = (
     "write_file",
     "edit_file",
     "report_outcome",
+    "ask_user",
 )
 
 

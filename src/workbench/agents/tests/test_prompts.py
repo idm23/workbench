@@ -27,9 +27,26 @@ def test_a_missing_body_leaves_no_empty_section():
     assert "\n\n\n" not in prompt
 
 
-def test_the_agent_is_told_nobody_is_there_to_answer():
-    """A detached run has no prompt for anyone to respond to."""
-    assert "nobody attached" in plan_prompt("Anything")
+def test_a_plan_run_is_told_it_cannot_ask():
+    """Not a style preference — the phase runs read-only and can call nothing,
+    so asking is impossible here even now that an execute run can do it. The
+    plan's job is to name the fork clearly enough that the run which *can* ask
+    knows what to ask about."""
+    prompt = plan_prompt("Anything")
+
+    assert "no way to ask" in prompt
+    assert "state the interpretation" in prompt
+
+
+def test_an_execute_run_is_told_when_asking_is_right():
+    """Stated as a bound rather than an invitation: an agent that asks about
+    everything costs a person their attention every time, which is worse than
+    one that decides and says so."""
+    prompt = execute_prompt("Anything")
+
+    assert "cannot settle" in prompt
+    assert "changes what gets built" in prompt
+    assert "is not one of those" in prompt
 
 
 def test_the_plan_phase_explains_when_to_decompose():

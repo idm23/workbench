@@ -406,3 +406,31 @@ def test_the_dialog_is_rendered_once_for_the_whole_page(client, session):
 
 def test_a_page_with_nothing_to_discuss_has_no_dialog(client, session):
     assert '<dialog id="discuss-dialog">' not in _squashed(project_page(client, session))
+
+
+def test_a_question_is_shown_on_the_tree_with_an_answer_button(client, session):
+    """The row shows what was asked, next to the button that answers it —
+    rather than a badge you have to open a run page to understand."""
+    run = a_run(session, status=RunStatus.AWAITING_ANSWER)
+    run.resume_token = "session-abc"
+    run.outcome_detail = "Should this replace the old endpoint, or sit beside it?"
+    session.commit()
+
+    page = _squashed(project_page(client, session))
+
+    assert "Should this replace the old endpoint, or sit beside it?" in page
+    assert ">Answer<" in page
+    assert f'data-open-discuss data-run="{run.id}"' in page
+
+
+def test_a_question_does_not_offer_approve(client, session):
+    """A plan wants approving; a question wants answering. Sharing a status
+    would have meant sharing a button."""
+    run = a_run(session, status=RunStatus.AWAITING_ANSWER, phase=RunPhase.PLAN)
+    run.outcome_detail = "Which shape did you want?"
+    session.commit()
+
+    page = _squashed(project_page(client, session))
+
+    assert ">Approve" not in page
+    assert ">Answer<" in page

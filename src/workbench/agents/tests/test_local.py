@@ -705,3 +705,30 @@ def test_a_probe_that_cannot_answer_is_unknown_rather_than_a_failure(monkeypatch
 
     assert status.method == CREDENTIAL_UNKNOWN
     assert not status.logged_in
+
+
+def test_a_run_that_asked_a_question_is_not_nudged(monkeypatch, tmp_path):
+    """Found on a real run: the agent asked, stopped as instructed, and the
+    loop spent its next two turns telling it to carry on. A run that reported
+    an outcome stopped on purpose — and after a question the thing it waits
+    for is a person, not a reminder."""
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(tool_call("read_file", {"path": "app.py"}, call_id="c1")),
+            sse(tool_call("ask_user", {"question": "Which shape did you want?"}, call_id="c2")),
+            sse(chunk(content="Waiting to hear which you want.")),
+        ),
+    )
+    monkeypatch.setattr(
+        "httpx.post", lambda *a, **k: httpx.Response(204, request=httpx.Request("POST", "http://x"))
+    )
+
+    items = drain(LocalBackend().run(a_request(worktree=worktree)))
+    notices = [one["text"] for one in events(items, RunEventKind.NOTICE)]
+
+    assert not any("asking it to continue" in text for text in notices)
+    assert isinstance(items[-1], AgentFinished)
+    assert items[-1].text == "Waiting to hear which you want."
