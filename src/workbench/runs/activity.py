@@ -172,7 +172,7 @@ def discussable_by_task(db: Session, project_id: int) -> dict[int, Discussable]:
     return {
         task_id: Discussable(run_id=run_id, has_plan=bool(plan))
         for run_id, task_id, status, plan in rows
-        if status.is_terminal or status is RunStatus.AWAITING_REVIEW
+        if status.is_continuable
     }
 
 
