@@ -45,7 +45,7 @@
 
 {% if run.plan %}
   <h2 class="section">Plan</h2>
-  <pre class="block">{{ run.plan }}</pre>
+  <div class="block prose">{{ run.plan | markdown }}</div>
 {% endif %}
 
 {% if run.proposed_subtasks %}
@@ -57,7 +57,7 @@
           {{ subtask.title }}
           <span class="chev">{{ 'execute' if subtask.ready_to_execute else 'plan' }}</span>
         </div>
-        {% if subtask.body %}<div class="row-meta">{{ subtask.body }}</div>{% endif %}
+        {% if subtask.body %}<div class="row-meta prose">{{ subtask.body | markdown }}</div>{% endif %}
       </li>
     {% endfor %}
   </ul>
@@ -65,7 +65,7 @@
 
 {% if run.summary %}
   <h2 class="section">Summary</h2>
-  <pre class="block">{{ run.summary }}</pre>
+  <div class="block prose">{{ run.summary | markdown }}</div>
 {% endif %}
 
 {% if run.diffstat %}
@@ -83,9 +83,17 @@
 
 <ul class="events" id="events">
   {% for event in events %}
+    {% set body = event.payload.get('name') or event.payload.get('text') or event.payload.get('status') or '' %}
     <li class="ev {{ event.kind }}" data-seq="{{ event.seq }}">
       <span class="ev-kind">{{ event.kind }}</span>
-      <div class="ev-body">{{ event.payload.get('name') or event.payload.get('text') or event.payload.get('status') or '' }}</div>
+      {# Only prose (text/thinking) is Markdown — a tool name or a status
+         word is not something the model composed, and running it through a
+         Markdown renderer would just be a slower way to display it verbatim. #}
+      {% if event.kind in ('text', 'thinking') and body %}
+        <div class="ev-body prose">{{ body | markdown }}</div>
+      {% else %}
+        <div class="ev-body">{{ body }}</div>
+      {% endif %}
     </li>
   {% endfor %}
 </ul>
@@ -157,7 +165,14 @@
       label.textContent = kind;
       var body = document.createElement("div");
       body.className = "ev-body";
-      // textContent, never innerHTML: this is model output and tool results.
+      // textContent, never innerHTML: this is model output and tool results,
+      // and there is no sanitizer on this side of the connection to trust it
+      // through innerHTML. So a live "text"/"thinking" chunk shows its raw
+      // Markdown syntax while the run is in flight — the same trade the
+      // whole page already makes ("Rendered server-side... blank when
+      // JavaScript fails" above): the "end" handler below reloads the page
+      // the moment the stream closes, and the reload is what renders it,
+      // the same way it already re-reads the now-final summary and diffstat.
       body.textContent = data.name || data.text || data.status || "";
       item.appendChild(label);
       item.appendChild(body);

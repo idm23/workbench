@@ -12,10 +12,10 @@ the classic way a page that felt instant stops being one.
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from workbench.database.models import Run, RunPhase, RunStatus, Task
+from workbench.database.models import Run, RunEvent, RunPhase, RunStatus, Task
 
 #: Statuses worth marking. The two active ones because work is happening,
 #: `awaiting_review` because a plan nobody has looked at is the state most
@@ -24,6 +24,9 @@ from workbench.database.models import Run, RunPhase, RunStatus, Task
 #: run that failed for a reason that has nothing to do with the work itself
 #: (a rate-limit window, a dropped connection) still has a resume token worth
 #: not losing, and the button to use it should be right where the run was.
+#:
+#: Deliberately applied *after* picking a task's newest run rather than as a
+#: filter on the query — see `activity_by_task`.
 MARKED_STATUSES = (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.AWAITING_REVIEW, RunStatus.FAILED)
 
 
@@ -38,6 +41,11 @@ class TaskActivity:
     #: rather than fetched separately so the page can decide "Execute" vs
     #: "Approve & create N subtasks" without a second query per row.
     proposed_subtasks: dict | None = None
+    #: A plan run's own output text, when it has finished one. Carried here for
+    #: the same reason as `proposed_subtasks`: the "ready to execute" summary
+    #: at the top of the page needs to show it, and this is the query that
+    #: already visits every marked run once per page load.
+    plan: str | None = None
 
     @property
     def proposed_subtask_count(self) -> int:
@@ -84,22 +92,40 @@ def activity_by_task(db: Session, project_id: int) -> dict[int, TaskActivity]:
     """The run worth marking on each of a project's tasks, keyed by task id.
 
     A task can accumulate several runs — a plan, then an execute, then a retry
-    — so where more than one qualifies the newest wins, which is the one whose
-    state the page is describing.
+    — so the newest wins, which is the one whose state the page is describing.
+
+    "Newest" is taken across *every* run of the task, and only then judged
+    worth marking. Filtering to `MARKED_STATUSES` first would be the same
+    thing right up until a run finished cleanly: `succeeded` is not marked, so
+    an older `awaiting_review` would survive it and go on describing a task
+    whose work is long done. That is not hypothetical — a plan run left the
+    tree offering to approve it after two later runs had carried it out,
+    opened a pull request, and marked the task done, so every press started
+    another agent against finished work and nothing on the page ever moved.
     """
     rows = db.execute(
-        select(Run.id, Run.task_id, Run.phase, Run.status, Run.proposed_subtasks)
+        select(Run.id, Run.task_id, Run.phase, Run.status, Run.proposed_subtasks, Run.plan)
         .join(Task, Task.id == Run.task_id)
-        .where(Task.project_id == project_id, Run.status.in_(MARKED_STATUSES))
+        .where(Task.project_id == project_id)
         .order_by(Run.id)
     ).all()
 
     # Ascending, so a later row overwrites an earlier one and the newest wins.
-    return {
+    newest = {
         task_id: TaskActivity(
-            run_id=run_id, phase=phase, status=status, proposed_subtasks=proposed_subtasks
+            run_id=run_id,
+            phase=phase,
+            status=status,
+            proposed_subtasks=proposed_subtasks,
+            plan=plan,
         )
-        for run_id, task_id, phase, status, proposed_subtasks in rows
+        for run_id, task_id, phase, status, proposed_subtasks, plan in rows
+    }
+
+    return {
+        task_id: activity
+        for task_id, activity in newest.items()
+        if activity.status in MARKED_STATUSES
     }
 
 
@@ -122,3 +148,42 @@ def pr_url_by_task(db: Session, project_id: int) -> dict[int, str]:
     ).all()
 
     return {task_id: pr_url for task_id, pr_url in rows}  # noqa: C416
+
+
+def project_activity_fingerprint(db: Session, project_id: int) -> str:
+    """An opaque marker of "has anything on this project's page changed".
+
+    Polled by `project_detail.html` against `/projects/{id}/activity-version`
+    so the tree can reload itself when a run transitions or a task changes on
+    another device — never parsed, only compared for equality against the
+    value the page rendered with, so what it is made of matters only here.
+
+    No single column moves on every kind of change that page cares about, so
+    this concatenates two aggregates:
+
+    - `COUNT`/`MAX(updated_at)` over the project's tasks. `COUNT` catches a
+      task being added or deleted, neither of which bumps any surviving row's
+      `updated_at`; `MAX(updated_at)` catches an edit or a status toggle to a
+      task that already existed. Together they catch everything a `Task` row
+      can do without needing to diff the tree itself.
+    - `MAX(RunEvent.id)` over every run under this project — through a task,
+      or standing directly on it as the project's own conversation (see
+      `Run.project_id`). Every run lifecycle transition (queued -> running ->
+      succeeded/failed/awaiting_review), a pull request opening, and a
+      rate-limit notice are all already written as a `run_events` row, so the
+      newest event id already tracks all of it without reasoning about
+      `Run`'s own columns — which has no `updated_at` to read instead.
+    """
+    task_count, task_max_updated = db.execute(
+        select(func.count(Task.id), func.max(Task.updated_at)).where(Task.project_id == project_id)
+    ).one()
+
+    event_max_id = db.scalar(
+        select(func.max(RunEvent.id))
+        .select_from(RunEvent)
+        .join(Run, Run.id == RunEvent.run_id)
+        .outerjoin(Task, Task.id == Run.task_id)
+        .where(or_(Task.project_id == project_id, Run.project_id == project_id))
+    )
+
+    return f"{task_count}:{task_max_updated}:{event_max_id}"

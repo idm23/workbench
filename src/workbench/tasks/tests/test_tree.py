@@ -7,8 +7,9 @@ so a mistake in ordering or depth is silent rather than obvious.
 
 import pytest
 
-from workbench.database.models import Task, TaskStatus
-from workbench.tasks import build_tree, flatten, would_create_cycle
+from workbench.database.models import RunPhase, RunStatus, Task, TaskStatus
+from workbench.runs.activity import TaskActivity
+from workbench.tasks import build_tree, flatten, ready_for_review, would_create_cycle
 
 
 def make(task_id: int, parent: int | None = None, position: int = 0, title: str = "t") -> Task:
@@ -100,55 +101,6 @@ def test_progress_percent_matches_the_fraction():
 
 def test_a_leaf_has_no_progress_percent():
     assert build_tree([make(1)])[0].progress_percent is None
-
-
-def test_no_body_has_no_preview():
-    node = build_tree([make(1)])[0]
-
-    assert node.body_preview is None
-    assert node.body_rest is None
-
-
-def test_a_short_body_is_shown_whole_with_nothing_left_over():
-    task = make(1)
-    task.body = "Short enough to fit."
-
-    node = build_tree([task])[0]
-
-    assert node.body_preview == "Short enough to fit."
-    assert node.body_rest is None
-
-
-def test_a_long_body_is_split_at_a_word_boundary():
-    task = make(1)
-    task.body = "word " * 100  # 500 characters, well past the preview limit
-
-    node = build_tree([task])[0]
-    preview, rest = node.body_preview, node.body_rest
-    assert preview is not None
-    assert rest is not None
-
-    assert len(preview) <= 220
-    assert not preview.endswith("wor")  # never cuts mid-word
-    # Concatenating what is shown and what is folded reconstructs the body,
-    # modulo the single space consumed at the cut point.
-    body = task.body
-    assert body is not None
-    assert body.startswith(preview)
-    assert body.endswith(rest)
-
-
-def test_a_body_with_no_spaces_before_the_limit_is_hard_cut():
-    """No good place to break, so this falls back to a plain cut rather than
-    showing nothing or blowing past the limit."""
-    task = make(1)
-    task.body = "x" * 300
-
-    node = build_tree([task])[0]
-
-    assert node.body_preview is not None
-    assert len(node.body_preview) == 220
-    assert node.body_rest == "x" * 80
 
 
 def test_self_parenting_task_does_not_recurse():
@@ -247,3 +199,62 @@ def test_done_count_uses_effective_status_not_raw_status():
     roots = build_tree(tasks)
     assert roots[0].children[0].effective_status is TaskStatus.DONE
     assert roots[0].progress == "1/1"
+
+
+def busy(run_id: int = 1) -> TaskActivity:
+    """A minimal in-flight run, for tasks that should be excluded as busy."""
+    return TaskActivity(run_id=run_id, phase=RunPhase.CONVERSATION, status=RunStatus.RUNNING)
+
+
+@pytest.mark.parametrize("status", [TaskStatus.OPEN, TaskStatus.ACTIVE, TaskStatus.BLOCKED])
+def test_a_leaf_with_an_open_pr_is_ready_for_review(status):
+    task = make(1, title="leaf")
+    task.status = status
+    nodes = flatten(build_tree([task]))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={1: "https://github.com/x/y/pull/1"})
+
+    assert [item.node.task.id for item in result] == [1]
+    assert result[0].pr_url == "https://github.com/x/y/pull/1"
+
+
+@pytest.mark.parametrize("status", [TaskStatus.DONE, TaskStatus.CANCELLED])
+def test_a_finished_task_is_not_ready_for_review_even_with_an_open_pr(status):
+    task = make(1, title="leaf")
+    task.status = status
+    nodes = flatten(build_tree([task]))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={1: "https://github.com/x/y/pull/1"})
+
+    assert result == []
+
+
+def test_a_leaf_with_no_pr_is_not_ready_for_review():
+    nodes = flatten(build_tree([make(1, title="leaf")]))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={})
+
+    assert result == []
+
+
+def test_a_task_with_something_running_against_it_is_not_ready_for_review():
+    """An open PR with a follow-up run in flight is left to the main tree row,
+    which already shows the busy badge and a way to stop it."""
+    nodes = flatten(build_tree([make(1, title="leaf")]))
+
+    result = ready_for_review(
+        nodes, activity={1: busy()}, pr_urls={1: "https://github.com/x/y/pull/1"}
+    )
+
+    assert result == []
+
+
+def test_a_parent_task_is_never_ready_for_review():
+    """Only leaves ever run agents, so only leaves ever earn a `pr_url` — but
+    the check is defensive, mirroring `ready_to_execute`'s own leaf guard."""
+    tasks = [make(1, title="parent"), make(2, parent=1, title="child")]
+    nodes = flatten(build_tree(tasks))
+
+    result = ready_for_review(nodes, activity={}, pr_urls={1: "https://github.com/x/y/pull/1"})
+
+    assert result == []

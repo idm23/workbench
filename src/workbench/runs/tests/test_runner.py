@@ -808,34 +808,41 @@ def test_watch_for_input_does_not_miss_a_row_committed_near_the_idle_deadline(
     db, run, data_dir, monkeypatch
 ):
     """Regression for a real race: checking the idle deadline *before*
-    fetching could let a row committed through a genuinely separate
-    connection, just as the window was closing, go unseen even though it
-    arrived while this loop was still going to look — found by an actual
-    concurrent smoke test, not assumed safe from a single-session test.
-    """
-    import threading
-    import time as time_module
+    fetching would let a row committed through a genuinely separate
+    connection go unseen, even though it was already there when this loop was
+    going to look — found by an actual concurrent smoke test, not assumed safe
+    from a single-session test.
 
+    The state that race produces is an iteration where the deadline has
+    already passed *and* an unread row exists, so that is the state this sets
+    up directly. It used to be reached by racing a thread into the gap between
+    two poll ticks, which meant the assertion held only while a wall-clock
+    write landed inside an 80ms window — thread start, sleep overshoot, engine
+    connect and a WAL commit all had to fit, and on a loaded runner they did
+    not. It failed in CI having passed on the same commit minutes earlier.
+
+    Nothing about the guarantee is weakened by removing the thread. The
+    ordering under test is between two statements in one iteration, not
+    between two threads; the separate connection is kept because *that* part
+    is a real question, being what proves this session sees another's commit
+    at all.
+    """
     from sqlalchemy.orm import Session as SessionCls
 
     from workbench.database.db import make_engine
     from workbench.runs.store import append_input
 
-    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(runner_module, "INPUT_POLL_SECONDS", 0.01)
     other_engine = make_engine(f"sqlite+pysqlite:///{data_dir / 'workbench.db'}")
-
-    def post_from_a_separate_connection():
-        # Lands squarely between the poll ticks at .1 and .2 — comfortable
-        # margin either side against scheduling jitter.
-        time_module.sleep(0.12)
-        with SessionCls(other_engine) as other_db:
-            append_input(other_db, run.id, "from elsewhere")
-
-    threading.Thread(target=post_from_a_separate_connection, daemon=True).start()
+    with SessionCls(other_engine) as other_db:
+        append_input(other_db, run.id, "from elsewhere")
 
     async def scenario():
         activity = runner_module._Activity()
-        watcher = runner_module._watch_for_input(db, run.id, activity, idle_seconds=0.15)
+        # Already past the window. A loop that checked this before fetching
+        # would return here having never looked, which is the bug.
+        activity.last -= 10
+        watcher = runner_module._watch_for_input(db, run.id, activity, idle_seconds=0.05)
         return [body async for body in watcher]
 
     assert asyncio.run(scenario()) == ["from elsewhere"]

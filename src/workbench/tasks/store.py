@@ -25,6 +25,11 @@ from workbench.git.worktrees import local_checkout, remove_worktree
 #: `branch_choices_for` from this module — the reverse import would cycle.
 _TASK_ORIGIN_PREFIX = "task:"
 
+#: What a subtask branches from by default. Mirrors `tasks.origin.DEV` — not
+#: imported, for the same reason `_TASK_ORIGIN_PREFIX` above is spelled out
+#: rather than imported. See `create_subtask`.
+_SUBTASK_DEFAULT_ORIGIN = "staging"
+
 
 @dataclass(frozen=True)
 class TaskNotFound:
@@ -187,10 +192,17 @@ def create_subtask(
     """Add a child of `task`, from a plan's decomposition or an execute run's
     live spin-off — the two callers this exists for.
 
-    Defaults the new task's origin to `task`'s own branch when it has one:
-    a subtask spun off mid-plan or mid-execute is continuing that work, not
-    starting fresh from main. `ready_to_execute` sets `entry_phase` so a
-    fully-specified piece can skip its own planning pass.
+    Defaults the new task's origin to staging, not to `task`'s own branch.
+    The usual reason to decompose is a handful of independent pieces that
+    should each land in staging on their own — "the little ones go in, then
+    you do the wiring" — so a subtask stacked on a parent whose own branch
+    may never be pushed (a plan that only decomposes, or an execute that
+    hits `needs_replanning`, never publishes) would otherwise have no real
+    base to open a pull request against at all. `task`'s own branch is still
+    offered as an explicit choice via `branch_choices_for` for the case that
+    genuinely is a continuation, just no longer the default. `ready_to_execute`
+    sets `entry_phase` so a fully-specified piece can skip its own planning
+    pass.
     """
     created = create_task(db, task.project, title=title, body=body, parent_id=task.id)
     if isinstance(created, WrongProject):
@@ -198,7 +210,6 @@ def create_subtask(
 
     if ready_to_execute:
         created.entry_phase = RunPhase.EXECUTE
-    if task.branch:
-        created.origin_ref = task_origin_value(task)
+    created.origin_ref = _SUBTASK_DEFAULT_ORIGIN
     db.commit()
     return created

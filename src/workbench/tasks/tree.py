@@ -7,27 +7,21 @@ layer loads rows; this decides what they look like.
 
 from dataclasses import dataclass, field
 
-from workbench.database.models import Task, TaskStatus
+from workbench.database.models import RunPhase, Task, TaskStatus
+from workbench.runs.activity import TaskActivity
 
 #: Guards against a parent cycle rendering forever. Nothing legitimate nests
 #: anywhere near this deep; hitting it means the data is corrupt.
 MAX_DEPTH = 20
 
-#: How much of a task's body the tree shows before truncating. Long enough
-#: for a sentence or two of context, short enough that a planning note
-#: written for an agent — which can run to several paragraphs — does not
-#: dominate a page meant to be scanned from a phone.
-BODY_PREVIEW_CHARS = 220
-
-
-def _truncate_at_word(text: str, limit: int) -> str:
-    """`text` cut to at most `limit` characters, backing up to the last
-    space so a preview never ends mid-word."""
-    cut = text[:limit]
-    last_space = cut.rfind(" ")
-    if last_space > 0:
-        cut = cut[:last_space]
-    return cut
+# Task bodies and plans used to be split here into a `_preview` and a `_rest`
+# at a character count, so a long one could be folded behind a disclosure
+# triangle. That split is gone, and deliberately: both are Markdown, and
+# cutting Markdown at an arbitrary offset hands the renderer two fragments
+# that are not valid documents — a code fence opened in one half and closed
+# in the other, a list chopped mid-item. Whatever bounds the height of a long
+# plan on the page is a presentational question, so it is answered in CSS
+# (see `.foldable` in base.html) against the whole rendered document.
 
 
 @dataclass
@@ -65,28 +59,6 @@ class TaskNode:
         if not self.children:
             return None
         return round(100 * self.done_count / len(self.children))
-
-    @property
-    def body_preview(self) -> str | None:
-        """The task's body, cut to a skimmable length — or all of it, when
-        it already fits. `None` when there is no body at all."""
-        body = self.task.body
-        if not body:
-            return None
-        if len(body) <= BODY_PREVIEW_CHARS:
-            return body
-        return _truncate_at_word(body, BODY_PREVIEW_CHARS)
-
-    @property
-    def body_rest(self) -> str | None:
-        """Whatever `body_preview` left out, for a "show more" toggle to
-        reveal — `None` when nothing was cut, which is also the page's cue
-        that there is nothing to expand."""
-        body = self.task.body
-        preview = self.body_preview
-        if not body or preview is None or len(body) <= BODY_PREVIEW_CHARS:
-            return None
-        return body[len(preview) :].lstrip()
 
     @property
     def effective_status(self) -> TaskStatus:
@@ -180,3 +152,117 @@ def would_create_cycle(task: Task, new_parent: Task) -> bool:
             return True
         current = current.parent
     return True
+
+
+@dataclass(frozen=True)
+class ReadyTask:
+    """A leaf task one click away from running code.
+
+    Two cases produce one of these: a plan run is `awaiting_review` with
+    nothing left to decide — approving it starts execute directly, or creates
+    the subtasks it proposed — or a task has never run at all but a parent's
+    plan already marked it `entry_phase=execute`, fully specified with
+    nothing left to plan. Both already have a one-click button in the tree;
+    this is what promotes them to the top of the page.
+    """
+
+    node: TaskNode
+    #: Set only for the "approve a plan" case — posts to `/runs/{id}/approve`.
+    #: `None` for the "never run, already specified" case, which instead
+    #: posts to `/tasks/{id}/runs`.
+    run_id: int | None
+    #: `Run.plan` for the approval case, or the task's own body — the closest
+    #: thing to a plan a never-run task has — for the other.
+    plan_text: str | None
+    proposed_subtask_count: int
+
+
+def ready_to_execute(
+    nodes: list[TaskNode],
+    activity: dict[int, TaskActivity],
+    pr_urls: dict[int, str],
+    checkout: bool,
+) -> list[ReadyTask]:
+    """Leaf tasks a single click away from starting or continuing execution.
+
+    Deliberately narrower than "every task with a run button": a task that
+    still needs its first *plan* is ready to be planned, not ready to
+    execute, so it is left out even though the tree also offers it a button.
+    A task with anything else in flight (queued, running, or failed) is left
+    out too — something is already happening, or a different action (retry)
+    applies, neither of which is "one click starts execution".
+    """
+    ready: list[ReadyTask] = []
+    for node in nodes:
+        if not node.is_leaf:
+            continue
+        if node.effective_status in (TaskStatus.DONE, TaskStatus.CANCELLED):
+            continue
+        if pr_urls.get(node.task.id):
+            continue
+
+        busy = activity.get(node.task.id)
+        if busy is not None:
+            if busy.needs_attention and busy.phase is RunPhase.PLAN:
+                ready.append(
+                    ReadyTask(
+                        node=node,
+                        run_id=busy.run_id,
+                        plan_text=busy.plan,
+                        proposed_subtask_count=busy.proposed_subtask_count,
+                    )
+                )
+            continue
+
+        if checkout and node.task.entry_phase is RunPhase.EXECUTE:
+            ready.append(
+                ReadyTask(
+                    node=node,
+                    run_id=None,
+                    plan_text=node.task.body,
+                    proposed_subtask_count=0,
+                )
+            )
+    return ready
+
+
+@dataclass(frozen=True)
+class ReviewTask:
+    """A leaf task whose most recent pull request is still open.
+
+    The complement of `ready_to_execute`'s own exclusion of tasks with a
+    `pr_url` — promotes a task that's done except for a person's decision,
+    the same way `ReadyTask` promotes one that's one click from starting.
+    """
+
+    node: TaskNode
+    pr_url: str
+
+
+def ready_for_review(
+    nodes: list[TaskNode],
+    activity: dict[int, TaskActivity],
+    pr_urls: dict[int, str],
+) -> list[ReviewTask]:
+    """Leaf tasks with an open pull request nobody has closed out yet.
+
+    `pr_url` outlives a status toggle (see the tree template's own note on
+    this), so a task stays listed here until it is actually marked done. Left
+    out when something is currently running against the task — e.g. a
+    follow-up conversation addressing review comments — since the main tree
+    row already shows what that needs; this section is only for a task with
+    nothing left but review.
+    """
+    review: list[ReviewTask] = []
+    for node in nodes:
+        if not node.is_leaf:
+            continue
+        if node.effective_status in (TaskStatus.DONE, TaskStatus.CANCELLED):
+            continue
+        pr_url = pr_urls.get(node.task.id)
+        if not pr_url:
+            continue
+        if activity.get(node.task.id) is not None:
+            continue
+        review.append(ReviewTask(node=node, pr_url=pr_url))
+    return review

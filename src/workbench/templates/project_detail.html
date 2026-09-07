@@ -37,8 +37,95 @@
   </p>
 {% endif %}
 
+{% if for_review %}
+  {# Tasks whose most recent run opened a pull request that's still open: the
+     work is done, and all that's left is a person's decision. Promoted above
+     the tree for the same reason "Ready to execute" is — the thing most
+     worth doing on the page shouldn't be something to scroll for. Rendered
+     ahead of "Ready to execute" itself: closing out finished work reads as
+     more immediately actionable than starting more of it. #}
+  <h2 class="section">Ready for review</h2>
+  <ul class="tree" style="margin-bottom: 1.75rem;">
+    {% for item in for_review %}
+      <li>
+        <div class="task">
+          <form method="post" action="/tasks/{{ item.node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
+            <input type="hidden" name="new_status" value="done">
+            <button class="tick" type="submit" aria-label="Mark done"></button>
+          </form>
+          <div class="task-body">
+            <div class="task-title">{{ item.node.task.title }}</div>
+            <div class="task-actions">
+              <a class="slim" href="{{ item.pr_url }}" target="_blank" rel="noopener">View PR</a>
+              <form method="post" action="/tasks/{{ item.node.task.id }}/sync">
+                <button class="slim secondary" type="submit">Sync</button>
+              </form>
+              <form method="post" action="/tasks/{{ item.node.task.id }}/delete">
+                <button class="slim danger" type="submit">Delete</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
+{% if ready %}
+  {# Tasks one click away from starting or continuing execution: a plan
+     nobody has approved yet, or a task a plan's own decomposition already
+     judged fully specified. Both already have a one-click button further
+     down in the tree — this is what promotes them above it, plan text and
+     all, so the thing most worth doing on the page isn't something to
+     scroll for. #}
+  <h2 class="section">Ready to execute</h2>
+  <ul class="tree" style="margin-bottom: 1.75rem;">
+    {% for item in ready %}
+      <li>
+        <div class="task">
+          <div class="task-body">
+            <div class="task-title">{{ item.node.task.title }}</div>
+            {% if item.plan_text %}
+              {# The whole plan, rendered, then clipped by CSS — this is the
+                 page a plan is actually read on, so it gets the same
+                 Markdown the run's own page does. #}
+              <details class="task-note foldable">
+                <summary></summary>
+                <div class="prose">{{ item.plan_text | markdown }}</div>
+              </details>
+            {% endif %}
+            <div class="task-actions">
+              {% if item.run_id %}
+                <form method="post" action="/runs/{{ item.run_id }}/approve">
+                  <button class="slim" type="submit">{% if item.proposed_subtask_count %}Approve ({{ item.proposed_subtask_count }} subtask{{ 's' if item.proposed_subtask_count != 1 }}){% else %}Execute{% endif %}</button>
+                </form>
+              {% else %}
+                <form method="post" action="/tasks/{{ item.node.task.id }}/runs"
+                      style="display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;">
+                  <input type="hidden" name="phase" value="execute">
+                  {% set choices = origin_choices.get(item.node.task.id) %}
+                  {% if choices %}
+                    <select name="origin" style="width: auto; margin-bottom: 0;" aria-label="Branch from">
+                      {% for value, label in choices %}
+                        <option value="{{ value }}"
+                          {{ 'selected' if value == (item.node.task.origin_ref or default_origin) }}
+                        >{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  {% endif %}
+                  <button class="slim" type="submit">Execute</button>
+                </form>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
 {% if nodes %}
-  <ul class="tree" id="task-tree">
+  <ul class="tree" id="task-tree" data-activity-version="{{ activity_version }}">
     {% for node in nodes %}
       {% set busy = activity.get(node.task.id) %}
       {% set effective_status = node.effective_status %}
@@ -63,15 +150,14 @@
           <div class="task-body">
             <div class="task-title">{{ node.task.title }}</div>
 
-            {% if node.body_rest %}
-              {# Long enough to be worth folding — a planning note written
-                 for an agent, not a person skimming from a phone. #}
-              <details class="task-note">
-                <summary>{{ node.body_preview }}&hellip;</summary>
-                <div class="task-note-rest">{{ node.body_rest }}</div>
+            {% if node.task.body %}
+              {# A planning note written for an agent, not a person skimming
+                 from a phone — so it is folded, and it is Markdown like
+                 everything else the model writes. #}
+              <details class="task-note foldable">
+                <summary></summary>
+                <div class="prose">{{ node.task.body | markdown }}</div>
               </details>
-            {% elif node.body_preview %}
-              <div class="task-note">{{ node.body_preview }}</div>
             {% endif %}
 
             {% if node.progress %}
@@ -134,10 +220,15 @@
                 <form method="post" action="/runs/{{ busy.run_id }}/cancel">
                   <button class="slim secondary" type="submit">Stop run</button>
                 </form>
-              {% elif node.is_leaf and checkout and effective_status not in ('done', 'cancelled') %}
+              {% elif node.is_leaf and checkout and not pr_url and effective_status not in ('done', 'cancelled') %}
                 {# Only leaves: a task with children describes work rather than
                    being work, so an agent pointed at one has nothing single to
-                   do. And nothing can run before there is a checkout. #}
+                   do. And nothing can run before there is a checkout.
+                   And not once a PR exists: a task can be ticked back to
+                   `open` after being marked `done`, which would otherwise
+                   reoffer a fresh run next to a branch already out for
+                   review — `pr_url` outlives that toggle because it is never
+                   cleared, so it is checked here independently of status. #}
                 <form method="post" action="/tasks/{{ node.task.id }}/runs"
                       style="display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;">
                   <input type="hidden" name="phase" value="{{ node.task.entry_phase or 'plan' }}">
@@ -188,6 +279,10 @@
   </ul>
 {% else %}
   <p class="empty">No tasks yet. Add the first one below.</p>
+  {# The first task might get added from another device while this tab sits
+     open on an empty tree — the poll script below needs a starting version
+     to compare against even though there is no #task-tree to hang it on. #}
+  <span hidden id="activity-version" data-activity-version="{{ activity_version }}"></span>
 {% endif %}
 
 <form method="post" action="/projects/{{ project.id }}/tasks">
@@ -252,4 +347,48 @@
   })();
 </script>
 {% endif %}
+<script>
+  // The task tree is rendered once per request from a snapshot — nothing
+  // pushes an update to an open tab. This is the project-scoped analogue of
+  // what `run_detail.html` does with SSE for a single run: poll a cheap
+  // fingerprint and reload the whole page when it moves, because teaching
+  // this page to patch itself in place is a lot more code than a reload.
+  (function () {
+    var marker = document.getElementById("task-tree") || document.getElementById("activity-version");
+    if (!marker) return;
+    var startVersion = marker.dataset.activityVersion;
+
+    function isMidType(el) {
+      // "Add a task"'s title/body are the one thing on this page a person is
+      // likely to be typing into when a poll tick lands — never discard that
+      // out from under them for a reload that can just as well happen next
+      // tick instead.
+      if (!el) return false;
+      var tag = el.tagName;
+      if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
+      if (tag === "INPUT" && el.type !== "text") return false;
+      return el.value.length > 0;
+    }
+
+    window.setInterval(function () {
+      // Paused while backgrounded — phone-first, and a poll from a tab
+      // nobody is looking at is spent for nothing.
+      if (document.hidden) return;
+
+      fetch("/projects/{{ project.id }}/activity-version")
+        .then(function (response) { return response.json(); })
+        .then(function (data) {
+          if (data.version === startVersion) return;
+          if (isMidType(document.activeElement)) return; // try again next tick
+          // Same key base.html's own scroll-restore script reads back on
+          // load — a poll-triggered reload never fires the `submit` event
+          // that script stashes position on, so without this the tree would
+          // jump to the top on every auto-refresh.
+          sessionStorage.setItem("scrollY:" + location.pathname, String(window.scrollY));
+          window.location.reload();
+        })
+        .catch(function () { /* offline for a tick; try again next interval */ });
+    }, 5000);
+  })();
+</script>
 {% endblock %}
