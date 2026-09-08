@@ -48,6 +48,7 @@ from workbench.config import (
     RUN_TIMEOUT_SECONDS,
     agent_git_identity,
     agent_home,
+    capabilities_marker,
     data_dir,
     deploy_branch,
     deploy_unit_name,
@@ -421,6 +422,20 @@ def record_head(url: str, account: pwd.struct_passwd) -> None:
     marker.write_text(f"{url}\n", encoding="utf-8")
     os.chown(marker, account.pw_uid, account.pw_gid)
     info(f"reporting to the head at {url}")
+
+
+def record_capabilities(names: list[str], account: pwd.struct_passwd) -> None:
+    """Write down what this node was installed to do. See `record_role`.
+
+    The declared list, not the offered one: what this machine is *for* is a
+    decision someone made and does not change when a model server stops
+    answering. Narrowing it to what is true right now is `install_node`'s job.
+    """
+    marker = capabilities_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(",".join(names) + "\n", encoding="utf-8")
+    os.chown(marker, account.pw_uid, account.pw_gid)
+    info(f"offering {', '.join(names)}")
 
 
 #: Generated in the deployment's own virtualenv, because that is where the

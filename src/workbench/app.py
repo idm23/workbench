@@ -309,6 +309,7 @@ def show_user(
 
 @app.post("/users/{user_id}/devices")
 def subscribe_device(
+    request: Request,
     db: DbSession,
     user_id: int,
     endpoint: Annotated[str, Form()],
@@ -323,7 +324,18 @@ def subscribe_device(
     receive one rather than to make one.
     """
     user = _get_user_or_404(db, user_id)
-    subscribe(db, user, endpoint=endpoint, p256dh=p256dh, auth=auth, label=label)
+    subscribe(
+        db,
+        user,
+        endpoint=endpoint,
+        p256dh=p256dh,
+        auth=auth,
+        label=label,
+        # Where this app actually answers, which only the browser knows: the
+        # server binds loopback and is published by something it was never
+        # told about. Used as the push token's contact claim.
+        site_url=str(request.base_url),
+    )
     return _redirect(f"/users/{user.id}", notice="This device will be notified.")
 
 
@@ -342,7 +354,7 @@ def toggle_device(db: DbSession, device_id: int) -> RedirectResponse:
 
 
 @app.post("/devices/{device_id}/test")
-def test_device(db: DbSession, device_id: int) -> RedirectResponse:
+def test_device(request: Request, db: DbSession, device_id: int) -> RedirectResponse:
     """Send one notification to this device, now.
 
     The alternative way to find out whether notifications work is to start an
@@ -352,6 +364,13 @@ def test_device(db: DbSession, device_id: int) -> RedirectResponse:
     device = db.get(DeviceSubscription, device_id)
     if device is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No device with id {device_id}.")
+
+    if not device.site_url:
+        # A device that subscribed before this was recorded learns it here
+        # rather than having to subscribe again — which, on a phone, means
+        # finding the setting that revokes permission first.
+        device.site_url = str(request.base_url).rstrip("/")
+        db.commit()
 
     target = f"/users/{device.user_id}"
     if send_test(db, device):

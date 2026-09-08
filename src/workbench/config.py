@@ -160,6 +160,64 @@ def head_url() -> str | None:
     return configured.rstrip("/") or None
 
 
+#: What a node offers to do, as opposed to what it *is*. The role answers "what
+#: is this machine" and stays one word for the reason argued above; this is a
+#: list, because one machine can lend its GPU to two unrelated jobs and the head
+#: asks about them separately.
+#:
+#: Plain strings and an open set, for the same reason `runs.backend` is one: the
+#: second capability should not need a migration. They are canonical *here* so
+#: that the node advertising one and the head matching on it cannot drift apart
+#: — see `nodes.INFERENCE` and `install_node.INFERENCE_CAPABILITY`, which are
+#: this same word reached from either side.
+INFERENCE = "inference"
+GAMING = "gaming"
+CAPABILITIES = (INFERENCE, GAMING)
+
+#: What a node offers when nobody said. Every node installed before this file
+#: existed serves models and nothing else, and must keep doing exactly that.
+DEFAULT_CAPABILITIES = (INFERENCE,)
+
+
+def capabilities_marker() -> Path:
+    """The file recording what this node was installed to do.
+
+    Beside `data/role` and `data/head`, and a file for the reason those are:
+    the deploy timer re-registers on every tick and the doctor is run by hand,
+    and neither of them has the argv the installer was given.
+    """
+    return data_dir() / "capabilities"
+
+
+def declared_capabilities() -> list[str]:
+    """What this node says it is for, before asking whether it can right now.
+
+    Declared, not derived. This is the operator's statement of intent, and
+    `install_node.capabilities()` is what narrows it to what is actually true
+    this second — a node declared for inference that is currently serving a
+    game offers nothing here, and that difference is the whole mechanism.
+
+    An unreadable or empty marker means the default rather than an error: a
+    node that predates this file is an inference node, and every one of them
+    must keep working untouched.
+    """
+    configured = os.environ.get("WORKBENCH_CAPABILITIES", "").strip()
+    if not configured:
+        try:
+            configured = capabilities_marker().read_text(encoding="utf-8").strip()
+        except OSError:
+            return list(DEFAULT_CAPABILITIES)
+
+    named = [word.strip().lower() for word in configured.replace(",", " ").split()]
+    for word in named:
+        if word not in CAPABILITIES:
+            # Said out loud rather than silently dropped, exactly as `role()`
+            # does: a typo here is a machine that quietly does less than the
+            # person who installed it believes.
+            logger.warning("Unknown capability %r; ignoring it.", word)
+    return [word for word in named if word in CAPABILITIES] or list(DEFAULT_CAPABILITIES)
+
+
 #: Where a local model answers, and what to ask it for. An OpenAI-compatible
 #: URL rather than a vendor name, because Ollama, `llama-server` and vLLM all
 #: speak it and the choice between them should not reach any code: swapping
@@ -519,7 +577,7 @@ def vapid_public_key() -> str | None:
     return os.environ.get("WORKBENCH_VAPID_PUBLIC_KEY", "").strip() or None
 
 
-def vapid_subject() -> str:
+def vapid_subject(site_url: str | None = None) -> str:
     """Who to contact about pushes from this machine, per RFC 8292.
 
     A push service is entitled to a way to reach whoever is sending, and the
@@ -534,7 +592,15 @@ def vapid_subject() -> str:
     a domain, and is guaranteed never to be one.
     """
     configured = os.environ.get("WORKBENCH_VAPID_SUBJECT", "").strip()
-    return configured or f"mailto:workbench@{socket.gethostname()}.invalid"
+    if configured:
+        return configured
+    # The site itself, when a browser has told us where that is. Real,
+    # reachable, and exactly the contact information the claim asks for —
+    # where the fallback below is an address that by definition cannot exist,
+    # which Apple refuses outright.
+    if site_url and site_url.startswith(("http://", "https://")):
+        return site_url.rstrip("/")
+    return f"mailto:workbench@{socket.gethostname()}.invalid"
 
 
 def notifications_configured() -> bool:

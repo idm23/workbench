@@ -76,6 +76,7 @@ def subscribe(
     p256dh: str,
     auth: str,
     label: str,
+    site_url: str | None = None,
     event_kinds: list[str] | None = None,
 ) -> DeviceSubscription:
     """Record a device's subscription, or update the one it already had.
@@ -93,6 +94,8 @@ def subscribe(
     device.p256dh = p256dh
     device.auth = auth
     device.label = label or "This device"
+    if site_url:
+        device.site_url = site_url.rstrip("/")
     device.event_kinds = list(event_kinds or ALL_KINDS)
     device.enabled = True
     device.last_error = None
@@ -160,15 +163,25 @@ def notify(
     return sent
 
 
-def vapid_claims() -> dict[str, str | int]:
+def vapid_claims(site_url: str | None = None) -> dict[str, str | int]:
     """What this machine asserts about itself when it signs a push.
 
-    Its own function so the expiry can be tested without sending anything —
-    which is how the boundary above should have been found, rather than by a
-    push service refusing every token with a four-word reason.
+    `sub` is contact information for whoever is sending, and a push service is
+    entitled to be picky about it. Apple is: it refused every token signed with
+    the obvious default, `mailto:workbench@<hostname>.invalid`, which is
+    syntactically a mailto and semantically an address that can never exist —
+    `.invalid` is reserved by RFC 2606 precisely so that it never resolves.
+
+    So the site's own URL is preferred, which is real, reachable, and exactly
+    the contact information the claim is for. The browser tells us what it is
+    when it subscribes, because the server genuinely does not know: it binds
+    loopback and is published by a reverse proxy nothing here is told about.
+
+    Its own function so all of this is testable without sending anything —
+    which is how both of these should have been found.
     """
     return {
-        "sub": vapid_subject(),
+        "sub": vapid_subject(site_url),
         "exp": int(time.time()) + VAPID_TOKEN_LIFETIME_SECONDS,
     }
 
@@ -189,7 +202,7 @@ def _send(device: DeviceSubscription, payload: str) -> bool:
             },
             data=payload,
             vapid_private_key=vapid_private_key(),
-            vapid_claims=vapid_claims(),
+            vapid_claims=vapid_claims(device.site_url),
             timeout=SEND_TIMEOUT_SECONDS,
         )
     except WebPushException as error:
@@ -202,7 +215,8 @@ def _send(device: DeviceSubscription, payload: str) -> bool:
             device.last_error = f"The push service says this subscription is gone ({status})."
             logger.info("Subscription %s is gone; disabled.", device.id)
         else:
-            device.last_error = str(error)[:500]
+            claimed = vapid_claims(device.site_url)["sub"]
+            device.last_error = f"{str(error)[:400]} (signed as {claimed})"
             logger.warning("Push to %s failed: %s", device.id, error)
         return False
     except Exception as error:
