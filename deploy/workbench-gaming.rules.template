@@ -1,0 +1,25 @@
+// Rendered by install.sh into /etc/polkit-1/rules.d/.
+//
+// Lets the person who plays games start and stop *that one unit* and nothing
+// else. Sunshine runs inside their graphical session and its prep commands are
+// `systemctl start/stop __GAMING_UNIT__.service`, which an unprivileged account
+// cannot ask the system manager to do without this.
+//
+// The narrowness matters here for the same reason it does in the run rule, from
+// the other direction. That one grants to the account running model-authored
+// commands; this one grants to a human's everyday login, and "may manage units"
+// on a machine that is also a server is a standing privilege nobody asked for.
+// Anything not matched falls through to polkit's normal rules — a refusal.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return;
+    }
+    if (subject.user !== "__GAMING_USER__") {
+        return;
+    }
+    // Exact match rather than a prefix: `__GAMING_UNIT__.service.evil` and
+    // `../something` are both simply not this string.
+    if (action.lookup("unit") === "__GAMING_UNIT__.service") {
+        return polkit.Result.YES;
+    }
+});

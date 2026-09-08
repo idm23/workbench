@@ -53,9 +53,13 @@ from workbench.config import (
     deploy_branch,
     deploy_unit_name,
     deployment_root,
+    gaming_unit_name,
+    gaming_user,
+    gaming_user_marker,
     head_marker,
     host,
     instance,
+    is_gaming_node,
     is_node,
     port,
     repo_root,
@@ -108,6 +112,18 @@ def units() -> tuple[tuple[str, str], ...]:
         # The timer and nothing else. Self-updating is not optional on a node:
         # a machine that cannot pull its own changes is a permanent manual
         # step, which is the thing this project exists not to have.
+        #
+        # Unless it also drives a screen, in which case it gets the switch that
+        # takes its GPU away from Workbench. Rendered here rather than by the
+        # gaming installer so that `refresh_units` converges it on every deploy
+        # like everything else — a unit only the installer writes is a unit a
+        # machine updated by the timer never gets, which this project has now
+        # learned three separate times.
+        if is_gaming_node():
+            return (
+                *deployer,
+                (f"{gaming_unit_name()}.service", "workbench-gaming.service.template"),
+            )
         return deployer
     return (
         (f"{service_name()}.service", "workbench.service.template"),
@@ -422,6 +438,19 @@ def record_head(url: str, account: pwd.struct_passwd) -> None:
     marker.write_text(f"{url}\n", encoding="utf-8")
     os.chown(marker, account.pw_uid, account.pw_gid)
     info(f"reporting to the head at {url}")
+
+
+def record_gaming_user(name: str, account: pwd.struct_passwd) -> None:
+    """Write down whose session Sunshine runs in. See `record_role`.
+
+    Owned by the service account like the other markers, and naming a different
+    account entirely — that difference is the point of recording it at all.
+    """
+    marker = gaming_user_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{name}\n", encoding="utf-8")
+    os.chown(marker, account.pw_uid, account.pw_gid)
+    info(f"games here are played by '{name}'")
 
 
 def record_capabilities(names: list[str], account: pwd.struct_passwd) -> None:
@@ -995,6 +1024,10 @@ def render_unit(template_name: str) -> str:
         "__RESTORE_FROM__": os.environ.get("WORKBENCH_RESTORE_FROM", "").strip(),
         "__RUN_PREFIX__": run_unit_prefix(),
         "__RUN_TIMEOUT__": str(RUN_TIMEOUT_SECONDS),
+        "__GAMING_UNIT__": gaming_unit_name(),
+        # Empty on a machine nobody plays games on. The gaming rule is the only
+        # template that reads it, and it is not rendered there.
+        "__GAMING_USER__": gaming_user() or "",
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
@@ -1110,6 +1143,46 @@ def install_polkit_rule() -> bool:
     run(["chown", "root:root", str(target)], privileged=True)
 
     info(f"wrote {target}")
+    return True
+
+
+def gaming_rule_path() -> Path:
+    return POLKIT_DIR / f"50-{gaming_unit_name()}.rules"
+
+
+def install_gaming_rule() -> bool:
+    """Let the person at the television flip the switch, and nothing else.
+
+    Sunshine runs in their session and its prep commands ask the *system*
+    manager to start a unit, which an unprivileged account cannot do unaided.
+
+    Skipped with a warning rather than refused when no gaming user is recorded:
+    the unit still exists and still works when root starts it, which is enough
+    to test the exclusion by hand. What does not work is the automatic half, and
+    that is worth one line saying so rather than a failed install.
+    """
+    if not POLKIT_DIR.is_dir():
+        warn(f"{POLKIT_DIR} does not exist; Sunshine will not be able to flip the switch.")
+        return False
+
+    player = gaming_user()
+    if not player:
+        warn("no gaming user recorded, so nothing may start the switch but root.")
+        info("Re-run with:  --capabilities=inference,gaming --gaming-user=<the person>")
+        return False
+
+    rendered = render_unit("workbench-gaming.rules.template")
+    target = gaming_rule_path()
+    if target.is_file() and target.read_text() == rendered:
+        info("gaming polkit rule already up to date")
+        return False
+
+    write_privileged(target, rendered, staged_as=f"{target.name}.staged")
+    # World-readable and root-owned: polkit refuses rules it does not trust.
+    run(["chmod", "0644", str(target)], privileged=True)
+    run(["chown", "root:root", str(target)], privileged=True)
+
+    info(f"wrote {target}, letting '{player}' start {gaming_unit_name()}")
     return True
 
 
