@@ -34,7 +34,10 @@ import urllib.request
 from pathlib import Path
 
 from workbench.config import (
+    CAPABILITIES,
+    INFERENCE,
     ROLE_NODE,
+    declared_capabilities,
     deploy_branch,
     head_url,
     inference_base_url,
@@ -58,6 +61,7 @@ from workbench.install import (
     info,
     install_units,
     needs_relocation,
+    record_capabilities,
     record_head,
     record_role,
     relocate,
@@ -109,9 +113,16 @@ REGISTER_TIMEOUT_SECONDS = 10
 #: it is exactly what someone writes when guessing.
 HEAD_HINT = "--head <the URL you open Workbench on>"
 
-#: What this node advertises it can do. The string the head matches on — see
-#: `workbench.nodes.INFERENCE`, which is the same word from the other side.
-INFERENCE_CAPABILITY = "inference"
+#: What this node advertises when it can serve a model. The string the head
+#: matches on — see `workbench.nodes.INFERENCE`, which is the same word from
+#: the other side, and `config.INFERENCE`, which is where it actually lives so
+#: that the two sides cannot drift.
+INFERENCE_CAPABILITY = INFERENCE
+
+#: How long to wait when asking whether this node's own model server is up.
+#: Shorter than the head's probe: this is a loopback request, and it is made on
+#: every registration, which is every deploy tick.
+SERVING_TIMEOUT_SECONDS = 2.0
 
 
 def check_gpu() -> None:
@@ -225,20 +236,25 @@ def pull_model() -> None:
     info(f"{model} is available on this node")
 
 
+def _endpoint_answers(timeout: float = SERVING_TIMEOUT_SECONDS) -> bool:
+    """Whether this node's own model server is answering, right now."""
+    try:
+        # urllib rather than httpx, like the head's health check: this module
+        # has to stay importable before a virtualenv exists.
+        with urllib.request.urlopen(f"{inference_base_url()}/models", timeout=timeout) as answer:
+            return answer.status == 200
+    except urllib.error.URLError, OSError:
+        return False
+
+
 def wait_for_endpoint() -> None:
     """Wait until the server answers, so an install that says it worked did."""
     url = f"{inference_base_url()}/models"
     deadline = time.monotonic() + ENDPOINT_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        try:
-            # urllib rather than httpx, like the head's health check: this
-            # module has to stay importable before a virtualenv exists.
-            with urllib.request.urlopen(url, timeout=2.0) as answer:
-                if answer.status == 200:
-                    info(f"the model server answers at {url}")
-                    return
-        except urllib.error.URLError, OSError:
-            pass
+        if _endpoint_answers():
+            info(f"the model server answers at {url}")
+            return
         time.sleep(0.5)
 
     warn(f"the model server did not answer {url} within {ENDPOINT_TIMEOUT_SECONDS:.0f}s.")
@@ -318,6 +334,41 @@ def gpu_description() -> str | None:
     return lines[0].strip() if lines else None
 
 
+def capabilities() -> list[str]:
+    """What this node is offering the head *right now*.
+
+    The declared list narrowed to what is actually true this second. Two ideas
+    meet here and both are load-bearing:
+
+    - **Declared** is what someone installed this machine to do, and it does
+      not change on its own. It lives in `data/capabilities`.
+    - **Offered** is what it can do at this moment. `inference` is withdrawn
+      whenever the model server is not answering — because a game has the card,
+      because it crashed, because the disk filled, because it is mid-upgrade.
+
+    Deriving rather than setting is what makes this survive the deploy timer.
+    The obvious design — something writes "busy" when a game starts — is a bug
+    here, because `deploy.converge_node()` re-registers every five minutes and
+    would cheerfully un-announce it again mid-game. Computing the answer from
+    state instead turns that tick from a clobber into a repair, which is the
+    same rule the units and the restart already follow.
+
+    It also fixes something that was already wrong: a node whose model server
+    had died went on advertising `inference`, so every run paid a probe and
+    then failed.
+
+    Asking the endpoint rather than `systemctl is-active ollama` is deliberate.
+    It is the same question the head asks (`nodes._answers`), it needs no
+    systemd — so it answers honestly inside the fresh-install container — and
+    it covers every reason the server is down rather than the one we thought of.
+    """
+    declared = declared_capabilities()
+    # Probed only when it was declared, so a node that never served a model
+    # does not pay a loopback timeout on every deploy tick.
+    serving = INFERENCE in declared and _endpoint_answers()
+    return [name for name in declared if name != INFERENCE or serving]
+
+
 def register_with_head() -> None:
     """Tell the head this node exists, and how to reach it.
 
@@ -336,7 +387,7 @@ def register_with_head() -> None:
         {
             "name": socket.gethostname(),
             "addresses": addresses(),
-            "capabilities": [INFERENCE_CAPABILITY],
+            "capabilities": capabilities(),
             "model": local_model(),
             "gpu": gpu_description(),
         }
@@ -382,6 +433,44 @@ def _head_argument() -> str | None:
     return None
 
 
+def _capabilities_argument() -> list[str] | None:
+    """The `--capabilities` this install was given, or None if it said nothing.
+
+    Same hand-parse as `_head_argument`, for the same reason, and safe through
+    both re-execs for the same reason too: `become_root` re-execs with
+    `*sys.argv[1:]` and `hand_off_to` comes back as the same module, which is
+    exactly what `--head` already relies on. Unlike `--role`, this only
+    parameterises the flow rather than selecting it, so argv is trust enough.
+
+    An unrecognised name is refused here rather than dropped. `config` warns and
+    ignores when *reading* the marker, because a machine that already has one
+    must keep working; but a person typing the flag now is better told that
+    `--capabilities=gaming,infrence` gave them a node that serves no models.
+    """
+    argv = sys.argv[1:]
+    raw: str | None = None
+    for index, argument in enumerate(argv):
+        if argument.startswith("--capabilities="):
+            raw = argument.split("=", 1)[1]
+            break
+        if argument == "--capabilities" and index + 1 < len(argv):
+            raw = argv[index + 1]
+            break
+    if raw is None:
+        return None
+
+    named = [word.strip().lower() for word in raw.replace(",", " ").split()]
+    unknown = [word for word in named if word not in CAPABILITIES]
+    if unknown:
+        raise InstallError(
+            f"unknown capability {', '.join(repr(one) for one in unknown)}. "
+            f"Known: {', '.join(CAPABILITIES)}"
+        )
+    if not named:
+        raise InstallError("--capabilities was given nothing to offer")
+    return named
+
+
 def main() -> int:
     configure_console_logging()
     os.chdir(repo_root())
@@ -416,6 +505,10 @@ def main() -> int:
         record_role(ROLE_NODE, account)
         if (head := _head_argument()) is not None:
             record_head(head, account)
+        # Only when asked. A re-install that says nothing must leave a node
+        # offering exactly what it offered before, the way `--head` does.
+        if (offering := _capabilities_argument()) is not None:
+            record_capabilities(offering, account)
 
         step("Installing the model server")
         serving = install_inference_server()

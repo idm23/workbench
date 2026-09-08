@@ -20,14 +20,14 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+#: The capability a node advertises when it can serve a model. Defined in
+#: `config` rather than here, because the node that advertises the word and the
+#: head that matches on it must not be able to drift apart — this module is
+#: only one side of that wire.
+from workbench.config import INFERENCE
 from workbench.database.models import Node
 
 logger = logging.getLogger(__name__)
-
-#: The capability a node advertises when it can serve a model. A plain string
-#: for the same reason `runs.backend` is one: the set is open, and the second
-#: capability should not need a migration.
-INFERENCE = "inference"
 
 #: How long to wait for a node to answer a probe. Short: this runs before a run
 #: starts and on a page render, and a node that is asleep should cost a moment

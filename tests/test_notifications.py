@@ -410,3 +410,93 @@ def test_a_failing_test_push_says_so(db, user, monkeypatch):
     monkeypatch.setattr(notifications, "_send", lambda d, payload: False)
 
     assert send_test(db, device) is False
+
+
+def test_the_subject_prefers_the_site_it_was_subscribed_from(monkeypatch):
+    """Apple refused `mailto:workbench@<host>.invalid` — syntactically a
+    mailto, semantically an address reserved so it can never exist. The site's
+    own URL is real, reachable, and exactly the contact information the claim
+    is for."""
+    from workbench.config import vapid_subject
+
+    monkeypatch.delenv("WORKBENCH_VAPID_SUBJECT", raising=False)
+
+    assert vapid_subject("https://homebox-core.ts.net/") == "https://homebox-core.ts.net"
+    assert vapid_subject(None).startswith("mailto:")
+
+
+def test_an_explicit_subject_still_wins(monkeypatch):
+    from workbench.config import vapid_subject
+
+    monkeypatch.setenv("WORKBENCH_VAPID_SUBJECT", "https://chosen.example")
+
+    assert vapid_subject("https://somewhere.else") == "https://chosen.example"
+
+
+def test_a_device_signs_with_the_site_it_came_from(db, user):
+    from workbench.notifications import vapid_claims
+
+    device = a_device(db, user)
+    device.site_url = "https://homebox-core.ts.net"
+    db.commit()
+
+    assert vapid_claims(device.site_url)["sub"] == "https://homebox-core.ts.net"
+
+
+def test_a_failed_push_records_what_it_claimed(db, user, monkeypatch):
+    """So the next failure explains itself instead of needing this session."""
+    import pywebpush
+
+    class RefusedError(Exception):
+        response = None
+
+    def refuse(**kwargs):
+        raise RefusedError("BadJwtToken")
+
+    monkeypatch.setattr(pywebpush, "WebPushException", RefusedError)
+    monkeypatch.setattr(pywebpush, "webpush", refuse)
+    device = a_device(db, user)
+    device.site_url = "https://homebox-core.ts.net"
+
+    notifications._send(device, "{}")
+
+    assert device.last_error is not None
+    assert "signed as https://homebox-core.ts.net" in device.last_error
+
+
+def test_mismatched_keys_are_reported_rather_than_left_to_the_push_service(monkeypatch):
+    """Subscribing works, the device appears, and every push is refused with
+    four words. A check can say it outright."""
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from py_vapid import Vapid01
+
+    from workbench.doctor import _keys_match
+
+    one, other = Vapid01(), Vapid01()
+    one.generate_keys()
+    other.generate_keys()
+    # `generate_keys` fills both halves in, which the type does not know.
+    assert one.private_key is not None
+    assert one.public_key is not None
+    assert other.public_key is not None
+
+    def encode(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    private = encode(one.private_key.private_numbers().private_value.to_bytes(32, "big"))
+    mine = encode(
+        one.public_key.public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+        )
+    )
+    theirs = encode(
+        other.public_key.public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+        )
+    )
+
+    assert _keys_match(private, mine) is True
+    assert _keys_match(private, theirs) is False
+    assert _keys_match("not-a-key", mine) is None
