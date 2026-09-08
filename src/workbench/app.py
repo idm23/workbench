@@ -27,9 +27,15 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from workbench.agents import available_backends
 from workbench.agents.prompts import CHECK_CI_SHORTCUT, SPLIT_SHORTCUT
 from workbench.api import router as api_router
-from workbench.config import instance, systemd_available, vapid_public_key
+from workbench.config import (
+    default_agent_backend,
+    instance,
+    systemd_available,
+    vapid_public_key,
+)
 from workbench.database.db import get_db
 from workbench.database.models import (
     DeviceSubscription,
@@ -480,6 +486,13 @@ def show_project(
             "activity": activity,
             "pr_urls": pr_urls,
             "discussable": discussable,
+            # Which agent this project's runs go to, and what else it could be.
+            # Read from the registry rather than hard-coded: a machine with a
+            # backend this one has never heard of should still be able to pick
+            # it, and a list that drifts from what `get_backend` accepts is a
+            # dropdown that offers a run which cannot start.
+            "backends": available_backends(),
+            "backend_default": default_agent_backend(),
             "activity_version": activity_version,
             # Tasks one click away from starting or continuing execution —
             # promoted above the tree so the thing most worth doing on the
@@ -524,6 +537,46 @@ def project_activity_version(db: DbSession, project_id: int) -> dict[str, str]:
     """
     project = _get_project_or_404(db, project_id)
     return {"version": project_activity_fingerprint(db, project.id)}
+
+
+@app.post("/projects/{project_id}/backend")
+def set_project_backend(
+    db: DbSession,
+    project_id: int,
+    backend: Annotated[str, Form()] = "",
+    fallback: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """Choose which agent works this project's tasks.
+
+    The schema has always said a project may override the machine's default —
+    it is why `projects.agent_backend` is nullable rather than absent — and
+    until now nothing could set it. So a worker node could be installed,
+    registered, reachable and serving, and there was no way to send it any
+    work short of editing `/etc/workbench/env` on the head and restarting.
+
+    Empty means "whatever this machine is configured for", which is a real
+    choice rather than an unset field: it follows the default if that ever
+    changes, where naming a backend explicitly does not.
+    """
+    project = _get_project_or_404(db, project_id)
+    target = f"/projects/{project.id}"
+
+    chosen, second = backend.strip(), fallback.strip()
+    for named in (chosen, second):
+        if named and named not in available_backends():
+            return _redirect(target, error=f"There is no agent backend called {named!r}.")
+    if second and second == (chosen or default_agent_backend()):
+        return _redirect(target, error="A backend cannot fall back to itself.")
+
+    project.agent_backend = chosen or None
+    project.fallback_backend = second or None
+    db.commit()
+    # Only runs started from now on. Every run records the backend that ran it,
+    # so the ones already finished keep saying what actually worked them.
+    settled = f"New runs will use {chosen or 'the default for this machine'}"
+    return _redirect(
+        target, notice=f"{settled}, falling back to {second}." if second else f"{settled}."
+    )
 
 
 @app.post("/projects/{project_id}/conversation")

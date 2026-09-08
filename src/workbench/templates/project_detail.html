@@ -57,7 +57,42 @@
        title="Run {{ conversation.id }} is {{ conversation.status.value }}"
     ><span class="pip"></span>Continue conversation</a>
   {% else %}
-    <form method="post" action="/projects/{{ project.id }}/conversation" style="border: none; padding: 0; margin-bottom: 1.75rem;">
+    {# Which agent works this project, and where to go when it runs out of window.
+   Here rather than in a settings page the app does not have, and both together
+   because the second is meaningless without the first. #}
+<details class="task-note foldable" style="margin-bottom: 1.25rem;">
+  <summary class="sub">
+    Agent: <span class="mono">{{ project.agent_backend or backend_default }}</span>
+    {%- if project.fallback_backend %}, falling back to
+      <span class="mono">{{ project.fallback_backend }}</span>{% endif %}
+  </summary>
+  <form method="post" action="/projects/{{ project.id }}/backend"
+        style="display: flex; gap: .5rem; align-items: flex-end; flex-wrap: wrap;">
+    <div>
+      <label for="backend">Run tasks with</label>
+      <select name="backend" id="backend" style="width: auto; margin-bottom: 0;">
+        <option value="" {{ 'selected' if not project.agent_backend }}>
+          this machine's default ({{ backend_default }})
+        </option>
+        {% for name in backends %}
+          <option value="{{ name }}" {{ 'selected' if name == project.agent_backend }}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="fallback">When rate limited</label>
+      <select name="fallback" id="fallback" style="width: auto; margin-bottom: 0;">
+        <option value="" {{ 'selected' if not project.fallback_backend }}>wait for the window</option>
+        {% for name in backends %}
+          <option value="{{ name }}" {{ 'selected' if name == project.fallback_backend }}>use {{ name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="slim" type="submit">Save</button>
+  </form>
+</details>
+
+<form method="post" action="/projects/{{ project.id }}/conversation" style="border: none; padding: 0; margin-bottom: 1.75rem;">
       <button type="submit">Talk to this project</button>
     </form>
   {% endif %}
