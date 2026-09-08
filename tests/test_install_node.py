@@ -192,3 +192,100 @@ def test_no_address_is_better_than_a_wrong_one(monkeypatch):
     monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Nothing())
 
     assert install_node._lan_address() is None
+
+
+def test_the_capabilities_flag_is_read_in_either_spelling(monkeypatch):
+    for argv in (
+        ["--role=node", "--capabilities", "inference,gaming"],
+        ["--capabilities=inference, gaming", "--role=node"],
+    ):
+        monkeypatch.setattr(install_node.sys, "argv", ["install", *argv])
+        assert install_node._capabilities_argument() == ["inference", "gaming"]
+
+
+def test_no_capabilities_flag_leaves_the_declaration_alone(monkeypatch):
+    """A re-install that says nothing must offer exactly what it offered
+    before, the way `--head` does. None is 'do not touch', not 'the default'."""
+    monkeypatch.setattr(install_node.sys, "argv", ["install", "--role=node"])
+
+    assert install_node._capabilities_argument() is None
+
+
+def test_a_misspelled_capability_is_refused_rather_than_dropped(monkeypatch):
+    """Reading the marker warns and ignores, because a machine that already has
+    one must keep working. Typing the flag now is different: silently accepting
+    it would hand someone a node that serves no models and says nothing."""
+    monkeypatch.setattr(install_node.sys, "argv", ["install", "--capabilities=gaming,infrence"])
+
+    with pytest.raises(InstallError) as refused:
+        install_node._capabilities_argument()
+
+    assert "infrence" in str(refused.value)
+    assert "inference" in str(refused.value)  # names what it should have been
+
+
+def test_a_node_offers_what_it_declared_when_the_server_answers(monkeypatch):
+    monkeypatch.setattr(install_node, "declared_capabilities", lambda: ["inference", "gaming"])
+    monkeypatch.setattr(install_node, "_endpoint_answers", lambda *a, **k: True)
+
+    assert install_node.capabilities() == ["inference", "gaming"]
+
+
+def test_a_node_withdraws_inference_when_its_server_is_silent(monkeypatch):
+    """The whole feature, in one assertion. A game has the card, or ollama
+    died, or the disk filled — the head must stop sending runs either way."""
+    monkeypatch.setattr(install_node, "declared_capabilities", lambda: ["inference", "gaming"])
+    monkeypatch.setattr(install_node, "_endpoint_answers", lambda *a, **k: False)
+
+    assert install_node.capabilities() == ["gaming"]
+
+
+def test_a_plain_node_with_a_dead_server_offers_nothing(monkeypatch):
+    """An empty list rather than a stale claim. This is the case that used to
+    be wrong: the node went on advertising inference, and every run paid a
+    probe and then failed."""
+    monkeypatch.setattr(install_node, "declared_capabilities", lambda: ["inference"])
+    monkeypatch.setattr(install_node, "_endpoint_answers", lambda *a, **k: False)
+
+    assert install_node.capabilities() == []
+
+
+def test_a_node_that_never_serves_models_is_not_probed(monkeypatch):
+    """A gaming-only node should not pay a loopback timeout on every tick."""
+    monkeypatch.setattr(install_node, "declared_capabilities", lambda: ["gaming"])
+
+    def fail(*args, **kwargs):
+        raise AssertionError("probed the endpoint on a node that declared no inference")
+
+    monkeypatch.setattr(install_node, "_endpoint_answers", fail)
+
+    assert install_node.capabilities() == ["gaming"]
+
+
+def test_registration_sends_what_is_offered_now_not_what_was_declared(monkeypatch):
+    """The payload is the derived list. Sending the declared one would put the
+    burden on the head to guess which half of it is currently true."""
+    sent = {}
+
+    monkeypatch.setattr(install_node, "head_url", lambda: "http://homebox-core:8787")
+    monkeypatch.setattr(install_node, "addresses", lambda: ["192.168.1.155"])
+    monkeypatch.setattr(install_node, "gpu_description", lambda: None)
+    monkeypatch.setattr(install_node, "capabilities", lambda: ["gaming"])
+
+    class Answer:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def capture(request, timeout=None):
+        sent.update(install_node.json.loads(request.data))
+        return Answer()
+
+    monkeypatch.setattr(install_node.urllib.request, "urlopen", capture)
+    install_node.register_with_head()
+
+    assert sent["capabilities"] == ["gaming"]

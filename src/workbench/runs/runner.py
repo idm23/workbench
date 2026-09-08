@@ -76,7 +76,7 @@ from workbench.git.worktrees import (
     run_setup_command,
     uncommitted_diffstat,
 )
-from workbench.nodes import Endpoint, inference_endpoint
+from workbench.nodes import Endpoint, inference_endpoint, known_nodes
 from workbench.runs.store import append_event, fetch_new_inputs, finish_run, mark_running
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, resolve_origin
 
@@ -244,9 +244,13 @@ def _endpoint(db: Session, run: Run) -> Endpoint | None:
     configuration, and a machine with no nodes behaves exactly as it did before
     there were any.
 
-    A notice goes on the run either way, so "which machine actually did this"
-    is answerable from the event log a year later rather than from whatever
-    `/etc/workbench/env` says today.
+    A notice goes on the run whenever there was a choice to make, so "which
+    machine actually did this" is answerable from the event log a year later
+    rather than from whatever `/etc/workbench/env` says today — and so is "why
+    did this one have no machine at all", which used to be recorded nowhere.
+
+    A head with no nodes registered says nothing, because that is not a choice
+    and a notice on every run would be noise.
     """
     chosen = inference_endpoint(db)
     if chosen is not None:
@@ -257,7 +261,29 @@ def _endpoint(db: Session, run: Run) -> Endpoint | None:
             RunEventKind.NOTICE,
             {"text": f"Serving this run from {chosen.node} at {chosen.url}{serving}."},
         )
-    return chosen
+        return chosen
+
+    # Nodes exist and none of them could take this. Worth a notice precisely
+    # because the failure lands somewhere else entirely: the backend falls back
+    # to WORKBENCH_INFERENCE_URL and dies at its first request, and without this
+    # the event log offers nothing to connect that to a node being busy.
+    if registered := known_nodes(db):
+        listed = "; ".join(
+            f"{node.name} offering {', '.join(node.capabilities or []) or 'nothing'}"
+            for node in registered
+        )
+        append_event(
+            db,
+            run.id,
+            RunEventKind.NOTICE,
+            {
+                "text": (
+                    f"No worker node is offering inference ({listed}). Falling back "
+                    "to this machine's own configuration."
+                )
+            },
+        )
+    return None
 
 
 def _model_for(run: Run, node: Endpoint | None) -> str | None:

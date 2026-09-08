@@ -109,7 +109,12 @@ class NodeIn(BaseModel):
 
     name: str = Field(min_length=1, max_length=100)
     addresses: list[str] = Field(min_length=1)
-    capabilities: list[str] = Field(min_length=1)
+    #: May be empty, and that is a statement rather than a malformed request:
+    #: this node is up, reachable, and can do nothing for you at the moment.
+    #: Refusing it would be strictly worse — the registration would 422, the
+    #: heartbeat would stop, and a head would conclude the node was *gone*
+    #: rather than *busy*, which is the one wrong answer available.
+    capabilities: list[str]
     model: str | None = None
     gpu: str | None = None
 

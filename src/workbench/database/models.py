@@ -701,6 +701,13 @@ class DeviceSubscription(Base):
     #: you cannot do remotely.
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    #: The address this device subscribed from, used as the `sub` claim when
+    #: signing a push to it. Recorded rather than configured because the
+    #: browser is the only party that reliably knows where this app is
+    #: published — the server sees a loopback bind and a reverse proxy it was
+    #: never told about.
+    site_url: Mapped[str | None] = mapped_column(String(500), default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     #: When a push to this endpoint last succeeded, and why it last did not.

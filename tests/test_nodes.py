@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from workbench import nodes
 from workbench.app import app
+from workbench.config import GAMING
 from workbench.database.db import get_db, make_engine
 from workbench.database.models import Base, Node
 from workbench.nodes import (
@@ -235,14 +236,27 @@ def test_re_registering_over_http_is_idempotent(client):
     assert len(client.get("/api/nodes").json()) == 1
 
 
-def test_a_registration_must_say_where_and_what(client):
+def test_a_registration_must_say_where_to_reach_it(client):
     """An address list is the whole point of the row; a node with none is
-    unreachable, and one with no capability is unusable."""
-    for body in (
-        {"name": "n", "addresses": [], "capabilities": ["inference"]},
-        {"name": "n", "addresses": ["10.0.0.1"], "capabilities": []},
-    ):
-        assert client.post("/api/nodes", json=body).status_code == 422
+    unreachable, and there is nothing to be done with it."""
+    body = {"name": "n", "addresses": [], "capabilities": ["inference"]}
+    assert client.post("/api/nodes", json=body).status_code == 422
+
+
+def test_a_node_offering_nothing_is_still_a_node(client):
+    """Not a malformed request: a statement that this machine can do nothing
+    for you at the moment — its model server is down, or a game has the card.
+
+    Refusing it would be the one wrong answer available. The registration would
+    422, the heartbeat would stop with it, and a head would then conclude the
+    node was *gone* rather than busy — which is worse than what it replaced.
+    """
+    body = {"name": "n", "addresses": ["10.0.0.1"], "capabilities": []}
+    assert client.post("/api/nodes", json=body).status_code == 200
+
+    listed = client.get("/api/nodes").json()
+    assert listed[0]["capabilities"] == []
+    assert listed[0]["last_seen_at"] is not None
 
 
 def test_a_node_in_the_database_is_a_node_on_the_page(db):
@@ -294,3 +308,46 @@ def test_a_node_row_is_readable(db):
 
 def test_nodes_are_typed_as_the_model(db):
     assert isinstance(register(db, a_node()), Node)
+
+
+def test_a_node_that_stops_offering_inference_stops_being_chosen(db, monkeypatch):
+    """The whole exclusion mechanism, end to end, with no new schema.
+
+    A node streaming a game re-registers without `inference` and the head skips
+    it; when the stream ends it re-registers with it and the head picks it up
+    again. `register` already replaces capabilities wholesale and
+    `inference_endpoint` already filters on them, so nothing else had to move.
+    """
+    monkeypatch.setattr(nodes, "_answers", lambda _url: True)
+
+    register(db, a_node(capabilities=[INFERENCE, GAMING]))
+    assert inference_endpoint(db) is not None
+
+    register(db, a_node(capabilities=[GAMING]))
+    assert inference_endpoint(db) is None
+
+    register(db, a_node(capabilities=[INFERENCE, GAMING]))
+    assert inference_endpoint(db) is not None
+
+
+def test_a_busy_node_is_never_probed(db, monkeypatch):
+    """It answers perfectly well — it just will not take a model. Probing it
+    would spend the timeout to learn what it already said."""
+    register(db, a_node(capabilities=[GAMING]))
+    monkeypatch.setattr(nodes, "_answers", lambda _url: pytest.fail("probed a busy node"))
+
+    assert inference_endpoint(db) is None
+
+
+def test_a_node_offering_nothing_keeps_its_remembered_address(db, monkeypatch):
+    """Withdrawing every capability is not moving network. The route that
+    worked still works, and paying to rediscover it after every game would be
+    the timeout this field exists to avoid."""
+    monkeypatch.setattr(nodes, "_answers", lambda _url: True)
+    register(db, a_node())
+    inference_endpoint(db)
+    assert db.query(Node).one().last_good_address == "192.168.1.155"
+
+    register(db, a_node(capabilities=[]))
+
+    assert db.query(Node).one().last_good_address == "192.168.1.155"

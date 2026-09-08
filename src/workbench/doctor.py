@@ -915,15 +915,26 @@ def check_inference_node() -> Check:
     before a run needs it.
     """
     from workbench.database.db import session_scope
-    from workbench.nodes import inference_endpoint, known_nodes
+    from workbench.nodes import INFERENCE, inference_endpoint, known_nodes
 
     key = "inference-node"
     title = "A worker node is answering"
 
     try:
         with session_scope() as db:
-            known = len(known_nodes(db))
-            chosen = inference_endpoint(db) if known else None
+            registered = known_nodes(db)
+            known = len(registered)
+            # Read before probing: a node that is up and simply not offering
+            # inference is a different answer from one that did not answer, and
+            # `inference_endpoint` cannot tell them apart because it skips the
+            # first without ever making a request.
+            offering = [node for node in registered if INFERENCE in (node.capabilities or [])]
+            elsewhere = {
+                node.name: ", ".join(node.capabilities or []) or "nothing"
+                for node in registered
+                if node not in offering
+            }
+            chosen = inference_endpoint(db) if offering else None
     except Exception as error:
         return Check(
             key=key,
@@ -943,14 +954,30 @@ def check_inference_node() -> Check:
             ),
             fix="./install.sh --role=node --head <this Workbench's URL>   # on the node",
         )
+    if not offering:
+        # Registered, seen recently, and busy with something else — which is
+        # what a node streaming a game looks like. A warning rather than a
+        # failure: nothing is broken, and telling someone their node is down
+        # while it is mid-game is how a report earns being skimmed.
+        listed = "; ".join(f"{name} is offering {what}" for name, what in elsewhere.items())
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                f"{known} node(s) are registered and none is offering inference "
+                f"right now ({listed}). Runs on the local backend will fail "
+                "until one does."
+            ),
+        )
     if chosen is None:
         return Check(
             key=key,
             title=title,
             state=CheckState.FAIL,
             detail=(
-                f"{known} node(s) are registered and none answered. Runs on the local "
-                "backend will fail until one does."
+                f"{len(offering)} node(s) offer inference and none answered. Runs on "
+                "the local backend will fail until one does."
             ),
         )
     serving = f" serving {chosen.model}" if chosen.model else ""
@@ -960,6 +987,33 @@ def check_inference_node() -> Check:
         state=CheckState.OK,
         detail=f"{chosen.node} answers at {chosen.url}{serving}.",
     )
+
+
+def _keys_match(private: str, public: str) -> bool | None:
+    """Whether these two are halves of one keypair, or None if it cannot tell.
+
+    Derived rather than trusted: the two are written together and could only
+    disagree if something wrote them separately, which is exactly the sort of
+    thing worth finding out from a check rather than from a push service.
+    """
+    try:
+        import base64
+
+        from cryptography.hazmat.primitives import serialization
+        from py_vapid import Vapid01
+
+        signer = Vapid01.from_string(private_key=private)
+        if signer.public_key is None:
+            return None
+        derived = signer.public_key.public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+        )
+        encoded = base64.urlsafe_b64encode(derived).decode().rstrip("=")
+    except Exception:
+        # A key this cannot parse is a separate problem, and one the push
+        # itself will report far better than a guess here would.
+        return None
+    return encoded == public.strip().rstrip("=")
 
 
 def check_notification_keys() -> Check:
@@ -982,12 +1036,29 @@ def check_notification_keys() -> Check:
     if isinstance(private, TokenUnreadable):
         return Check(key=key, title=title, state=CheckState.UNKNOWN, detail=private.message)
 
+    if isinstance(public, TokenUnreadable):
+        return Check(key=key, title=title, state=CheckState.UNKNOWN, detail=public.message)
+
     if private and public:
+        matched = _keys_match(private, public)
+        if matched is False:
+            # Worth its own state because the symptom is otherwise a mystery:
+            # subscribing works, the device appears, and every push is refused
+            # by a service that will only say the token was bad.
+            return Check(
+                key=key,
+                title=title,
+                state=CheckState.FAIL,
+                detail=(
+                    "The push keys are not a pair — devices subscribe with one key and "
+                    "this machine signs with another, so every notification is refused."
+                ),
+            )
         return Check(
             key=key,
             title=title,
             state=CheckState.OK,
-            detail="Push keys are configured; devices can subscribe.",
+            detail="Push keys are configured and match; devices can subscribe.",
         )
     if private or public:
         # Half a keypair is worse than none: a browser can subscribe against a

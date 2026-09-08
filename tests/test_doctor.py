@@ -643,3 +643,45 @@ def test_a_failure_with_no_single_command_still_reaches_the_to_do_list(caplog):
 
     assert "ssh-ed25519 AAAA-paste-me" in caplog.text
     assert caplog.text.count("The account can push to GitHub") == 2
+
+
+class _Node:
+    """Enough of a node row for the head's check to read."""
+
+    def __init__(self, name, capabilities):
+        self.name = name
+        self.capabilities = capabilities
+
+
+def _nodes_seen(monkeypatch, registered, chosen=None):
+    """Answer the head's two questions without a database behind them."""
+    import contextlib
+
+    from workbench import nodes
+
+    monkeypatch.setattr("workbench.database.db.session_scope", lambda: contextlib.nullcontext(None))
+    monkeypatch.setattr(nodes, "known_nodes", lambda _db: registered)
+    monkeypatch.setattr(nodes, "inference_endpoint", lambda _db: chosen)
+
+
+def test_a_node_that_is_busy_warns_rather_than_failing(monkeypatch):
+    """Registered, seen a moment ago, and streaming a game. Nothing is broken,
+    and reporting a healthy machine as down is how a report earns being
+    skimmed."""
+    _nodes_seen(monkeypatch, [_Node("homebox-node-1", ["gaming"])])
+
+    check = doctor.check_inference_node()
+
+    assert check.state is CheckState.WARN
+    assert "homebox-node-1" in check.detail
+    assert "gaming" in check.detail
+
+
+def test_a_node_that_offers_inference_and_does_not_answer_still_fails(monkeypatch):
+    """The original meaning, kept: it said it would and it did not."""
+    _nodes_seen(monkeypatch, [_Node("homebox-node-1", ["inference"])], chosen=None)
+
+    check = doctor.check_inference_node()
+
+    assert check.state is CheckState.FAIL
+    assert "none answered" in check.detail

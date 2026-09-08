@@ -11,7 +11,17 @@ is a machine with a web service failing on a database that was never created.
 import pytest
 
 from workbench import deploy, doctor, install
-from workbench.config import ROLE_HEAD, ROLE_NODE, is_node, role, role_marker
+from workbench.config import (
+    GAMING,
+    INFERENCE,
+    ROLE_HEAD,
+    ROLE_NODE,
+    capabilities_marker,
+    declared_capabilities,
+    is_node,
+    role,
+    role_marker,
+)
 
 
 @pytest.fixture
@@ -193,3 +203,52 @@ def test_a_broken_model_server_does_not_fail_a_deploy(monkeypatch, caplog):
         assert deploy.converge_node() is None
 
     assert "ollama is not installed" in caplog.text
+
+
+@pytest.fixture
+def offering(tmp_path, monkeypatch):
+    """A `data/capabilities` of this test's own. See `marker` above."""
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
+    monkeypatch.delenv("WORKBENCH_CAPABILITIES", raising=False)
+    path = capabilities_marker()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_a_node_with_no_capabilities_marker_serves_models(offering):
+    """Every node installed before this file existed does exactly that, and
+    must keep doing it without anyone re-running the installer."""
+    assert declared_capabilities() == [INFERENCE]
+
+
+def test_a_node_declares_what_it_was_installed_for(offering):
+    offering.write_text("inference,gaming\n")
+
+    assert declared_capabilities() == [INFERENCE, GAMING]
+
+
+def test_a_declaration_may_leave_out_inference(offering):
+    """A machine bought to drive a TV lends the head a GPU it must never
+    dispatch a model to."""
+    offering.write_text("gaming\n")
+
+    assert declared_capabilities() == [GAMING]
+
+
+def test_an_unknown_capability_is_ignored_and_said_out_loud(offering, caplog):
+    """Warned rather than refused, unlike the installer's flag: this file is
+    already on a machine, and a node that stops registering over a typo is
+    worse than one that does less than someone thinks."""
+    offering.write_text("inference,minecraft\n")
+
+    with caplog.at_level("WARNING"):
+        assert declared_capabilities() == [INFERENCE]
+
+    assert "minecraft" in caplog.text
+
+
+def test_the_environment_beats_the_capabilities_marker(offering, monkeypatch):
+    offering.write_text("inference\n")
+    monkeypatch.setenv("WORKBENCH_CAPABILITIES", "gaming")
+
+    assert declared_capabilities() == [GAMING]
