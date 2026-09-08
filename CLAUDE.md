@@ -201,6 +201,35 @@ finished, failed, or needs re-planning — and each backend appends the sentence
 a skill for Claude, a `report_outcome` tool for the local loop. Both reach the same
 `POST /api/runs/{id}/outcome`, so nothing above the seam learns there were two ways.
 
+**A project chooses its agent, and where to go when that agent runs out.**
+`projects.agent_backend` has always meant "override the machine default" and until now
+nothing could set it — so a worker node could be installed, registered, reachable and
+serving, with no way to send it work short of editing `/etc/workbench/env` and restarting.
+Both settings live on the project page, because a settings page this app does not have was
+not worth inventing for two selects.
+
+`projects.fallback_backend` is the second: which agent to use when the first reports its
+rate-limit window spent. Null means "wait for the window", and that is the right default —
+the backends are not interchangeable. One bills a subscription and one spends a GPU, and
+moving work between them is a decision worth making rather than discovering.
+
+Four rules keep it from being surprising, and each of them is the answer to a way this
+could go wrong quietly:
+
+- **It moves on the backend's own word, never on a threshold of ours.** Only a `rejected`
+  reading counts. `allowed_warning` means the backend thinks it is close, and moving then
+  would relocate work on a guess.
+- **A reading belongs to the backend that reported it.** A Claude window says nothing
+  about a GPU, so `exhausted_windows` is scoped by the backend of the run that logged it.
+- **A continuation never moves.** A resume token is opaque and means nothing to any
+  backend but the one that issued it, so failing over mid-conversation would start cold in
+  the same worktree — which from outside is indistinguishable from the agent having
+  forgotten everything. Only runs that start fresh may move.
+- **An explicit choice is never second-guessed**, and a run that did move says so in its
+  own event log. A run that quietly went somewhere else is a result somebody will later
+  try to explain from the wrong premise, and `runs.backend` recording what actually ran is
+  only half of that — the other half is saying why at the time.
+
 The rule is enforced rather than documented: `agents/tests/test_seam.py` parses every
 module in the package and fails if a vendor SDK is imported anywhere else. That matters
 because of how this decays — not by someone rejecting the decision, but by a series of

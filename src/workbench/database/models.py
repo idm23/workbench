@@ -249,6 +249,13 @@ class Project(Base):
     # keep the backend recorded on them.
     agent_backend: Mapped[str | None] = mapped_column(String(50), default=None)
 
+    # Where to go when the one above has run out of rate-limit window. Null is
+    # "nowhere" — wait for the window rather than quietly running the work
+    # somewhere else, which is the right default because the two backends are
+    # not interchangeable: one bills a subscription and one spends a GPU, and
+    # they are not equally good.
+    fallback_backend: Mapped[str | None] = mapped_column(String(50), default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     user: Mapped[User] = relationship(back_populates="projects")

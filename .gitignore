@@ -221,3 +221,8 @@ __marimo__/
 # self-contained — no external path to create or remember — while staying out
 # of version control.
 data/
+
+# Claude Code's local scratch space. `worktrees/` holds throwaway git worktrees
+# for agent sessions — each one an embedded repository, which `git add -A`
+# will otherwise commit as a gitlink pointing at a checkout nobody else has.
+.claude/worktrees/

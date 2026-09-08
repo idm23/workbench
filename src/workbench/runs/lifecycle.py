@@ -17,9 +17,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from workbench.agents.registry import UnknownBackend, get_backend
 from workbench.config import default_agent_backend, max_concurrent_runs
 from workbench.database.models import Project, Run, RunEventKind, RunPhase, RunStatus, Task
 from workbench.runs.executors import Started, UnknownExecutor, get_executor
+from workbench.runs.rate_limits import exhausted_windows
 from workbench.runs.store import (
     append_event,
     create_conversation,
@@ -154,6 +156,52 @@ def _launch(db: Session, run: Run, executor: str | None) -> StartResult:
     return run
 
 
+@dataclass(frozen=True)
+class Chosen:
+    """Which backend a run will actually use, and why if it moved."""
+
+    backend: str
+    #: None when nothing moved. A sentence for the run's own event log when
+    #: something did — because a run that quietly went somewhere else is a
+    #: result someone will later try to explain from the wrong premise.
+    reason: str | None = None
+
+
+def choose_backend(db: Session, project: Project) -> Chosen:
+    """The project's backend, or its fallback if the first has run out.
+
+    Only for runs that start fresh. A continuation must never move: a resume
+    token is opaque and means nothing to any backend but the one that issued
+    it, so failing over mid-conversation would start cold in the same worktree
+    and look, from outside, exactly like the agent forgetting everything.
+
+    Conservative in both directions. With no fallback named it does nothing,
+    because the backends are not interchangeable and waiting for a window is a
+    perfectly reasonable thing to want. And it only moves on the backend's own
+    word that a window is *rejected* — not on a utilisation figure of ours,
+    which would move work on a guess.
+    """
+    preferred = project.agent_backend or default_agent_backend()
+    fallback = project.fallback_backend
+    if not fallback or fallback == preferred:
+        return Chosen(preferred)
+
+    if isinstance(get_backend(fallback), UnknownBackend):
+        logger.warning("Project %s falls back to unknown backend %r.", project.id, fallback)
+        return Chosen(preferred)
+
+    exhausted = exhausted_windows(db, preferred)
+    if not exhausted:
+        return Chosen(preferred)
+
+    window = exhausted[0]
+    resets = f", back in {window.resets_in}" if window.resets_in else ""
+    return Chosen(
+        fallback,
+        f"{preferred} has reached its {window.label} limit{resets}. Running on {fallback}.",
+    )
+
+
 def start_run(
     db: Session,
     task: Task,
@@ -179,8 +227,11 @@ def start_run(
     if limit > 0 and len(running) >= limit:
         return TooManyRuns(len(running), limit)
 
-    chosen = backend or task.project.agent_backend or default_agent_backend()
-    run = create_run(db, task, phase, backend=chosen)
+    # An explicit choice is a choice: never second-guessed by failover.
+    picked = Chosen(backend) if backend else choose_backend(db, task.project)
+    run = create_run(db, task, phase, backend=picked.backend)
+    if picked.reason:
+        append_event(db, run.id, RunEventKind.NOTICE, {"text": picked.reason})
     return _launch(db, run, executor)
 
 
@@ -268,7 +319,9 @@ def start_conversation(
     if limit > 0 and len(running) >= limit:
         return TooManyRuns(len(running), limit)
 
-    chosen = backend or project.agent_backend or default_agent_backend()
+    # A project conversation starts fresh, so it may move like any other new
+    # run. Continuing a *task's* run may not — see `choose_backend`.
+    chosen = backend or choose_backend(db, project).backend
     run = create_conversation(db, project, backend=chosen)
     return _launch(db, run, executor)
 

@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from workbench.database.models import RunEvent, RunEventKind
+from workbench.database.models import Run, RunEvent, RunEventKind
 
 logger = logging.getLogger(__name__)
 
@@ -176,14 +176,35 @@ def _reading(payload: dict, observed_at: datetime) -> RateLimitReading | None:
     )
 
 
-def latest_readings(db: Session) -> list[RateLimitReading]:
+def exhausted_windows(db: Session, backend: str) -> list[RateLimitReading]:
+    """Windows this backend has reported full, and which have not reset yet.
+
+    Asked before starting a run, to decide whether to start it somewhere else.
+    Scoped to one backend because a reading belongs to whoever reported it: a
+    Claude window says nothing about a GPU, and treating one machine's limit as
+    the other's would move work for no reason.
+
+    A reading with no `resets_at` is still counted. The backend said the limit
+    was reached and did not say when it would not be; believing it until it
+    says otherwise is the conservative reading, and the cost of being wrong is
+    one run going to the fallback.
+    """
+    now = datetime.now(UTC)
+    return [
+        reading
+        for reading in latest_readings(db, backend=backend)
+        if reading.level == "exhausted" and (reading.resets_at is None or reading.resets_at > now)
+    ]
+
+
+def latest_readings(db: Session, backend: str | None = None) -> list[RateLimitReading]:
     """The newest reading for each window, tightest first.
 
     One row per window rather than a history: the question this answers is
     "how much is left", and only the last answer bears on it. Ordered by how
     close each window is to full so the one about to matter is read first.
     """
-    rows = db.execute(
+    query = (
         select(RunEvent.payload, RunEvent.created_at)
         .where(
             RunEvent.kind == RunEventKind.NOTICE,
@@ -193,7 +214,13 @@ def latest_readings(db: Session) -> list[RateLimitReading]:
         )
         .order_by(desc(RunEvent.id))
         .limit(SCAN_LIMIT)
-    ).all()
+    )
+    if backend is not None:
+        # A reading belongs to the backend that reported it. The panel wants
+        # all of them — it is showing the account's windows — and a failover
+        # decision wants only the one it is about to use.
+        query = query.join(Run, Run.id == RunEvent.run_id).where(Run.backend == backend)
+    rows = db.execute(query).all()
 
     newest: dict[str, RateLimitReading] = {}
     for payload, created_at in rows:
