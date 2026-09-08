@@ -58,6 +58,12 @@
           {% endif %}
         </div>
         <div class="task-actions">
+          {# Proving it works should not require starting an agent and waiting
+             for it to finish — and when it does not work, that tells you
+             nothing about why. #}
+          <form method="post" action="/devices/{{ device.id }}/test">
+            <button class="slim" type="submit">Send a test</button>
+          </form>
           <form method="post" action="/devices/{{ device.id }}/toggle">
             <button class="slim secondary" type="submit">
               {{ 'Silence' if device.enabled else 'Unsilence' }}
