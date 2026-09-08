@@ -377,8 +377,10 @@ def test_the_token_expires_inside_apples_window():
 
     from workbench.notifications import vapid_claims
 
-    lifetime = vapid_claims()["exp"] - int(time.time())
+    expiry = vapid_claims()["exp"]
 
+    assert isinstance(expiry, int)
+    lifetime = expiry - int(time.time())
     assert 0 < lifetime < 24 * 60 * 60
     # And with real margin, not by a second: latency and future clock drift
     # both eat into it.
