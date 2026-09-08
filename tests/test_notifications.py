@@ -363,3 +363,50 @@ def test_the_subscription_script_registers_the_root_worker():
 
     assert 'register("/sw.js")' in script
     assert "serviceWorker.ready" not in script
+
+
+# --- The token this machine signs with --------------------------------------
+
+
+def test_the_token_expires_inside_apples_window():
+    """Apple requires *no more than* 24 hours, `py_vapid` asks for exactly
+    that, and this machine's clock was measured 2.4 seconds fast — so every
+    push came back `403 BadJwtToken`, a four-word reason for a two-second
+    problem. Tested here rather than discovered there."""
+    import time
+
+    from workbench.notifications import vapid_claims
+
+    expiry = vapid_claims()["exp"]
+
+    assert isinstance(expiry, int)
+    lifetime = expiry - int(time.time())
+    assert 0 < lifetime < 24 * 60 * 60
+    # And with real margin, not by a second: latency and future clock drift
+    # both eat into it.
+    assert lifetime <= 12 * 60 * 60
+
+
+def test_the_token_says_who_is_sending():
+    from workbench.notifications import vapid_claims
+
+    assert str(vapid_claims()["sub"]).startswith("mailto:")
+
+
+def test_a_test_push_reports_whether_it_worked(db, user, monkeypatch):
+    """The point of the button: an answer now, rather than after a run."""
+    from workbench.notifications import send_test
+
+    device = a_device(db, user)
+    monkeypatch.setattr(notifications, "_send", lambda d, payload: True)
+
+    assert send_test(db, device) is True
+
+
+def test_a_failing_test_push_says_so(db, user, monkeypatch):
+    from workbench.notifications import send_test
+
+    device = a_device(db, user)
+    monkeypatch.setattr(notifications, "_send", lambda d, payload: False)
+
+    assert send_test(db, device) is False

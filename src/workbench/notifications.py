@@ -19,6 +19,7 @@ the run that was trying to say something.
 
 import json
 import logging
+import time
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -48,6 +49,18 @@ ALL_KINDS = (RUN_FINISHED, RUN_NEEDS_YOU)
 #: which is on the path of every run ending, and a slow push service must not
 #: hold that up.
 SEND_TIMEOUT_SECONDS = 10
+
+#: How long a VAPID token is valid for. Twelve hours rather than the library's
+#: default of exactly 24, and the difference is not caution — it is the whole
+#: reason Apple was returning `403 BadJwtToken` for every push.
+#:
+#: Apple requires a token to expire *no more than* 24 hours from now.
+#: `py_vapid` asks for precisely `now + 86400` using this machine's clock,
+#: which was measured 2.4 seconds fast, and by the time the request arrives it
+#: is over the line. The token is used immediately and never reused, so a
+#: shorter life costs nothing and buys margin against both the boundary and any
+#: clock drift that appears later.
+VAPID_TOKEN_LIFETIME_SECONDS = 12 * 60 * 60
 
 #: Status codes that mean the subscription is gone for good. The browser threw
 #: it away — cleared site data, reinstalled, revoked permission — and the push
@@ -147,6 +160,19 @@ def notify(
     return sent
 
 
+def vapid_claims() -> dict[str, str | int]:
+    """What this machine asserts about itself when it signs a push.
+
+    Its own function so the expiry can be tested without sending anything —
+    which is how the boundary above should have been found, rather than by a
+    push service refusing every token with a four-word reason.
+    """
+    return {
+        "sub": vapid_subject(),
+        "exp": int(time.time()) + VAPID_TOKEN_LIFETIME_SECONDS,
+    }
+
+
 def _send(device: DeviceSubscription, payload: str) -> bool:
     """One push. Never raises; records what happened on the device."""
     # Imported here rather than at module scope so that importing this module
@@ -163,7 +189,7 @@ def _send(device: DeviceSubscription, payload: str) -> bool:
             },
             data=payload,
             vapid_private_key=vapid_private_key(),
-            vapid_claims={"sub": vapid_subject()},
+            vapid_claims=vapid_claims(),
             timeout=SEND_TIMEOUT_SECONDS,
         )
     except WebPushException as error:
@@ -189,6 +215,30 @@ def _send(device: DeviceSubscription, payload: str) -> bool:
     device.last_seen_at = datetime.now(UTC)
     device.last_error = None
     return True
+
+
+def send_test(db: Session, device: DeviceSubscription) -> bool:
+    """Push one notification to a single device, now.
+
+    Exists because the alternative way to find out whether notifications work
+    is to start an agent and wait for it to finish — and when it does not
+    work, as it did not, that tells you nothing about why. This says so
+    immediately, and leaves the reason on the device.
+    """
+    if not notifications_configured():
+        return False
+    sent = _send(
+        device,
+        json.dumps(
+            {
+                "title": "Workbench",
+                "body": "Notifications are working on this device.",
+                "url": "/",
+            }
+        ),
+    )
+    db.commit()
+    return sent
 
 
 def _owner_of(run: Run) -> int | None:

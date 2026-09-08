@@ -60,7 +60,7 @@ from workbench.git.worktrees import (
     sync_worktree,
 )
 from workbench.nodes import known_nodes
-from workbench.notifications import devices_for, forget, set_enabled, subscribe
+from workbench.notifications import devices_for, forget, send_test, set_enabled, subscribe
 from workbench.rendering import render_markdown
 from workbench.runs.activity import (
     activity_by_task,
@@ -339,6 +339,24 @@ def toggle_device(db: DbSession, device_id: int) -> RedirectResponse:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No device with id {device_id}.")
     set_enabled(db, device, not device.enabled)
     return _redirect(f"/users/{device.user_id}")
+
+
+@app.post("/devices/{device_id}/test")
+def test_device(db: DbSession, device_id: int) -> RedirectResponse:
+    """Send one notification to this device, now.
+
+    The alternative way to find out whether notifications work is to start an
+    agent and wait for it to finish — which, when they do not work, tells you
+    nothing about why. The result lands on the device row either way.
+    """
+    device = db.get(DeviceSubscription, device_id)
+    if device is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No device with id {device_id}.")
+
+    target = f"/users/{device.user_id}"
+    if send_test(db, device):
+        return _redirect(target, notice=f"Sent a test notification to {device.label}.")
+    return _redirect(target, error=device.last_error or "That push could not be sent.")
 
 
 @app.post("/devices/{device_id}/delete")
