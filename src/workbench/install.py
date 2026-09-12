@@ -62,6 +62,7 @@ from workbench.config import (
     is_gaming_node,
     is_node,
     port,
+    render_backend_marker,
     repo_root,
     role_marker,
     run_unit_prefix,
@@ -172,8 +173,8 @@ def run(
     return result
 
 
-def owner_environment() -> dict[str, str]:
-    """The environment a command should see when run as the checkout's owner.
+def account_environment(account: pwd.struct_passwd) -> dict[str, str]:
+    """The environment a command should see when run as the given account.
 
     Dropping privileges with setuid does not change the environment the way a
     login would, so HOME would still point at root's. That matters: uv resolves
@@ -181,8 +182,71 @@ def owner_environment() -> dict[str, str]:
     subscription the agent's credential lives there — so a wrong HOME is not an
     inconvenience, it is the install writing another account's files.
     """
-    owner = _service_passwd()
-    return {**os.environ, "HOME": owner.pw_dir, "USER": owner.pw_name, "LOGNAME": owner.pw_name}
+    return {
+        **os.environ,
+        "HOME": account.pw_dir,
+        "USER": account.pw_name,
+        "LOGNAME": account.pw_name,
+    }
+
+
+def owner_environment() -> dict[str, str]:
+    """`account_environment`, for the account that owns the checkout."""
+    return account_environment(_service_passwd())
+
+
+def run_as_account(
+    argv: list[str],
+    account: pwd.struct_passwd,
+    *,
+    timeout: int | None = None,
+    stream: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command as a given, named account — any account, not only the one
+    that owns the checkout.
+
+    `service_run` below is this, pinned to the service account, and stays the
+    right call for anything touching the checkout, the virtualenv, the
+    database, or that account's home. This more general form exists for the
+    gaming user: Steam and Sunshine have to run as the *human* who plays, a
+    different account entirely, and root cannot toggle another account's
+    `systemctl --user` units without first becoming that account for the call.
+
+    `extra_env` is layered over the account's own environment rather than
+    replacing it — `systemctl --user` needs `XDG_RUNTIME_DIR` pointed at that
+    account's user-manager socket, which setuid alone does not provide the way
+    an actual login's `pam_systemd` would, and that is the only caller that
+    needs anything beyond the account's ordinary environment.
+
+    Uses subprocess's own `user=` rather than shelling out to `runuser`. Both
+    end up calling setuid, but runuser opens a PAM session to get there and PAM
+    logs every one — three lines per command into the journal that is the only
+    place a bad deploy explains itself. This also spawns one process, not two.
+
+    Returns the result rather than raising, because the deployer shares this
+    and reports failures into the journal instead of dying on them.
+    """
+    privileged_kwargs = {}
+    if os.geteuid() == 0:
+        privileged_kwargs = {
+            "user": account.pw_uid,
+            "group": account.pw_gid,
+            # Supplementary groups are not inherited across setuid, and leaving
+            # root's would hand the child more access than the account has.
+            "extra_groups": [],
+            "env": {**account_environment(account), **(extra_env or {})},
+        }
+
+    return subprocess.run(
+        argv,
+        cwd=repo_root(),
+        capture_output=not stream,
+        text=True,
+        timeout=timeout,
+        check=False,
+        **privileged_kwargs,
+    )
 
 
 def service_run(
@@ -199,35 +263,10 @@ def service_run(
     are ones the unprivileged service can no longer write, and that failure
     arrives later, as a service which starts and then cannot save anything.
 
-    Uses subprocess's own `user=` rather than shelling out to `runuser`. Both
-    end up calling setuid, but runuser opens a PAM session to get there and PAM
-    logs every one — three lines per command into the journal that is the only
-    place a bad deploy explains itself. This also spawns one process, not two.
-
-    Returns the result rather than raising, because the deployer shares this
-    and reports failures into the journal instead of dying on them.
+    A thin wrapper over `run_as_account`, pinned to `_service_passwd()` — every
+    existing caller keeps meaning exactly what it always did.
     """
-    privileged_kwargs = {}
-    if os.geteuid() == 0:
-        owner = _service_passwd()
-        privileged_kwargs = {
-            "user": owner.pw_uid,
-            "group": owner.pw_gid,
-            # Supplementary groups are not inherited across setuid, and leaving
-            # root's would hand the child more access than the owner has.
-            "extra_groups": [],
-            "env": owner_environment(),
-        }
-
-    return subprocess.run(
-        argv,
-        cwd=repo_root(),
-        capture_output=not stream,
-        text=True,
-        timeout=timeout,
-        check=False,
-        **privileged_kwargs,
-    )
+    return run_as_account(argv, _service_passwd(), timeout=timeout, stream=stream)
 
 
 def service_run_or_fail(argv: list[str], what: str, *, stream: bool = False) -> None:
@@ -451,6 +490,20 @@ def record_gaming_user(name: str, account: pwd.struct_passwd) -> None:
     marker.write_text(f"{name}\n", encoding="utf-8")
     os.chown(marker, account.pw_uid, account.pw_gid)
     info(f"games here are played by '{name}'")
+
+
+def record_render_backend(name: str, account: pwd.struct_passwd) -> None:
+    """Write down how this gaming node renders a game to capture. See `record_role`.
+
+    Kept alongside `render_backend()` rather than in `render.py`: every other
+    "what does this machine say about itself" marker is written here, and a
+    reader should not have to remember that this one is the exception.
+    """
+    marker = render_backend_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{name}\n", encoding="utf-8")
+    os.chown(marker, account.pw_uid, account.pw_gid)
+    info(f"rendering games via '{name}'")
 
 
 def record_capabilities(names: list[str], account: pwd.struct_passwd) -> None:

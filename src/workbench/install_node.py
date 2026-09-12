@@ -24,6 +24,7 @@ Two things here are deliberately *not* ours to own:
 import json
 import logging
 import os
+import pwd
 import shutil
 import socket
 import subprocess
@@ -33,12 +34,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from workbench import render
 from workbench.config import (
     CAPABILITIES,
     INFERENCE,
     ROLE_NODE,
     declared_capabilities,
     deploy_branch,
+    gaming_unit_name,
+    gaming_user,
     head_url,
     inference_base_url,
     is_gaming_node,
@@ -70,6 +74,7 @@ from workbench.install import (
     relocate,
     report_outstanding,
     run,
+    run_as_account,
     step,
     systemd_is_running,
     warn,
@@ -496,14 +501,165 @@ def _gaming_user_argument() -> str | None:
     return os.environ.get("SUDO_USER", "").strip() or None
 
 
-def install_gaming() -> bool:
-    """Everything a gaming node needs from systemd, and nothing it needs a
-    person for.
+#: Ubuntu's own metapackage, which pulls in the i386 runtime Steam itself still
+#: needs. Installing the actual client rather than reimplementing a launcher is
+#: the same call already made for Ollama: the vendor's own package knows things
+#: about its own dependencies that a hand-rolled unpack would get wrong.
+STEAM_PACKAGE = "steam-installer"
 
-    Today that is the switch's authorisation; the unit itself is rendered by
-    `install.units()` so a deploy converges it. Steam, Sunshine and a graphical
-    session come later, and the things that need a browser or a reboot are the
-    doctor's to report, exactly as the GPU driver already is.
+#: TODO: verify against real hardware / LizardByte's current docs. Sunshine
+#: does not (as of this writing, unverified against the actual host) publish a
+#: standing apt repository the way Ollama or Moonlight-Qt's Cloudsmith feed do
+#: — its releases are GitHub Release assets, one `.deb` per Ubuntu codename.
+#: This is the single most likely spot in this file to need a different URL,
+#: a different codename suffix, or a real apt repo if LizardByte has since
+#: added one.
+SUNSHINE_DEB_URL = "https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-24.04-amd64.deb"
+
+#: Groups Sunshine's own documentation asks for: `input` for the virtual
+#: controller/keyboard it presents to games, `video` for framebuffer access
+#: underneath NvFBC. Added, not assumed — checked against current membership
+#: first, same narrow-privilege instinct as the polkit rule's exact match.
+SUNSHINE_GROUPS = ("input", "video")
+
+
+def _in_group(player: str, group: str) -> bool:
+    probe = subprocess.run(["id", "-nG", player], capture_output=True, text=True, check=False)
+    return group in probe.stdout.split()
+
+
+def install_steam() -> bool:
+    """Put Steam on the machine.
+
+    `dpkg --add-architecture i386` and enabling `multiverse` are real, standing
+    changes to the package universe — not scoped to a venv or an account. Done
+    only here, inside `is_gaming_node()`, and logged rather than silent: this
+    is not something every node pays for, only ones that asked to play.
+    """
+    if shutil.which("steam") is not None:
+        info("Steam already installed")
+        return True
+
+    architectures = subprocess.run(
+        ["dpkg", "--print-foreign-architectures"], capture_output=True, text=True, check=False
+    ).stdout.split()
+    if "i386" not in architectures:
+        info("enabling the i386 architecture for Steam")
+        run(["dpkg", "--add-architecture", "i386"], privileged=True)
+        run(["apt-get", "update"], privileged=True)
+
+    step(f"Installing {STEAM_PACKAGE}")
+    result = run(["apt-get", "install", "-y", STEAM_PACKAGE], privileged=True, stream=True)
+    if result.returncode != 0:
+        warn(f"could not install {STEAM_PACKAGE}.")
+        return False
+    return True
+
+
+def install_sunshine() -> bool:
+    """Put Sunshine on the machine, and give the gaming user what it needs.
+
+    A direct `.deb` download rather than an apt repo — see `SUNSHINE_DEB_URL`'s
+    own comment for why, and for the one thing about it most likely to be
+    wrong on a given codename.
+    """
+    if shutil.which("sunshine") is not None:
+        info("Sunshine already installed")
+    else:
+        step("Installing Sunshine")
+        staged = Path("/tmp/sunshine.deb")
+        download = run(["curl", "-fsSL", "-o", str(staged), SUNSHINE_DEB_URL])
+        if download.returncode != 0:
+            warn(f"could not download Sunshine from {SUNSHINE_DEB_URL}.")
+            return False
+        result = run(["apt-get", "install", "-y", str(staged)], privileged=True, stream=True)
+        staged.unlink(missing_ok=True)
+        if result.returncode != 0:
+            warn("could not install the downloaded Sunshine package.")
+            return False
+
+    player = gaming_user()
+    if not player:
+        warn("no gaming user recorded, so Sunshine's groups were not granted.")
+        return True
+
+    for group in SUNSHINE_GROUPS:
+        if _in_group(player, group):
+            continue
+        run(["usermod", "-aG", group, player], privileged=True)
+        info(f"added '{player}' to the '{group}' group")
+
+    return True
+
+
+#: TODO: verify against real hardware / the installed Sunshine version.
+#: `apps.json`'s top-level `global_prep_cmd` is the documented hook for a
+#: command that runs around every stream regardless of which app was
+#: launched — the exact key name and file location are the parts of this
+#: worth confirming against whatever version actually installs.
+def _sunshine_apps_json(unit: str) -> dict:
+    return {
+        "env": {},
+        "apps": [],
+        "global_prep_cmd": [
+            {
+                "do": f"systemctl start {unit}",
+                "undo": f"systemctl stop {unit}",
+                "elevated": False,
+            }
+        ],
+    }
+
+
+def configure_sunshine_prep_command() -> bool:
+    """Wire Sunshine into the switch: start it before a stream, stop it after.
+
+    No sudo needed for either command — that is what `install_gaming_rule`'s
+    polkit grant already buys the gaming user, which is why `elevated` is
+    `False` rather than routing this through a password Sunshine has no way
+    to supply.
+    """
+    player = gaming_user()
+    if not player:
+        return False
+    try:
+        account = pwd.getpwnam(player)
+    except KeyError:
+        warn(f"'{player}' is not a real account; Sunshine was not configured.")
+        return False
+
+    config_dir = Path(account.pw_dir) / ".config" / "sunshine"
+    target = config_dir / "apps.json"
+    rendered = json.dumps(_sunshine_apps_json(gaming_unit_name()), indent=4) + "\n"
+
+    if target.is_file() and target.read_text() == rendered:
+        info("Sunshine's prep command already configured")
+        return True
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    target.write_text(rendered)
+    os.chown(config_dir, account.pw_uid, account.pw_gid)
+    os.chown(target, account.pw_uid, account.pw_gid)
+    info(f"wrote {target}, wiring Sunshine into the gaming switch")
+
+    # Best-effort: a fresh install has nothing running yet to restart, and that
+    # is not a failure of this step, only of a later one.
+    run_as_account(
+        ["systemctl", "--user", "restart", "sunshine"],
+        account,
+        extra_env={"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"},
+    )
+    return True
+
+
+def install_gaming() -> bool:
+    """Everything a gaming node needs beyond the switch itself.
+
+    In order: the switch's authorisation (existing), a render surface for
+    Steam and Sunshine to use, Steam, Sunshine, and Sunshine's own wiring back
+    into the switch. Each step is independent and degrades honestly — "Steam
+    installed, Sunshine did not" is a real, reportable state, not a reason to
+    abort the rest of the install.
     """
     if not systemd_is_running():
         warn("no systemd here, so the gaming switch was not installed.")
@@ -511,6 +667,10 @@ def install_gaming() -> bool:
         return False
 
     install_gaming_rule()
+    render.install()
+    install_steam()
+    install_sunshine()
+    configure_sunshine_prep_command()
     return True
 
 

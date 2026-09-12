@@ -212,6 +212,46 @@ def is_gaming_node() -> bool:
     return is_node() and GAMING in declared_capabilities()
 
 
+#: How a gaming node gives Steam and Sunshine something to render into. Named
+#: rather than assumed, because which one is right for a given card and driver
+#: is not something documentation can settle — see `render.py`'s own docstring
+#: for the reasoning behind the default and what the alternative costs.
+X11_DUMMY = "x11-dummy"
+GAMESCOPE = "gamescope"
+RENDER_BACKENDS = (X11_DUMMY, GAMESCOPE)
+
+#: What a gaming node gets when nobody said. The deeper, longer-running
+#: community precedent specifically for Sunshine on an NVIDIA card, at the
+#: cost of X11 being the older stack — see `render.py`.
+DEFAULT_RENDER_BACKEND = X11_DUMMY
+
+
+def render_backend_marker() -> Path:
+    """The file recording how this node renders a game to capture."""
+    return data_dir() / "render-backend"
+
+
+def render_backend() -> str:
+    """Which render backend this gaming node uses, or the default if nobody said.
+
+    Same shape as `declared_capabilities()`: an environment override, then a
+    marker file, then a default that keeps a node installed before this
+    existed working exactly as it always did — which for every node so far is
+    "not a gaming node," so this is never even read.
+    """
+    configured = os.environ.get("WORKBENCH_RENDER_BACKEND", "").strip().lower()
+    if not configured:
+        try:
+            configured = render_backend_marker().read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            return DEFAULT_RENDER_BACKEND
+
+    if configured not in RENDER_BACKENDS:
+        logger.warning("Unknown render backend %r; using %r.", configured, DEFAULT_RENDER_BACKEND)
+        return DEFAULT_RENDER_BACKEND
+    return configured
+
+
 def capabilities_marker() -> Path:
     """The file recording what this node was installed to do.
 

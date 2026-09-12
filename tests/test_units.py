@@ -101,6 +101,36 @@ def test_no_placeholder_survives(rendered, unit):
     assert leftover == []
 
 
+def test_no_placeholder_survives_in_the_render_templates():
+    """`render.py`'s two templates are not among `units()` either — a gaming
+    node's render surface is its own dispatch point, not a system unit every
+    machine renders — so, same as the polkit rule, they sit outside the check
+    above and need their own."""
+    for template in ("xorg-dummy.conf.template", "workbench-x11.service.template"):
+        leftover = [line for line in render_unit(template).splitlines() if "__" in line]
+        assert leftover == [], template
+
+
+def test_the_x11_unit_starts_without_anyone_logged_in():
+    """A user unit rather than a system one: it has to run as the gaming
+    account, and `[Install] WantedBy=default.target` plus the linger this
+    project's installer enables is what starts it with nobody logged in."""
+    rendered = render_unit("workbench-x11.service.template")
+
+    assert "[Install]" in rendered
+    assert "WantedBy=default.target" in rendered
+    assert "User=" not in directives(rendered)  # implied by being a user unit
+
+
+def test_the_xorg_dummy_config_drives_the_real_gpu():
+    """Deliberately not Xorg's own `dummy` driver, which would mean NvFBC has a
+    software framebuffer to read from instead of the actual card."""
+    rendered = render_unit("xorg-dummy.conf.template")
+
+    assert 'Driver "nvidia"' in rendered
+    assert 'Driver "dummy"' not in rendered
+
+
 def test_no_placeholder_survives_in_the_polkit_rule():
     """The rule is rendered by the same function but is not one of `units()`,
     so it sat outside the check above — which is a bad place for it. An
