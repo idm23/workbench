@@ -18,6 +18,8 @@ from workbench.config import (
     ROLE_NODE,
     capabilities_marker,
     declared_capabilities,
+    gaming_unit_name,
+    is_gaming_node,
     is_node,
     role,
     role_marker,
@@ -252,3 +254,94 @@ def test_the_environment_beats_the_capabilities_marker(offering, monkeypatch):
     monkeypatch.setenv("WORKBENCH_CAPABILITIES", "gaming")
 
     assert declared_capabilities() == [GAMING]
+
+
+def test_a_gaming_node_also_gets_the_switch(offering, monkeypatch):
+    """Rendered by `units()` rather than by the gaming installer, so a deploy
+    converges it. A unit only the installer writes is a unit a machine updated
+    by the timer never gets, which this project has learned three times."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference,gaming\n")
+
+    names = [name for name, _ in install.units()]
+
+    assert f"{gaming_unit_name()}.service" in names
+    # Still a node: no app, no run template.
+    assert not any(name.startswith("workbench.service") for name in names)
+
+
+def test_a_plain_node_gets_no_switch(offering, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference\n")
+
+    assert f"{gaming_unit_name()}.service" not in [name for name, _ in install.units()]
+
+
+def test_a_head_gets_no_switch_however_it_is_declared(offering, monkeypatch):
+    """The switch is about lending a GPU elsewhere. A head has nowhere to lend
+    it to, and `is_gaming_node` says so rather than the capability alone."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "head")
+    offering.write_text("inference,gaming\n")
+
+    assert not is_gaming_node()
+    assert f"{gaming_unit_name()}.service" not in [name for name, _ in install.units()]
+
+
+def test_a_deploy_does_not_take_the_gpu_back_mid_game(monkeypatch, caplog):
+    """The one thing a five-minute timer must not converge unannounced.
+
+    Rewriting the drop-in restarts ollama, which takes the VRAM back from
+    underneath whoever is playing. The next idle tick converges it instead —
+    deciding from state, which is what these ticks already do.
+    """
+    converged: list[int] = []
+    registered: list[int] = []
+    monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: True)
+    monkeypatch.setattr(
+        "workbench.install_node.install_inference_server", lambda: converged.append(1)
+    )
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: registered.append(1))
+
+    with caplog.at_level("INFO"):
+        assert deploy.converge_node() is None
+
+    assert converged == []
+    # Still heartbeats, and that is the point: a busy node is not a gone node.
+    assert registered == [1]
+    assert gaming_unit_name() in caplog.text
+
+
+def test_an_idle_node_converges_normally(monkeypatch):
+    converged: list[int] = []
+    monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: False)
+    monkeypatch.setattr(
+        "workbench.install_node.install_inference_server", lambda: converged.append(1)
+    )
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+
+    assert deploy.converge_node() is None
+    assert converged == [1]
+
+
+def test_a_machine_without_systemd_is_never_busy(monkeypatch):
+    """The container the fresh-install test runs in, and any laptop checkout."""
+    monkeypatch.setattr("workbench.install.systemd_is_running", lambda: False)
+
+    assert deploy.gpu_is_busy_elsewhere() is False
+
+
+def test_not_being_able_to_ask_converges_rather_than_stalls(monkeypatch, caplog):
+    """Not knowing is not the same as knowing it is idle — but a node that
+    stopped updating over a transient would be worse than a restarted model
+    server. Converge, and say why."""
+    monkeypatch.setattr("workbench.install.systemd_is_running", lambda: True)
+
+    def missing(*args, **kwargs):
+        raise OSError("systemctl vanished")
+
+    monkeypatch.setattr(deploy.subprocess, "run", missing)
+
+    with caplog.at_level("WARNING"):
+        assert deploy.gpu_is_busy_elsewhere() is False
+
+    assert "systemctl vanished" in caplog.text

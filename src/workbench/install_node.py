@@ -41,6 +41,7 @@ from workbench.config import (
     deploy_branch,
     head_url,
     inference_base_url,
+    is_gaming_node,
     local_model,
     repo_root,
 )
@@ -59,9 +60,11 @@ from workbench.install import (
     ensure_uv_for_owner,
     hand_off_to,
     info,
+    install_gaming_rule,
     install_units,
     needs_relocation,
     record_capabilities,
+    record_gaming_user,
     record_head,
     record_role,
     relocate,
@@ -471,6 +474,46 @@ def _capabilities_argument() -> list[str] | None:
     return named
 
 
+def _gaming_user_argument() -> str | None:
+    """Whose session Sunshine will run in, from the flag or from sudo.
+
+    Defaults to `SUDO_USER`, which is right almost always: the person running
+    `./install.sh --gaming` on their own laptop is the person who will play on
+    it. When that is empty — already root, or a container — the flag is
+    required rather than guessed.
+
+    Guessing uid 1000 was the alternative and is worse than failing: it writes a
+    Sunshine configuration into the wrong home, and the symptom is a stream that
+    connects and captures nothing, which looks like a Sunshine bug for an
+    afternoon.
+    """
+    argv = sys.argv[1:]
+    for index, argument in enumerate(argv):
+        if argument.startswith("--gaming-user="):
+            return argument.split("=", 1)[1].strip() or None
+        if argument == "--gaming-user" and index + 1 < len(argv):
+            return argv[index + 1].strip() or None
+    return os.environ.get("SUDO_USER", "").strip() or None
+
+
+def install_gaming() -> bool:
+    """Everything a gaming node needs from systemd, and nothing it needs a
+    person for.
+
+    Today that is the switch's authorisation; the unit itself is rendered by
+    `install.units()` so a deploy converges it. Steam, Sunshine and a graphical
+    session come later, and the things that need a browser or a reboot are the
+    doctor's to report, exactly as the GPU driver already is.
+    """
+    if not systemd_is_running():
+        warn("no systemd here, so the gaming switch was not installed.")
+        info("A real node would get a unit that hands its GPU to a game.")
+        return False
+
+    install_gaming_rule()
+    return True
+
+
 def main() -> int:
     configure_console_logging()
     os.chdir(repo_root())
@@ -509,11 +552,17 @@ def main() -> int:
         # offering exactly what it offered before, the way `--head` does.
         if (offering := _capabilities_argument()) is not None:
             record_capabilities(offering, account)
+        if is_gaming_node() and (player := _gaming_user_argument()) is not None:
+            record_gaming_user(player, account)
 
         step("Installing the model server")
         serving = install_inference_server()
         if serving:
             pull_model()
+
+        if is_gaming_node():
+            step("Installing the gaming switch")
+            install_gaming()
 
         step("Installing the updater")
         if not systemd_is_running():
