@@ -1208,9 +1208,10 @@ def check_render_session() -> Check:
     """Whether this gaming node currently has something for Sunshine to
     capture.
 
-    `UNKNOWN` rather than a guess when it cannot be answered — see
-    `render.render_session_is_up()`'s own docstring for exactly why that is
-    still the honest answer today rather than a real probe.
+    `UNKNOWN` rather than a guess when it cannot be answered at all (nobody
+    playing, or the `gamescope` backend, still unimplemented) — see
+    `render.render_session_is_up()`'s own docstring for the real probe this
+    now runs for the default `x11-dummy` backend.
     """
     from workbench import render
 

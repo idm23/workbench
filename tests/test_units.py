@@ -111,15 +111,18 @@ def test_no_placeholder_survives_in_the_render_templates():
         assert leftover == [], template
 
 
-def test_the_x11_unit_starts_without_anyone_logged_in():
-    """A user unit rather than a system one: it has to run as the gaming
-    account, and `[Install] WantedBy=default.target` plus the linger this
-    project's installer enables is what starts it with nobody logged in."""
+def test_the_x11_unit_is_root_and_starts_at_boot():
+    """A system unit, not a user one, and root rather than the narrow default:
+    found the hard way that opening the VT this needs is root-only on a
+    machine with no setuid `Xorg.wrap` — a `systemd --user` unit can never be
+    root at all, by construction, whatever its account's own group
+    memberships are. See the template's own comment."""
     rendered = render_unit("workbench-x11.service.template")
 
     assert "[Install]" in rendered
-    assert "WantedBy=default.target" in rendered
-    assert "User=" not in directives(rendered)  # implied by being a user unit
+    assert "WantedBy=multi-user.target" in rendered
+    # No User= at all: system units default to root, and root is the point.
+    assert "User=" not in directives(rendered)
 
 
 def test_the_xorg_dummy_config_drives_the_real_gpu():

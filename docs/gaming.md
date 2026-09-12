@@ -24,32 +24,36 @@ Everything a plain node already is (see `docs/nodes.md`), plus:
 sudo ./install.sh --role=node --capabilities=inference,gaming --gaming-user=<the person>
 ```
 
-`--gaming-user` is not optional in practice: it is whose graphical session Sunshine runs
-in, whose `systemd --user` units get enabled, and the one account the polkit rule names.
-Defaults to `$SUDO_USER`, which is right whenever the person running the installer is the
-person who will play — wrong, and silently so, in a container or already-root shell, which
-is why it is required rather than guessed there.
+`--gaming-user` is not optional in practice: it is whose graphical session Sunshine and
+Steam run in, whose groups get Sunshine's capture permissions, and the one account the
+polkit rule names. Defaults to `$SUDO_USER`, which is right whenever the person running the
+installer is the person who will play — wrong, and silently so, in a container or
+already-root shell, which is why it is required rather than guessed there.
 
 Re-running the same command is safe. It is also how you turn a plain node into a gaming
 one after the fact, or pick up a changed template.
 
-## The render surface, and what is still open about it
+## The render surface, and what running it found
 
-Two things are worth knowing before this runs on a card that has never tried it:
-
-- **Nothing here has run against real hardware yet.** The Xorg `ConnectedMonitor` /
-  `CustomEDID` trick, and running Xorg as an unprivileged user's `systemd --user` unit
-  outside a display manager's usual session machinery, are both documented approaches
-  rather than proven ones on this project's actual node — see the `TODO` comments in
-  `render.py`, `deploy/xorg-dummy.conf.template`, and
-  `deploy/workbench-x11.service.template` for exactly which parts.
-- **A cheap HDMI dummy plug (~$5-10) is the fallback**, not the starting point, per an
-  explicit decision to try the software-only virtual display first. If `x11-dummy` proves
-  flaky on a given card, a real EDID from a physical plug is worth trying before reaching
-  for `gamescope` — which is named in `config.RENDER_BACKENDS` and stubbed in `render.py`,
-  but not implemented, because NVIDIA's headless-Wayland output story has historically been
-  the less-exercised path on that vendor's driver and that is not something documentation
-  settles for a specific card.
+- **`workbench-x11.service` is a system unit, root, and that is load-bearing rather than a
+  narrow-privilege afterthought.** A first attempt ran the X server as a `systemd --user`
+  unit for the gaming account, on the theory that Steam and Sunshine's own privilege
+  narrowing should extend to the display too. It cannot work, independent of any one
+  machine's configuration: a user unit always runs as whoever's own systemd instance loaded
+  it, so it can never be root — and opening the VT this needs is root-only on a machine with
+  no setuid `Xorg.wrap` (confirmed on this project's own node: `/dev/tty7` is `crw-------`,
+  zero permission bits for anyone else, `tty`-group membership included). Steam and Sunshine
+  are unaffected — they are X *clients*, connecting to `:0`, and stay on the gaming account.
+- **The Xorg `ConnectedMonitor` / `CustomEDID` trick has run against real hardware and
+  worked** on the first try, once the unit itself was fixed. `python -m workbench.doctor`'s
+  render-surface check is a real probe now, not a permanent `unknown`.
+- **A cheap HDMI dummy plug (~$5-10) is still worth knowing about** as a fallback, per an
+  explicit decision to try the software-only virtual display first — it gives a real EDID
+  instead of a synthetic one, if a different card ever needs it.
+- **`gamescope`** is named in `config.RENDER_BACKENDS` and stubbed in `render.py`, but not
+  implemented — NVIDIA's headless-Wayland output story has historically been the
+  less-exercised path on that vendor's driver, which is why `x11-dummy` was tried first, not
+  a reason to expect `gamescope` to fail if it is ever built.
 
 ## Pairing
 
@@ -77,7 +81,7 @@ as well as one that was never asked to game.
 | Symptom | Where to look |
 |---|---|
 | The doctor says Steam or Sunshine is missing | Re-run the install command above |
-| A stream connects but shows nothing | `systemctl --user status workbench-x11` as the gaming user — no render surface, nothing to capture |
-| Sunshine's prep command does not flip the switch | `systemctl --user -M <gaming user>@ status workbench-gaming` from the head or the node; confirm the polkit rule was granted (`ls /etc/polkit-1/rules.d/`) |
+| A stream connects but shows nothing | `systemctl status workbench-x11` on the node — a system unit, so no `--user`/`-M` needed; no render surface means nothing to capture |
+| Sunshine's prep command does not flip the switch | `systemctl status workbench-gaming` on the node (also a system unit); confirm the polkit rule was granted (`ls /etc/polkit-1/rules.d/`) |
 | The switch flips but inference never comes back | `journalctl -u ollama`; `python -m workbench.gaming stop` by hand reports the same thing Sunshine's `undo` command would |
 | Steam or Sunshine cannot reach the GPU | `groups <gaming user>` — should include `video` and `input`; re-run the install command, which grants these idempotently |
