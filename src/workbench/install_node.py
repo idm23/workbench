@@ -507,14 +507,24 @@ def _gaming_user_argument() -> str | None:
 #: about its own dependencies that a hand-rolled unpack would get wrong.
 STEAM_PACKAGE = "steam-installer"
 
-#: TODO: verify against real hardware / LizardByte's current docs. Sunshine
-#: does not (as of this writing, unverified against the actual host) publish a
-#: standing apt repository the way Ollama or Moonlight-Qt's Cloudsmith feed do
-#: — its releases are GitHub Release assets, one `.deb` per Ubuntu codename.
-#: This is the single most likely spot in this file to need a different URL,
-#: a different codename suffix, or a real apt repo if LizardByte has since
-#: added one.
-SUNSHINE_DEB_URL = "https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-24.04-amd64.deb"
+#: Named directly from what Ubuntu's own Steam postinst asked for on real
+#: hardware: `dpkg --add-architecture i386` enables the architecture but does
+#: not pull in the 32-bit counterpart of a driver already installed in
+#: 64-bit, and Steam needs that counterpart to render anything hardware
+#: accelerated. Without this, `apt-get install steam-installer` blocks on an
+#: interactive debconf prompt asking for exactly this package — which an
+#: unattended install must never hit — rather than failing outright.
+#: Installed only when there is an NVIDIA driver to match at all.
+NVIDIA_I386_PACKAGE = "nvidia-driver-libs:i386"
+
+#: LizardByte's own Cloudsmith apt repository (added 2026-09-05, verified live
+#: before this was written) — the same shape already proven for Moonlight-Qt's
+#: own Cloudsmith feed. This replaces an earlier direct-`.deb`-download
+#: approach pinned to one Ubuntu codename, which 404'd on real hardware: a
+#: repo tracks codenames itself, a pinned URL does not.
+SUNSHINE_CLOUDSMITH_SETUP = (
+    "https://dl.cloudsmith.io/public/lizardbyte/stable/cfg/setup/bash.deb.sh"
+)
 
 #: Groups Sunshine's own documentation asks for: `input` for the virtual
 #: controller/keyboard it presents to games, `video` for framebuffer access
@@ -548,8 +558,22 @@ def install_steam() -> bool:
         run(["dpkg", "--add-architecture", "i386"], privileged=True)
         run(["apt-get", "update"], privileged=True)
 
+    if shutil.which("nvidia-smi") is not None:
+        step(f"Installing {NVIDIA_I386_PACKAGE}")
+        try:
+            run(["apt-get", "install", "-y", NVIDIA_I386_PACKAGE], privileged=True, stream=True)
+        except InstallError as error:
+            # Best-effort: the exact package name is a property of the driver
+            # series, which changes. Steam's own postinst will ask for
+            # whatever it actually needs if this guess was wrong.
+            warn(f"could not install {NVIDIA_I386_PACKAGE}: {error}")
+
     step(f"Installing {STEAM_PACKAGE}")
-    result = run(["apt-get", "install", "-y", STEAM_PACKAGE], privileged=True, stream=True)
+    try:
+        result = run(["apt-get", "install", "-y", STEAM_PACKAGE], privileged=True, stream=True)
+    except InstallError as error:
+        warn(f"could not install {STEAM_PACKAGE}: {error}")
+        return False
     if result.returncode != 0:
         warn(f"could not install {STEAM_PACKAGE}.")
         return False
@@ -559,23 +583,30 @@ def install_steam() -> bool:
 def install_sunshine() -> bool:
     """Put Sunshine on the machine, and give the gaming user what it needs.
 
-    A direct `.deb` download rather than an apt repo — see `SUNSHINE_DEB_URL`'s
-    own comment for why, and for the one thing about it most likely to be
-    wrong on a given codename.
+    LizardByte's own Cloudsmith apt repository — see `SUNSHINE_CLOUDSMITH_SETUP`'s
+    own comment for why this replaced an earlier direct-`.deb`-download.
     """
     if shutil.which("sunshine") is not None:
         info("Sunshine already installed")
     else:
-        step("Installing Sunshine")
-        staged = Path("/tmp/sunshine.deb")
-        download = run(["curl", "-fsSL", "-o", str(staged), SUNSHINE_DEB_URL])
-        if download.returncode != 0:
-            warn(f"could not download Sunshine from {SUNSHINE_DEB_URL}.")
+        step("Adding LizardByte's apt repository")
+        try:
+            run(
+                ["sh", "-c", f"curl -1sLf {SUNSHINE_CLOUDSMITH_SETUP} | sudo -E bash"],
+                stream=True,
+            )
+        except InstallError as error:
+            warn(f"could not add LizardByte's apt repository: {error}")
             return False
-        result = run(["apt-get", "install", "-y", str(staged)], privileged=True, stream=True)
-        staged.unlink(missing_ok=True)
+
+        step("Installing Sunshine")
+        try:
+            result = run(["apt-get", "install", "-y", "sunshine"], privileged=True, stream=True)
+        except InstallError as error:
+            warn(f"could not install Sunshine: {error}")
+            return False
         if result.returncode != 0:
-            warn("could not install the downloaded Sunshine package.")
+            warn("could not install Sunshine.")
             return False
 
     player = gaming_user()
