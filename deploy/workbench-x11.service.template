@@ -1,23 +1,25 @@
-# Rendered by install.sh into /etc/systemd/user/ — a *user* unit, not a system
-# one, because Steam and Sunshine have to run inside the gaming account's own
-# session rather than root's. A user unit implicitly runs as whoever's
-# systemd --user instance loaded it; there is no User= to set here the way
-# there is in workbench-gaming.service.template.
+# Rendered by install.sh into /etc/systemd/system/ — a system unit, run as
+# root, and root is not a narrow-privilege default here: it is the actual
+# requirement. Verified against real hardware: this Ubuntu build ships no
+# setuid `Xorg.wrap` at all (`/usr/lib/xorg/Xorg` is a plain root-owned
+# binary), and `/dev/tty7` is `crw-------` — zero permission bits for anyone
+# but root, `tty`-group membership included. A `systemd --user` unit was tried
+# first and cannot work *by construction*, independent of any of that: a user
+# unit always runs as whoever's own systemd instance loaded it, so it can
+# never be root, and there is no ACL or capability grant that substitutes
+# because this account has no real logind session/seat to attach one to
+# (`loginctl enable-linger` keeps a user manager alive with nobody logged in;
+# it does not fabricate a console session for it).
 #
-# Started without anyone logging in via `loginctl enable-linger __GAMING_USER__`
-# plus `systemctl --user enable --now`, run as that account (see
-# `install.run_as_account`) — the same trick that keeps a user's crontab-style
-# services alive after they log out, used here to mean "never logged in yet."
-#
-# TODO: verify against real hardware. Running Xorg as an unprivileged user
-# outside a display manager's usual logind/session-permission dance is the
-# part of this file most likely to need adjustment on the actual box — it may
-# need `Xorg.wrap`'s setuid path, explicit `seat`/`logind` session properties,
-# or a capability grant for DRM access that this unit does not yet declare.
+# Steam and Sunshine still run as the gaming account, unaffected: they are X
+# *clients*, connecting to :0 over the usual local socket. A root X server
+# with unprivileged clients is the ordinary, decades-old shape of this, not a
+# workaround — display managers and logind sessions exist to automate exactly
+# this split for a desktop with a real login, which this machine has none of.
 
 [Unit]
 Description=Workbench: a render surface for Steam and Sunshine to capture
-After=graphical-session-pre.target
+After=network.target
 
 [Service]
 Type=simple
@@ -26,4 +28,4 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

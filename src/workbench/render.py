@@ -21,24 +21,33 @@ node from one to the other later is writing `_install_gamescope()` for real
 and flipping the marker — not touching `gaming.py`, the doctor, the polkit
 rule, or `install_gaming()`'s call site.
 
-`x11-dummy` is the default, for the precedent reason above. It has not run
-against real hardware yet — see the `TODO` markers in `deploy/xorg-dummy.conf.
-template` and `deploy/workbench-x11.service.template` for exactly which parts
-of the recipe are documented-but-unverified rather than proven on this
-project's actual node.
+`x11-dummy` is the default, for the precedent reason above, and has now run
+against real hardware. The one thing that did not survive contact with it was
+the *unit shape*, not the display recipe: a first attempt ran the X server as
+a `systemd --user` unit for the gaming account, on the theory that Steam and
+Sunshine's own privilege narrowing should extend to the display too. It
+cannot work, independent of any one machine's configuration — a user unit
+always runs as whoever's own systemd instance loaded it, so it can never be
+root, and opening a VT is a root-only operation on a machine with no setuid
+`Xorg.wrap` (confirmed on this project's own node: `/dev/tty7` is
+`crw-------`, zero permission bits for anyone else). `workbench-x11.service`
+is a system unit, root, for that reason alone — see its template's own
+comment for the rest of the story. Steam and Sunshine stay unprivileged: they
+are X clients, not the server, and that split needs nothing this module owns.
 """
 
 import logging
-import pwd
 import shutil
+import subprocess
 from pathlib import Path
 
 from workbench.config import GAMESCOPE, gaming_user, render_backend
 from workbench.install import (
+    SYSTEMD_DIR,
+    InstallError,
     info,
     render_unit,
     run,
-    run_as_account,
     systemd_is_running,
     warn,
     write_privileged,
@@ -50,12 +59,6 @@ logger = logging.getLogger(__name__)
 #: scoped like the systemd units: a machine plays at most one game at a time
 #: regardless of how many Workbench instances happen to be installed on it.
 X11_CONF_PATH = Path("/etc/X11/xorg.conf.d/10-workbench-dummy.conf")
-
-#: System-wide *user* unit directory — distinct from `install.SYSTEMD_DIR`,
-#: which is system units. A user unit implicitly runs as whoever's
-#: `systemd --user` instance loaded it; there is no `User=` to set the way
-#: there is for `workbench-gaming.service`.
-USER_UNIT_DIR = Path("/etc/systemd/user")
 
 X11_UNIT_NAME = "workbench-x11.service"
 
@@ -85,8 +88,12 @@ def _ensure_xorg_installed() -> bool:
     if shutil.which("Xorg") is not None:
         return True
     info("installing xserver-xorg-core")
-    result = run(["apt-get", "install", "-y", "xserver-xorg-core"], privileged=True, stream=True)
-    return result.returncode == 0
+    try:
+        run(["apt-get", "install", "-y", "xserver-xorg-core"], privileged=True, stream=True)
+    except InstallError as error:
+        warn(f"could not install xserver-xorg-core: {error}")
+        return False
+    return True
 
 
 def _write_xorg_conf() -> None:
@@ -100,9 +107,9 @@ def _write_xorg_conf() -> None:
 
 
 def _write_x11_unit() -> bool:
-    """Render the user unit that runs the X server. Returns whether it changed."""
+    """Render the system unit that runs the X server. Returns whether it changed."""
     rendered = render_unit("workbench-x11.service.template")
-    target = USER_UNIT_DIR / X11_UNIT_NAME
+    target = SYSTEMD_DIR / X11_UNIT_NAME
     if target.is_file() and target.read_text() == rendered:
         info(f"{X11_UNIT_NAME} already up to date")
         return False
@@ -112,52 +119,18 @@ def _write_x11_unit() -> bool:
     return True
 
 
-def _linger_enabled(player: str) -> bool:
-    probe = run(["loginctl", "show-user", player, "--property=Linger", "--value"], privileged=True)
-    return probe.stdout.strip() == "yes"
+def _enable_system_unit() -> bool:
+    """Start the render surface, root, no different from any other system unit.
 
-
-def _ensure_linger(player: str) -> None:
-    """Let `player`'s `systemd --user` instance run with nobody logged in.
-
-    Without this, the user unit below exists but never starts: a `--user`
-    manager is normally only alive for the duration of a login session, and
-    this account may never have one.
+    No per-account impersonation needed — see this module's own docstring for
+    why that was tried first and does not apply here.
     """
-    if _linger_enabled(player):
-        info(f"linger already enabled for '{player}'")
-        return
-    run(["loginctl", "enable-linger", player], privileged=True)
-    info(
-        f"enabled linger for '{player}', so their session survives logging out (or not logging in)"
-    )
-
-
-def _enable_user_unit(player: str) -> bool:
-    """Start the render surface as `player`, not as root.
-
-    A root process cannot toggle another account's `systemctl --user` units
-    directly — this is `install.run_as_account` (see its own docstring) doing
-    the same setuid trick `service_run` uses, aimed at a different account.
-
-    TODO: verify against real hardware. `XDG_RUNTIME_DIR` is threaded through
-    by hand because setuid alone does not set it the way a real login's
-    `pam_systemd` would; whether that is sufficient for `systemctl --user` to
-    reach the right bus, with linger enabled but no active session, is exactly
-    the part of this recipe that only running it on the actual box confirms.
-    """
-    account = pwd.getpwnam(player)
-    extra_env = {"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"}
-    result = run_as_account(
-        ["systemctl", "--user", "enable", "--now", X11_UNIT_NAME],
-        account,
-        extra_env=extra_env,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        warn(f"could not enable {X11_UNIT_NAME} for '{player}': {detail}")
+    try:
+        run(["systemctl", "enable", "--now", X11_UNIT_NAME], privileged=True)
+    except InstallError as error:
+        warn(f"could not enable {X11_UNIT_NAME}: {error}")
         return False
-    info(f"{X11_UNIT_NAME} enabled for '{player}'")
+    info(f"{X11_UNIT_NAME} enabled")
     return True
 
 
@@ -165,12 +138,6 @@ def _install_x11_dummy() -> bool:
     if not systemd_is_running():
         warn("no systemd here, so no render surface was installed.")
         info("A real gaming node would get an X server standing in for a monitor.")
-        return False
-
-    player = gaming_user()
-    if not player:
-        warn("no gaming user recorded, so there is nobody to run a render surface for.")
-        info("Re-run with:  --capabilities=inference,gaming --gaming-user=<the person>")
         return False
 
     if not _ensure_xorg_installed():
@@ -182,8 +149,7 @@ def _install_x11_dummy() -> bool:
     if changed:
         run(["systemctl", "daemon-reload"], privileged=True)
 
-    _ensure_linger(player)
-    return _enable_user_unit(player)
+    return _enable_system_unit()
 
 
 def _install_gamescope() -> bool:
@@ -202,18 +168,22 @@ def _install_gamescope() -> bool:
 def render_session_is_up() -> bool | None:
     """Whether a render surface is actually running right now, for the doctor.
 
-    `None` when this can't be answered at all. `systemctl --user -M <user>@`
-    (the "machine" spec for reaching another account's user-manager instance
-    without becoming that account) is the documented way to ask this, but it
-    has not been exercised against a real gaming node yet —
-
-    TODO: verify against real hardware, then replace this with an actual
-    probe. Until then, `UNKNOWN` is the honest answer: it is worth more to the
-    doctor than a `FAIL` (or `OK`) that might simply be wrong.
+    A real probe now that `workbench-x11.service` is a system unit: `systemctl
+    is-active` needs no per-account impersonation, unlike the `systemd --user`
+    shape this was first tried against. `None` only when there is nobody
+    playing at all, or nothing installed to ask about (`gamescope`, still
+    unimplemented) — a question this doctor check should not even be asking
+    yet, rather than a probe that failed.
     """
     if not gaming_user():
         return None
     if render_backend() == GAMESCOPE:
         # Nothing to probe: the backend itself is not implemented yet.
         return False
-    return None
+    # subprocess directly, not install.run(): `systemctl is-active` returns
+    # nonzero for every state that is not "active", by design, and run()
+    # would turn that ordinary "no" into a raised InstallError.
+    probe = subprocess.run(
+        ["systemctl", "is-active", X11_UNIT_NAME], capture_output=True, text=True, check=False
+    )
+    return probe.stdout.strip() == "active"
