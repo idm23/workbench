@@ -37,6 +37,8 @@ are X clients, not the server, and that split needs nothing this module owns.
 """
 
 import logging
+import os
+import pwd
 import shutil
 import subprocess
 from pathlib import Path
@@ -47,6 +49,7 @@ from workbench.install import (
     InstallError,
     info,
     render_unit,
+    restart_user_manager,
     run,
     systemd_is_running,
     warn,
@@ -134,6 +137,31 @@ def _enable_system_unit() -> bool:
     return True
 
 
+#: Where a client running as the gaming account learns which display this
+#: backend put its render surface on. `environment.d` rather than
+#: `systemctl --user set-environment`: the latter is runtime-only and does not
+#: survive a restart of the account's user manager, let alone a reboot — found
+#: by using it directly, then losing it the moment something else needed that
+#: manager restarted anyway.
+DISPLAY_ENV_PATH = Path(".config/environment.d/10-workbench-display.conf")
+
+
+def _write_display_environment(account: pwd.struct_passwd) -> bool:
+    """Give every `systemd --user` service this account runs a `DISPLAY` to
+    find, without each one having to know the render backend's convention
+    itself. Returns whether it changed."""
+    target = Path(account.pw_dir) / DISPLAY_ENV_PATH
+    rendered = "DISPLAY=:0\n"
+    if target.is_file() and target.read_text() == rendered:
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(rendered)
+    os.chown(target.parent, account.pw_uid, account.pw_gid)
+    os.chown(target, account.pw_uid, account.pw_gid)
+    info(f"wrote {target}")
+    return True
+
+
 def _install_x11_dummy() -> bool:
     if not systemd_is_running():
         warn("no systemd here, so no render surface was installed.")
@@ -149,7 +177,18 @@ def _install_x11_dummy() -> bool:
     if changed:
         run(["systemctl", "daemon-reload"], privileged=True)
 
-    return _enable_system_unit()
+    started = _enable_system_unit()
+
+    # Nothing about the server itself needs the gaming account — but anything
+    # that connects to it as a client (Sunshine, today) does, and nothing sets
+    # DISPLAY for that account's own systemd --user manager on its own.
+    player = gaming_user()
+    if player:
+        account = pwd.getpwnam(player)
+        if _write_display_environment(account):
+            restart_user_manager(account)
+
+    return started
 
 
 def _install_gamescope() -> bool:
