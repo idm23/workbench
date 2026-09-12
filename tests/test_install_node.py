@@ -401,6 +401,138 @@ def test_a_failed_steam_install_is_a_warning_not_a_failure(monkeypatch, caplog):
     assert install_node.STEAM_PACKAGE in caplog.text
 
 
+def test_steam_install_installs_the_i386_nvidia_libs_when_there_is_a_gpu(monkeypatch):
+    """Found the hard way: without this, Steam's postinst blocks on an
+    interactive debconf prompt asking for exactly this package."""
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class Architectures:
+        stdout = "i386\n"
+
+    calls = []
+    monkeypatch.setattr(
+        install_node.shutil,
+        "which",
+        lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
+    )
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv) or Ok())
+
+    assert install_node.install_steam() is True
+    assert ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE] in calls
+    # Before Steam itself, so Steam's own postinst never gets a chance to ask.
+    assert calls.index(
+        ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE]
+    ) < calls.index(["apt-get", "install", "-y", install_node.STEAM_PACKAGE])
+
+
+def test_steam_install_skips_the_nvidia_libs_with_no_gpu(monkeypatch):
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class Architectures:
+        stdout = "i386\n"
+
+    calls = []
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv) or Ok())
+
+    install_node.install_steam()
+
+    assert ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE] not in calls
+
+
+def test_a_failed_nvidia_i386_install_does_not_block_steam(monkeypatch, caplog):
+    """The exact package name is a property of the driver series, which
+    changes — a wrong guess must not cost the rest of the install."""
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class Architectures:
+        stdout = "i386\n"
+
+    def fake_run(argv, **kwargs):
+        if argv == ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE]:
+            raise InstallError("no such package")
+        return Ok()
+
+    monkeypatch.setattr(
+        install_node.shutil,
+        "which",
+        lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
+    )
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node, "run", fake_run)
+
+    with caplog.at_level("WARNING"):
+        assert install_node.install_steam() is True
+
+    assert install_node.NVIDIA_I386_PACKAGE in caplog.text
+
+
+def test_a_raising_steam_install_is_a_warning_not_a_crash(monkeypatch, caplog):
+    """`install.run()` raises `InstallError` rather than returning a nonzero
+    result, so this must be caught, not left to abort the whole installer."""
+
+    class Architectures:
+        stdout = "i386\n"
+
+    def fake_run(argv, **kwargs):
+        raise InstallError("no space left on device")
+
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node, "run", fake_run)
+
+    with caplog.at_level("WARNING"):
+        assert install_node.install_steam() is False
+
+    assert install_node.STEAM_PACKAGE in caplog.text
+
+
+def test_sunshine_install_adds_the_cloudsmith_repo_then_the_package(monkeypatch):
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    calls = []
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node, "gaming_user", lambda: None)
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv) or Ok())
+
+    assert install_node.install_sunshine() is True
+    assert calls[0] == [
+        "sh",
+        "-c",
+        f"curl -1sLf {install_node.SUNSHINE_CLOUDSMITH_SETUP} | sudo -E bash",
+    ]
+    assert calls[1] == ["apt-get", "install", "-y", "sunshine"]
+
+
+def test_a_raising_sunshine_repo_add_is_a_warning_not_a_crash(monkeypatch, caplog):
+    def fake_run(argv, **kwargs):
+        raise InstallError("could not resolve host")
+
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node, "run", fake_run)
+
+    with caplog.at_level("WARNING"):
+        assert install_node.install_sunshine() is False
+
+    assert "LizardByte" in caplog.text
+
+
 def test_sunshine_already_installed_skips_the_download(monkeypatch):
     monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/bin/sunshine")
     monkeypatch.setattr(
