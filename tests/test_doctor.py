@@ -685,3 +685,94 @@ def test_a_node_that_offers_inference_and_does_not_answer_still_fails(monkeypatc
 
     assert check.state is CheckState.FAIL
     assert "none answered" in check.detail
+
+
+def test_steam_installed_passes(monkeypatch):
+    monkeypatch.setattr(
+        doctor.shutil, "which", lambda name: "/usr/bin/steam" if name == "steam" else None
+    )
+    assert doctor.check_steam().state is CheckState.OK
+
+
+def test_steam_missing_warns_with_the_install_command(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor, "gaming_user", lambda: "ian")
+
+    check = doctor.check_steam()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "--gaming-user=ian" in check.fix
+
+
+def test_sunshine_installed_passes(monkeypatch):
+    monkeypatch.setattr(
+        doctor.shutil, "which", lambda name: "/usr/bin/sunshine" if name == "sunshine" else None
+    )
+    assert doctor.check_sunshine().state is CheckState.OK
+
+
+def test_sunshine_missing_warns(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor, "gaming_user", lambda: None)
+
+    check = doctor.check_sunshine()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "<the person>" in check.fix
+
+
+def test_render_session_unknown_is_reported_as_unknown_not_a_guess(monkeypatch):
+    """See render.render_session_is_up's own docstring: no real probe exists
+    yet, so `UNKNOWN` is the honest answer, not `OK` or `FAIL`."""
+    from workbench import render
+
+    monkeypatch.setattr(render, "render_session_is_up", lambda: None)
+    assert doctor.check_render_session().state is CheckState.UNKNOWN
+
+
+def test_render_session_down_warns(monkeypatch):
+    from workbench import render
+
+    monkeypatch.setattr(render, "render_session_is_up", lambda: False)
+    assert doctor.check_render_session().state is CheckState.WARN
+
+
+def test_render_session_up_passes(monkeypatch):
+    from workbench import render
+
+    monkeypatch.setattr(render, "render_session_is_up", lambda: True)
+    assert doctor.check_render_session().state is CheckState.OK
+
+
+def test_sunshine_pairing_is_unknown_without_sunshine_installed(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    assert doctor.check_sunshine_paired().state is CheckState.UNKNOWN
+
+
+def test_sunshine_pairing_is_unknown_even_when_installed(monkeypatch):
+    """Not yet located on real hardware — see the check's own docstring. This
+    locks in that it stays honest (UNKNOWN) rather than guessing OK or WARN
+    once that TODO is the only thing standing in the way."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    check = doctor.check_sunshine_paired()
+    assert check.state is CheckState.UNKNOWN
+    assert "47990" in check.detail
+
+
+def test_a_gaming_node_gets_the_gaming_checks_too(monkeypatch):
+    monkeypatch.setattr(doctor, "is_node", lambda: True)
+    monkeypatch.setattr(doctor, "is_gaming_node", lambda: True)
+
+    checks = doctor.checks_for_this_machine()
+
+    assert set(doctor.GAMING_CHECKS) <= set(checks)
+    assert set(doctor.NODE_CHECKS) <= set(checks)
+
+
+def test_a_plain_node_does_not_get_the_gaming_checks(monkeypatch):
+    monkeypatch.setattr(doctor, "is_node", lambda: True)
+    monkeypatch.setattr(doctor, "is_gaming_node", lambda: False)
+
+    checks = doctor.checks_for_this_machine()
+
+    assert checks == doctor.NODE_CHECKS

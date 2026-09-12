@@ -1,0 +1,51 @@
+# Rendered by install.sh — this file has no placeholders because nothing
+# about it varies per instance; it is routed through the same idempotent
+# write-only-on-change path as every other template for that reason alone.
+#
+# Gives Steam and Sunshine something to render into on a machine with no
+# monitor attached. Deliberately NOT Xorg's own `dummy` driver: that replaces
+# the GPU with a software framebuffer, which would mean NvFBC — the capture
+# path Sunshine actually uses on NVIDIA — has nothing real to read from. This
+# keeps the `nvidia` driver doing the rendering, and only fakes the *display*
+# the driver would otherwise refuse to bring up with nothing plugged in.
+#
+# TODO: verify against real hardware. `ConnectedMonitor` + a custom EDID is
+# the documented recipe for a headless NVIDIA X server (`nvidia-xconfig
+# --allow-empty-initial-configuration` generates a close variant of this), but
+# nothing here has been run against homebox-node-1's actual card yet. The EDID
+# path below does not exist until something writes it — either a checked-in
+# known-good binary or a generated one — which is real follow-up work, not a
+# detail this file can paper over.
+
+Section "Device"
+    Identifier "WorkbenchGPU"
+    Driver "nvidia"
+    # Pretends a digital flat panel is plugged into the first output, which is
+    # what lets X negotiate a mode without a real display driving EDID over
+    # the wire.
+    Option "ConnectedMonitor" "DFP-0"
+    Option "CustomEDID" "DFP-0:/etc/X11/workbench-dummy-edid.bin"
+    Option "UseDisplayDevice" "DFP-0"
+EndSection
+
+Section "Monitor"
+    Identifier "WorkbenchMonitor"
+    HorizSync 30-90
+    VertRefresh 50-75
+EndSection
+
+Section "Screen"
+    Identifier "WorkbenchScreen"
+    Device "WorkbenchGPU"
+    Monitor "WorkbenchMonitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Modes "1920x1080"
+    EndSubSection
+EndSection
+
+Section "ServerLayout"
+    Identifier "WorkbenchLayout"
+    Screen "WorkbenchScreen"
+EndSection

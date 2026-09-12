@@ -51,8 +51,10 @@ import httpx
 from workbench.config import (
     default_agent_backend,
     deployment_root,
+    gaming_user,
     head_url,
     instance,
+    is_gaming_node,
     is_node,
     port,
     repo_root,
@@ -1153,6 +1155,134 @@ def check_inference_endpoint() -> Check:
     return Check(key=key, title=title, state=state, detail=status.detail)
 
 
+def _gaming_install_fix() -> str:
+    """The command that installs whatever a gaming node's checks find missing.
+
+    One place rather than two, since `check_steam` and `check_sunshine` both
+    point at exactly this.
+    """
+    player = gaming_user() or "<the person>"
+    return f"sudo ./install.sh --role=node --capabilities=inference,gaming --gaming-user={player}"
+
+
+def check_steam() -> Check:
+    """Whether Steam is installed on a gaming node.
+
+    A warning rather than a failure, matching `check_gpu`'s reasoning: a
+    gaming node missing Steam still lends its GPU to inference perfectly well,
+    it simply cannot stream a game yet.
+    """
+    key = "steam"
+    title = "Steam is installed"
+
+    if shutil.which("steam") is not None:
+        return Check(key=key, title=title, state=CheckState.OK, detail="Steam is on this machine.")
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="Steam is not installed, so there is nothing here for Sunshine to stream.",
+        fix=_gaming_install_fix(),
+    )
+
+
+def check_sunshine() -> Check:
+    """Whether Sunshine is installed on a gaming node."""
+    key = "sunshine"
+    title = "Sunshine is installed"
+
+    if shutil.which("sunshine") is not None:
+        return Check(
+            key=key, title=title, state=CheckState.OK, detail="Sunshine is on this machine."
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="Sunshine is not installed, so this node cannot stream to anything.",
+        fix=_gaming_install_fix(),
+    )
+
+
+def check_render_session() -> Check:
+    """Whether this gaming node currently has something for Sunshine to
+    capture.
+
+    `UNKNOWN` rather than a guess when it cannot be answered — see
+    `render.render_session_is_up()`'s own docstring for exactly why that is
+    still the honest answer today rather than a real probe.
+    """
+    from workbench import render
+
+    key = "render-session"
+    title = "A render surface is up"
+
+    up = render.render_session_is_up()
+    if up is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Whether a render surface is running could not be determined.",
+        )
+    if up:
+        return Check(
+            key=key, title=title, state=CheckState.OK, detail="A render surface is running."
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="No render surface is running, so a stream would have nothing to show.",
+    )
+
+
+def check_sunshine_paired() -> Check:
+    """Whether anything has paired with Sunshine yet.
+
+    Pairing is a one-time browser action against Sunshine's own web UI, the
+    same shape as the tailnet login and the agent credential — so `WARN` with
+    no `fix` command, exactly as those report, rather than a command nobody
+    can run for someone else.
+
+    TODO: verify against real hardware. Sunshine's paired-client state has not
+    been located on a real install yet, so this can only ever report
+    `UNKNOWN` today — replacing that with an actual read is real follow-up
+    work, not something this check can respond to yet.
+    """
+    key = "sunshine-paired"
+    title = "Sunshine has a paired client"
+
+    if shutil.which("sunshine") is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Sunshine is not installed, so there is nothing to pair with yet.",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.UNKNOWN,
+        detail=(
+            "Whether this node has a paired Moonlight client could not be determined. "
+            "Pair one at https://<this node>:47990 if a stream has never connected."
+        ),
+    )
+
+
+#: Additional questions asked only of a node declared for gaming, on top of
+#: everything every other node already answers. A node that never said
+#: `--capabilities=inference,gaming` gets none of these — the same reasoning
+#: that keeps `check_inference_node` off a head that never asked for one.
+GAMING_CHECKS = (
+    check_steam,
+    check_sunshine,
+    check_render_session,
+    check_sunshine_paired,
+)
+
+
 #: Every check, in the order a person reads them: what this machine is, then
 #: whether the agent can work, then whether the outside world can be reached.
 HEAD_CHECKS = (
@@ -1191,7 +1321,7 @@ def checks_for_this_machine() -> tuple[Callable[[], Check], ...]:
     warning about worker nodes on every machine that has never wanted one.
     """
     if is_node():
-        return NODE_CHECKS
+        return (*NODE_CHECKS, *GAMING_CHECKS) if is_gaming_node() else NODE_CHECKS
     if default_agent_backend() == INFERENCE_BACKEND:
         return (*HEAD_CHECKS, check_inference_node)
     return HEAD_CHECKS

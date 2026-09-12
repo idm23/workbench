@@ -543,6 +543,30 @@ which is the only place anyone will be reading at the time.
 re-registers on every tick including the ones that pull nothing. That is the only way a
 head notices a node has gone away — nothing here polls.
 
+**A node can also stream a game, on the same card it lends to inference.** One 8 GB card
+cannot hold `qwen3:8b` and a game at once, so the two are mutually exclusive by capability
+rather than by contention: `--capabilities=inference,gaming` installs `workbench-gaming.
+service`, a switch that stops Ollama and re-registers the node as not offering inference the
+moment a game needs the card, and reverses both afterward. Driven by Sunshine's
+`global_prep_cmd`, authorised by a polkit rule scoped to exactly one account and one unit —
+narrower than the run rule needs to be, in the same direction it already argues for: that
+one grants to the account running model-authored commands, this one to a human's everyday
+login, and "may manage units" on a machine that is also a server is a standing privilege
+neither should have more of than the one thing it is for.
+
+**What Steam and Sunshine render into is a decision kept separate from everything else,
+on purpose.** A gaming node has no monitor, so something has to stand in for one, and which
+something is not a question this project's own documentation can settle — it depends on a
+specific card and driver, not on taste. `render.py` isolates it behind one dispatch point,
+keyed off a marker the same shape as the gaming user's; switching later is writing a second
+implementation and flipping that marker, not touching the switch, the doctor, or the polkit
+rule. The default (`x11-dummy`) is the deeper, longer-running community precedent
+specifically for Sunshine on NVIDIA, chosen over the newer `gamescope` path because that
+vendor's headless-Wayland output story has historically been the less-exercised one — a
+judgment call under real uncertainty, not a fact, and one only running it on an actual node
+resolves. See `docs/gaming.md` for the practical guide, including exactly which parts of
+that recipe are documented rather than yet proven on this project's own hardware.
+
 ## Deployment
 
 - systemd unit, `Restart=always`, logs to journald. systemd 259 supports
