@@ -8,6 +8,10 @@ so is a laptop with no GPU: both have to finish the install and say what is
 missing rather than fail.
 """
 
+import json
+import os
+import pwd
+
 import pytest
 
 from workbench import install_node
@@ -329,3 +333,202 @@ def test_no_systemd_skips_the_switch_rather_than_failing(monkeypatch, caplog):
         assert install_node.install_gaming() is False
 
     assert "hands its GPU to a game" in caplog.text
+
+
+def test_steam_already_installed_is_left_alone(monkeypatch):
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/bin/steam")
+    monkeypatch.setattr(
+        install_node, "run", lambda *a, **k: pytest.fail("should not touch apt at all")
+    )
+
+    assert install_node.install_steam() is True
+
+
+def test_steam_install_enables_i386_only_when_not_already_enabled(monkeypatch):
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class Architectures:
+        stdout = "amd64\n"
+
+    calls = []
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv) or Ok())
+
+    assert install_node.install_steam() is True
+    assert ["dpkg", "--add-architecture", "i386"] in calls
+    assert ["apt-get", "install", "-y", install_node.STEAM_PACKAGE] in calls
+
+
+def test_steam_install_skips_i386_when_already_enabled(monkeypatch):
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class Architectures:
+        stdout = "i386\n"
+
+    calls = []
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv) or Ok())
+
+    install_node.install_steam()
+
+    assert ["dpkg", "--add-architecture", "i386"] not in calls
+
+
+def test_a_failed_steam_install_is_a_warning_not_a_failure(monkeypatch, caplog):
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "no space left on device"
+
+    class Architectures:
+        stdout = "i386\n"
+
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node, "run", lambda *a, **k: Failed())
+
+    with caplog.at_level("WARNING"):
+        assert install_node.install_steam() is False
+
+    assert install_node.STEAM_PACKAGE in caplog.text
+
+
+def test_sunshine_already_installed_skips_the_download(monkeypatch):
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(
+        install_node, "run", lambda *a, **k: pytest.fail("should not download anything")
+    )
+    monkeypatch.setattr(install_node, "gaming_user", lambda: None)
+
+    assert install_node.install_sunshine() is True
+
+
+def test_sunshine_install_grants_only_the_groups_not_already_held(monkeypatch):
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    granted = []
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(install_node, "gaming_user", lambda: "ian")
+    monkeypatch.setattr(install_node, "_in_group", lambda player, group: group == "video")
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: granted.append(argv) or Ok())
+
+    assert install_node.install_sunshine() is True
+    assert ["usermod", "-aG", "input", "ian"] in granted
+    assert ["usermod", "-aG", "video", "ian"] not in granted
+
+
+def test_no_gaming_user_skips_granting_groups(monkeypatch, caplog):
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(install_node, "gaming_user", lambda: None)
+    monkeypatch.setattr(
+        install_node, "run", lambda *a, **k: pytest.fail("no account to grant groups to")
+    )
+
+    with caplog.at_level("WARNING"):
+        assert install_node.install_sunshine() is True
+
+    assert "no gaming user recorded" in caplog.text
+
+
+def test_no_gaming_user_skips_configuring_the_prep_command(monkeypatch):
+    monkeypatch.setattr(install_node, "gaming_user", lambda: None)
+    assert install_node.configure_sunshine_prep_command() is False
+
+
+def test_the_prep_command_starts_and_stops_the_switch(monkeypatch, tmp_path):
+    """Wired to the same two commands the polkit rule already lets the gaming
+    user run without sudo — hence `elevated: False`, not a password Sunshine
+    has no way to supply."""
+    real = pwd.getpwuid(os.getuid())
+    # A fake account pointing at a throwaway home, so this writes into
+    # tmp_path rather than the real account's ~/.config.
+    fake_account = pwd.struct_passwd(
+        (
+            real.pw_name,
+            real.pw_passwd,
+            real.pw_uid,
+            real.pw_gid,
+            real.pw_gecos,
+            str(tmp_path),
+            real.pw_shell,
+        )
+    )
+    restarted = []
+    monkeypatch.setattr(install_node, "gaming_user", lambda: real.pw_name)
+    monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: fake_account)
+    monkeypatch.setattr(install_node.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda argv, *a, **k: restarted.append(argv)
+    )
+
+    assert install_node.configure_sunshine_prep_command() is True
+
+    written = json.loads((tmp_path / ".config" / "sunshine" / "apps.json").read_text())
+    [prep] = written["global_prep_cmd"]
+    assert prep["do"] == f"systemctl start {install_node.gaming_unit_name()}"
+    assert prep["undo"] == f"systemctl stop {install_node.gaming_unit_name()}"
+    assert prep["elevated"] is False
+    assert restarted == [["systemctl", "--user", "restart", "sunshine"]]
+
+
+def test_an_unchanged_prep_command_does_not_restart_sunshine(monkeypatch, tmp_path):
+    real = pwd.getpwuid(os.getuid())
+    fake_account = pwd.struct_passwd(
+        (
+            real.pw_name,
+            real.pw_passwd,
+            real.pw_uid,
+            real.pw_gid,
+            real.pw_gecos,
+            str(tmp_path),
+            real.pw_shell,
+        )
+    )
+    monkeypatch.setattr(install_node, "gaming_user", lambda: real.pw_name)
+    monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: fake_account)
+    monkeypatch.setattr(install_node.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda *a, **k: pytest.fail("nothing changed to restart")
+    )
+
+    # Written once already, byte-for-byte what this call would produce.
+    config_dir = tmp_path / ".config" / "sunshine"
+    config_dir.mkdir(parents=True)
+    rendered = (
+        json.dumps(install_node._sunshine_apps_json(install_node.gaming_unit_name()), indent=4)
+        + "\n"
+    )
+    (config_dir / "apps.json").write_text(rendered)
+
+    assert install_node.configure_sunshine_prep_command() is True
+
+
+def test_install_gaming_runs_every_step_in_order(monkeypatch):
+    """The switch's authorisation, a render surface, Steam, Sunshine, then
+    wiring Sunshine into the switch — in that order, because Sunshine's config
+    names a unit that has to already be installable by the time it is written."""
+    order = []
+    monkeypatch.setattr(install_node, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(install_node, "install_gaming_rule", lambda: order.append("rule"))
+    monkeypatch.setattr(install_node.render, "install", lambda: order.append("render") or True)
+    monkeypatch.setattr(install_node, "install_steam", lambda: order.append("steam") or True)
+    monkeypatch.setattr(install_node, "install_sunshine", lambda: order.append("sunshine") or True)
+    monkeypatch.setattr(
+        install_node,
+        "configure_sunshine_prep_command",
+        lambda: order.append("prep-cmd") or True,
+    )
+
+    assert install_node.install_gaming() is True
+    assert order == ["rule", "render", "steam", "sunshine", "prep-cmd"]
