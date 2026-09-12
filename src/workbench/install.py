@@ -249,6 +249,22 @@ def run_as_account(
     )
 
 
+def restart_user_manager(account: pwd.struct_passwd) -> None:
+    """Restart `account`'s `systemd --user` instance.
+
+    Found the hard way: a process does not pick up a supplementary group
+    added by `usermod`, or an `environment.d` file added after it started —
+    both are read once, at startup. `user@<uid>.service` was already running
+    (via `loginctl enable-linger`, from an earlier install) before either
+    change reached this account tonight, so the group and the `DISPLAY` it
+    needed were both silently stale until this ran by hand. A fresh install
+    has no such staleness to fix, so this is only worth calling when
+    something the manager reads at startup actually changed.
+    """
+    run(["systemctl", "restart", f"user@{account.pw_uid}.service"], privileged=True)
+    info(f"restarted user@{account.pw_uid}.service so it sees what just changed")
+
+
 def service_run(
     argv: list[str],
     *,

@@ -6,6 +6,9 @@ when the machine cannot oblige, the same discipline `test_install_node.py`
 already holds itself to for the model server.
 """
 
+import os
+import pwd
+
 import pytest
 
 from workbench import render
@@ -159,3 +162,73 @@ def test_render_session_probes_the_system_unit_for_x11_dummy(monkeypatch):
 
     monkeypatch.setattr(render.subprocess, "run", lambda *a, **k: Inactive())
     assert render.render_session_is_up() is False
+
+
+def test_display_environment_is_written_only_when_changed(monkeypatch, tmp_path):
+    real = pwd.getpwuid(os.getuid())
+    fake_account = pwd.struct_passwd(
+        (
+            real.pw_name,
+            real.pw_passwd,
+            real.pw_uid,
+            real.pw_gid,
+            real.pw_gecos,
+            str(tmp_path),
+            real.pw_shell,
+        )
+    )
+    monkeypatch.setattr(render.os, "chown", lambda *a, **k: None)
+
+    assert render._write_display_environment(fake_account) is True
+    target = tmp_path / render.DISPLAY_ENV_PATH
+    assert target.read_text() == "DISPLAY=:0\n"
+
+    assert render._write_display_environment(fake_account) is False
+
+
+def test_install_x11_dummy_sets_display_for_the_gaming_user(monkeypatch, tmp_path):
+    """Nothing about the X server itself needs the gaming account, but
+    Sunshine — a client of it, running as that account — has no other way to
+    learn where the display is."""
+    real = pwd.getpwuid(os.getuid())
+    fake_account = pwd.struct_passwd(
+        (
+            real.pw_name,
+            real.pw_passwd,
+            real.pw_uid,
+            real.pw_gid,
+            real.pw_gecos,
+            str(tmp_path),
+            real.pw_shell,
+        )
+    )
+
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render, "_ensure_xorg_installed", lambda: True)
+    monkeypatch.setattr(render, "_write_xorg_conf", lambda: None)
+    monkeypatch.setattr(render, "_write_x11_unit", lambda: False)
+    monkeypatch.setattr(render, "_enable_system_unit", lambda: True)
+    monkeypatch.setattr(render, "gaming_user", lambda: real.pw_name)
+    monkeypatch.setattr(render.pwd, "getpwnam", lambda name: fake_account)
+    monkeypatch.setattr(render.os, "chown", lambda *a, **k: None)
+
+    restarted = []
+    monkeypatch.setattr(render, "restart_user_manager", lambda account: restarted.append(account))
+
+    assert render._install_x11_dummy() is True
+    assert (tmp_path / render.DISPLAY_ENV_PATH).read_text() == "DISPLAY=:0\n"
+    assert restarted == [fake_account]
+
+
+def test_install_x11_dummy_skips_display_setup_with_no_gaming_user(monkeypatch):
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render, "_ensure_xorg_installed", lambda: True)
+    monkeypatch.setattr(render, "_write_xorg_conf", lambda: None)
+    monkeypatch.setattr(render, "_write_x11_unit", lambda: False)
+    monkeypatch.setattr(render, "_enable_system_unit", lambda: True)
+    monkeypatch.setattr(render, "gaming_user", lambda: None)
+    monkeypatch.setattr(
+        render, "restart_user_manager", lambda account: pytest.fail("no account to restart for")
+    )
+
+    assert render._install_x11_dummy() is True

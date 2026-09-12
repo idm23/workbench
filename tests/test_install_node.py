@@ -401,6 +401,25 @@ def test_a_failed_steam_install_is_a_warning_not_a_failure(monkeypatch, caplog):
     assert install_node.STEAM_PACKAGE in caplog.text
 
 
+def _subprocess_stub(architectures="i386\n", driver_version="595.91.07\n", driver_returncode=0):
+    """A fake `subprocess.run` that answers both calls `install_steam()` makes
+    directly: the architecture probe and (inside `_nvidia_i386_gl_package()`)
+    the driver-version query. Distinguished by argv, the same way the real
+    two commands are distinguished by a real machine."""
+
+    class Result:
+        def __init__(self, stdout, returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "nvidia-smi":
+            return Result(driver_version, driver_returncode)
+        return Result(architectures)
+
+    return fake_run
+
+
 def test_steam_install_installs_the_i386_nvidia_libs_when_there_is_a_gpu(monkeypatch):
     """Found the hard way: without this, Steam's postinst blocks on an
     interactive debconf prompt asking for exactly this package."""
@@ -410,24 +429,21 @@ def test_steam_install_installs_the_i386_nvidia_libs_when_there_is_a_gpu(monkeyp
         stdout = ""
         stderr = ""
 
-    class Architectures:
-        stdout = "i386\n"
-
     calls = []
     monkeypatch.setattr(
         install_node.shutil,
         "which",
         lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
     )
-    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node.subprocess, "run", _subprocess_stub())
     monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv) or Ok())
 
     assert install_node.install_steam() is True
-    assert ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE] in calls
+    assert ["apt-get", "install", "-y", "libnvidia-gl-595:i386"] in calls
     # Before Steam itself, so Steam's own postinst never gets a chance to ask.
-    assert calls.index(
-        ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE]
-    ) < calls.index(["apt-get", "install", "-y", install_node.STEAM_PACKAGE])
+    assert calls.index(["apt-get", "install", "-y", "libnvidia-gl-595:i386"]) < calls.index(
+        ["apt-get", "install", "-y", install_node.STEAM_PACKAGE]
+    )
 
 
 def test_steam_install_skips_the_nvidia_libs_with_no_gpu(monkeypatch):
@@ -436,17 +452,14 @@ def test_steam_install_skips_the_nvidia_libs_with_no_gpu(monkeypatch):
         stdout = ""
         stderr = ""
 
-    class Architectures:
-        stdout = "i386\n"
-
     calls = []
     monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
-    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node.subprocess, "run", _subprocess_stub())
     monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv) or Ok())
 
     install_node.install_steam()
 
-    assert ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE] not in calls
+    assert not any(argv[0] == "apt-get" and "libnvidia-gl" in argv[-1] for argv in calls)
 
 
 def test_a_failed_nvidia_i386_install_does_not_block_steam(monkeypatch, caplog):
@@ -458,11 +471,8 @@ def test_a_failed_nvidia_i386_install_does_not_block_steam(monkeypatch, caplog):
         stdout = ""
         stderr = ""
 
-    class Architectures:
-        stdout = "i386\n"
-
     def fake_run(argv, **kwargs):
-        if argv == ["apt-get", "install", "-y", install_node.NVIDIA_I386_PACKAGE]:
+        if argv == ["apt-get", "install", "-y", "libnvidia-gl-595:i386"]:
             raise InstallError("no such package")
         return Ok()
 
@@ -471,13 +481,27 @@ def test_a_failed_nvidia_i386_install_does_not_block_steam(monkeypatch, caplog):
         "which",
         lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
     )
-    monkeypatch.setattr(install_node.subprocess, "run", lambda *a, **k: Architectures())
+    monkeypatch.setattr(install_node.subprocess, "run", _subprocess_stub())
     monkeypatch.setattr(install_node, "run", fake_run)
 
     with caplog.at_level("WARNING"):
         assert install_node.install_steam() is True
 
-    assert install_node.NVIDIA_I386_PACKAGE in caplog.text
+    assert "libnvidia-gl-595:i386" in caplog.text
+
+
+def test_nvidia_i386_package_tracks_the_installed_driver_series(monkeypatch):
+    """`595.91.07` -> `595` -> `libnvidia-gl-595:i386` — matching the same
+    series already installed in 64-bit, not a name fixed at write time."""
+    monkeypatch.setattr(
+        install_node.subprocess, "run", _subprocess_stub(driver_version="610.14.02\n")
+    )
+    assert install_node._nvidia_i386_gl_package() == "libnvidia-gl-610:i386"
+
+
+def test_no_driver_version_reported_skips_cleanly(monkeypatch):
+    monkeypatch.setattr(install_node.subprocess, "run", _subprocess_stub(driver_returncode=1))
+    assert install_node._nvidia_i386_gl_package() is None
 
 
 def test_a_raising_steam_install_is_a_warning_not_a_crash(monkeypatch, caplog):
@@ -550,14 +574,42 @@ def test_sunshine_install_grants_only_the_groups_not_already_held(monkeypatch):
         stderr = ""
 
     granted = []
+    restarted = []
     monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/bin/sunshine")
     monkeypatch.setattr(install_node, "gaming_user", lambda: "ian")
     monkeypatch.setattr(install_node, "_in_group", lambda player, group: group == "video")
     monkeypatch.setattr(install_node, "run", lambda argv, **k: granted.append(argv) or Ok())
+    monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: pwd.getpwuid(os.getuid()))
+    monkeypatch.setattr(
+        install_node, "restart_user_manager", lambda account: restarted.append(account)
+    )
 
     assert install_node.install_sunshine() is True
     assert ["usermod", "-aG", "input", "ian"] in granted
     assert ["usermod", "-aG", "video", "ian"] not in granted
+    # A group was actually granted, so the account's already-running user
+    # manager (from an earlier `loginctl enable-linger`) needs a restart to
+    # ever see it — found the hard way, when it silently did not.
+    assert len(restarted) == 1
+
+
+def test_sunshine_install_skips_the_restart_when_nothing_changed(monkeypatch):
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(install_node, "gaming_user", lambda: "ian")
+    monkeypatch.setattr(install_node, "_in_group", lambda player, group: True)
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: Ok())
+    monkeypatch.setattr(
+        install_node,
+        "restart_user_manager",
+        lambda account: pytest.fail("nothing changed to restart"),
+    )
+
+    assert install_node.install_sunshine() is True
 
 
 def test_no_gaming_user_skips_granting_groups(monkeypatch, caplog):
@@ -571,6 +623,58 @@ def test_no_gaming_user_skips_granting_groups(monkeypatch, caplog):
         assert install_node.install_sunshine() is True
 
     assert "no gaming user recorded" in caplog.text
+
+
+def test_linger_is_only_enabled_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(install_node, "_linger_enabled", lambda player: False)
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: calls.append(argv))
+
+    install_node._ensure_linger("ian")
+
+    assert calls == [["loginctl", "enable-linger", "ian"]]
+
+
+def test_linger_already_enabled_is_left_alone(monkeypatch):
+    monkeypatch.setattr(install_node, "_linger_enabled", lambda player: True)
+    monkeypatch.setattr(
+        install_node,
+        "run",
+        lambda *a, **k: pytest.fail("enable-linger should not have been called"),
+    )
+
+    install_node._ensure_linger("ian")  # must not raise
+
+
+def test_a_failed_sunshine_enable_is_a_warning_not_a_crash(monkeypatch, tmp_path, caplog):
+    real = pwd.getpwuid(os.getuid())
+    fake_account = pwd.struct_passwd(
+        (
+            real.pw_name,
+            real.pw_passwd,
+            real.pw_uid,
+            real.pw_gid,
+            real.pw_gecos,
+            str(tmp_path),
+            real.pw_shell,
+        )
+    )
+
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "Unit app-dev.lizardbyte.app.Sunshine.service not found."
+
+    monkeypatch.setattr(install_node, "gaming_user", lambda: real.pw_name)
+    monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: fake_account)
+    monkeypatch.setattr(install_node.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(install_node, "_ensure_linger", lambda player: None)
+    monkeypatch.setattr(install_node, "run_as_account", lambda *a, **k: Failed())
+
+    with caplog.at_level("WARNING"):
+        assert install_node.configure_sunshine_prep_command() is False
+
+    assert install_node.SUNSHINE_UNIT_NAME in caplog.text
 
 
 def test_no_gaming_user_skips_configuring_the_prep_command(monkeypatch):
@@ -596,22 +700,31 @@ def test_the_prep_command_starts_and_stops_the_switch(monkeypatch, tmp_path):
             real.pw_shell,
         )
     )
-    restarted = []
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    enabled = []
     monkeypatch.setattr(install_node, "gaming_user", lambda: real.pw_name)
     monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: fake_account)
     monkeypatch.setattr(install_node.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(install_node, "_ensure_linger", lambda player: None)
     monkeypatch.setattr(
-        install_node, "run_as_account", lambda argv, *a, **k: restarted.append(argv)
+        install_node, "run_as_account", lambda argv, *a, **k: enabled.append(argv) or Ok()
     )
 
     assert install_node.configure_sunshine_prep_command() is True
 
     written = json.loads((tmp_path / ".config" / "sunshine" / "apps.json").read_text())
+    [app] = written["apps"]
+    assert app["name"] == "Desktop"
     [prep] = written["global_prep_cmd"]
     assert prep["do"] == f"systemctl start {install_node.gaming_unit_name()}"
     assert prep["undo"] == f"systemctl stop {install_node.gaming_unit_name()}"
     assert prep["elevated"] is False
-    assert restarted == [["systemctl", "--user", "restart", "sunshine"]]
+    assert enabled == [["systemctl", "--user", "enable", "--now", install_node.SUNSHINE_UNIT_NAME]]
 
 
 def test_an_unchanged_prep_command_does_not_restart_sunshine(monkeypatch, tmp_path):
