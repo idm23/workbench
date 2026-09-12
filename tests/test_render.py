@@ -1,15 +1,16 @@
 """The render surface a gaming node gives Steam and Sunshine to capture from.
 
-Everything here is a step that talks to the machine — Xorg, a systemd `--user`
-unit, `loginctl` — so what can be tested is the shape of what it would do and
-what it does when the machine cannot oblige, the same discipline
-`test_install_node.py` already holds itself to for the model server.
+Everything here is a step that talks to the machine — Xorg, a systemd system
+unit — so what can be tested is the shape of what it would do and what it does
+when the machine cannot oblige, the same discipline `test_install_node.py`
+already holds itself to for the model server.
 """
 
 import pytest
 
 from workbench import render
 from workbench.config import GAMESCOPE, X11_DUMMY
+from workbench.install import InstallError
 
 
 def test_install_dispatches_on_the_declared_backend(monkeypatch):
@@ -53,16 +54,6 @@ def test_no_systemd_skips_x11_rather_than_failing(monkeypatch, caplog):
     assert "no render surface" in caplog.text.lower()
 
 
-def test_no_gaming_user_skips_x11_rather_than_failing(monkeypatch, caplog):
-    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
-    monkeypatch.setattr(render, "gaming_user", lambda: None)
-
-    with caplog.at_level("WARNING"):
-        assert render._install_x11_dummy() is False
-
-    assert "no gaming user recorded" in caplog.text
-
-
 def test_xorg_conf_is_written_only_when_it_changed(monkeypatch, tmp_path):
     target = tmp_path / "xorg-dummy.conf"
     monkeypatch.setattr(render, "X11_CONF_PATH", target)
@@ -81,25 +72,61 @@ def test_xorg_conf_is_written_only_when_it_changed(monkeypatch, tmp_path):
     assert written == [target]  # unchanged: no second write
 
 
-def test_linger_is_only_enabled_once(monkeypatch):
-    """`loginctl enable-linger` is idempotent on the machine, but a check first
-    means one fewer privileged call on every re-run of the installer."""
-    calls = []
-    monkeypatch.setattr(render, "_linger_enabled", lambda player: False)
-    monkeypatch.setattr(render, "run", lambda argv, **k: calls.append(argv))
+def test_x11_unit_is_written_to_the_system_dir_only_when_changed(monkeypatch, tmp_path):
+    """Found the hard way: a `systemd --user` unit can never run as root, and
+    opening the VT this needs is root-only on a machine with no setuid
+    `Xorg.wrap`. See the module docstring for why this is `SYSTEMD_DIR`, the
+    same directory `workbench-gaming.service` itself lands in, not a
+    per-account user-unit directory."""
+    target_dir = tmp_path / "system"
+    monkeypatch.setattr(render, "SYSTEMD_DIR", target_dir)
+    monkeypatch.setattr(render, "render_unit", lambda name: "rendered unit\n")
 
-    render._ensure_linger("ian")
-
-    assert calls == [["loginctl", "enable-linger", "ian"]]
-
-
-def test_linger_already_enabled_is_left_alone(monkeypatch):
-    monkeypatch.setattr(render, "_linger_enabled", lambda player: True)
+    written = []
     monkeypatch.setattr(
-        render, "run", lambda *a, **k: pytest.fail("enable-linger should not have been called")
+        render, "write_privileged", lambda path, content, *, staged_as: written.append(path)
     )
 
-    render._ensure_linger("ian")  # must not raise
+    expected = target_dir / render.X11_UNIT_NAME
+    assert render._write_x11_unit() is True
+    assert written == [expected]
+
+    expected.write_text("rendered unit\n")
+    assert render._write_x11_unit() is False
+    assert written == [expected]  # unchanged: no second write
+
+
+def test_enable_system_unit_needs_no_account_impersonation(monkeypatch):
+    calls = []
+    monkeypatch.setattr(render, "run", lambda argv, **k: calls.append(argv) or None)
+
+    assert render._enable_system_unit() is True
+    assert calls == [["systemctl", "enable", "--now", render.X11_UNIT_NAME]]
+
+
+def test_a_raising_enable_is_a_warning_not_a_crash(monkeypatch, caplog):
+    def fake_run(argv, **kwargs):
+        raise InstallError("unit not found")
+
+    monkeypatch.setattr(render, "run", fake_run)
+
+    with caplog.at_level("WARNING"):
+        assert render._enable_system_unit() is False
+
+    assert render.X11_UNIT_NAME in caplog.text
+
+
+def test_a_raising_xorg_install_is_a_warning_not_a_crash(monkeypatch, caplog):
+    def fake_run(argv, **kwargs):
+        raise InstallError("no space left on device")
+
+    monkeypatch.setattr(render.shutil, "which", lambda name: None)
+    monkeypatch.setattr(render, "run", fake_run)
+
+    with caplog.at_level("WARNING"):
+        assert render._ensure_xorg_installed() is False
+
+    assert "xserver-xorg-core" in caplog.text
 
 
 def test_render_session_is_unknown_with_no_gaming_user(monkeypatch):
@@ -113,8 +140,22 @@ def test_render_session_is_false_for_the_unimplemented_gamescope_backend(monkeyp
     assert render.render_session_is_up() is False
 
 
-def test_render_session_is_unknown_for_x11_dummy_today(monkeypatch):
-    """See render_session_is_up's own docstring: no real probe exists yet."""
+def test_render_session_probes_the_system_unit_for_x11_dummy(monkeypatch):
+    """A real probe now that the unit is system-level — no per-account
+    impersonation needed, unlike the `systemd --user` shape this was first
+    tried against."""
+
+    class Active:
+        stdout = "active\n"
+
+    class Inactive:
+        stdout = "inactive\n"
+
     monkeypatch.setattr(render, "gaming_user", lambda: "ian")
     monkeypatch.setattr(render, "render_backend", lambda: X11_DUMMY)
-    assert render.render_session_is_up() is None
+
+    monkeypatch.setattr(render.subprocess, "run", lambda *a, **k: Active())
+    assert render.render_session_is_up() is True
+
+    monkeypatch.setattr(render.subprocess, "run", lambda *a, **k: Inactive())
+    assert render.render_session_is_up() is False
