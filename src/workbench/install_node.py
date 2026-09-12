@@ -73,6 +73,7 @@ from workbench.install import (
     record_role,
     relocate,
     report_outstanding,
+    restart_user_manager,
     run,
     run_as_account,
     step,
@@ -507,15 +508,34 @@ def _gaming_user_argument() -> str | None:
 #: about its own dependencies that a hand-rolled unpack would get wrong.
 STEAM_PACKAGE = "steam-installer"
 
-#: Named directly from what Ubuntu's own Steam postinst asked for on real
-#: hardware: `dpkg --add-architecture i386` enables the architecture but does
-#: not pull in the 32-bit counterpart of a driver already installed in
-#: 64-bit, and Steam needs that counterpart to render anything hardware
-#: accelerated. Without this, `apt-get install steam-installer` blocks on an
-#: interactive debconf prompt asking for exactly this package — which an
-#: unattended install must never hit — rather than failing outright.
-#: Installed only when there is an NVIDIA driver to match at all.
-NVIDIA_I386_PACKAGE = "nvidia-driver-libs:i386"
+
+def _nvidia_i386_gl_package() -> str | None:
+    """The i386 package Steam actually needs to match this machine's driver.
+
+    `dpkg --add-architecture i386` enables the architecture but does not pull
+    in the 32-bit counterpart of a driver already installed in 64-bit, and
+    Steam needs that counterpart to render anything hardware accelerated —
+    without it, `apt-get install steam-installer` blocks on an interactive
+    debconf prompt, which an unattended install must never hit.
+
+    A first guess here, `nvidia-driver-libs:i386`, was never a real package —
+    Ubuntu versions this per driver series instead: `libnvidia-gl-<series>`,
+    where `<series>` is `nvidia-smi`'s own driver version up to its first dot
+    (`595.91.07` -> `595`), the same series already installed in 64-bit.
+    `None` when there is no driver at all to match, which the caller already
+    checks for before ever reaching this.
+    """
+    probe = subprocess.run(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return None
+    series = probe.stdout.strip().split(".")[0]
+    return f"libnvidia-gl-{series}:i386"
+
 
 #: LizardByte's own Cloudsmith apt repository (added 2026-09-05, verified live
 #: before this was written) — the same shape already proven for Moonlight-Qt's
@@ -532,10 +552,41 @@ SUNSHINE_CLOUDSMITH_SETUP = (
 #: first, same narrow-privilege instinct as the polkit rule's exact match.
 SUNSHINE_GROUPS = ("input", "video")
 
+#: The unit the `sunshine` package actually installs — confirmed on real
+#: hardware via `dpkg -L sunshine`. Not `sunshine.service`: LizardByte ships it
+#: under its reverse-DNS app id, and a guessed plain name here means
+#: `systemctl --user` reports "could not be found" and silently does nothing,
+#: which is exactly what happened before this was checked.
+SUNSHINE_UNIT_NAME = "app-dev.lizardbyte.app.Sunshine.service"
+
 
 def _in_group(player: str, group: str) -> bool:
     probe = subprocess.run(["id", "-nG", player], capture_output=True, text=True, check=False)
     return group in probe.stdout.split()
+
+
+def _linger_enabled(player: str) -> bool:
+    probe = subprocess.run(
+        ["loginctl", "show-user", player, "--property=Linger", "--value"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.stdout.strip() == "yes"
+
+
+def _ensure_linger(player: str) -> None:
+    """Let `player`'s `systemd --user` instance run with nobody logged in.
+
+    Sunshine is a real `--user` unit (unlike the render surface, which moved
+    to a system unit for reasons that have nothing to do with this one): its
+    manager has to exist before anyone has ever logged in as this account, and
+    linger is the only thing that makes systemd start it anyway.
+    """
+    if _linger_enabled(player):
+        return
+    run(["loginctl", "enable-linger", player], privileged=True)
+    info(f"enabled linger for '{player}', so Sunshine's session survives nobody logging in")
 
 
 def install_steam() -> bool:
@@ -559,14 +610,17 @@ def install_steam() -> bool:
         run(["apt-get", "update"], privileged=True)
 
     if shutil.which("nvidia-smi") is not None:
-        step(f"Installing {NVIDIA_I386_PACKAGE}")
-        try:
-            run(["apt-get", "install", "-y", NVIDIA_I386_PACKAGE], privileged=True, stream=True)
-        except InstallError as error:
-            # Best-effort: the exact package name is a property of the driver
-            # series, which changes. Steam's own postinst will ask for
-            # whatever it actually needs if this guess was wrong.
-            warn(f"could not install {NVIDIA_I386_PACKAGE}: {error}")
+        package = _nvidia_i386_gl_package()
+        if package is None:
+            warn("nvidia-smi did not report a driver version; skipped the i386 GL libs.")
+        else:
+            step(f"Installing {package}")
+            try:
+                run(["apt-get", "install", "-y", package], privileged=True, stream=True)
+            except InstallError as error:
+                # Best-effort: Steam's own postinst will ask for whatever it
+                # actually needs if this guess was somehow still wrong.
+                warn(f"could not install {package}: {error}")
 
     step(f"Installing {STEAM_PACKAGE}")
     try:
@@ -614,24 +668,45 @@ def install_sunshine() -> bool:
         warn("no gaming user recorded, so Sunshine's groups were not granted.")
         return True
 
+    changed = False
     for group in SUNSHINE_GROUPS:
         if _in_group(player, group):
             continue
         run(["usermod", "-aG", group, player], privileged=True)
         info(f"added '{player}' to the '{group}' group")
+        changed = True
+
+    if changed:
+        # Found the hard way: a `usermod` here does nothing for a process
+        # that was already running when it ran — including this account's own
+        # `systemd --user` manager, if `loginctl enable-linger` started it
+        # earlier in this same install. Sunshine inherited the *old* group
+        # list and could not open the render surface's devices until this ran.
+        restart_user_manager(pwd.getpwnam(player))
 
     return True
 
 
-#: TODO: verify against real hardware / the installed Sunshine version.
-#: `apps.json`'s top-level `global_prep_cmd` is the documented hook for a
-#: command that runs around every stream regardless of which app was
-#: launched — the exact key name and file location are the parts of this
-#: worth confirming against whatever version actually installs.
+#: Verified against real hardware: `apps.json`'s top-level `global_prep_cmd`
+#: is exactly the documented hook for a command that runs around every
+#: stream regardless of which app was launched.
+#:
+#: The one entry in `apps` matters as much as `global_prep_cmd` does and was
+#: missing at first: Sunshine ships with no apps of its own, and a
+#: `global_prep_cmd`-only file is a switch with nothing to flip it — Moonlight
+#: has nothing to select at all without at least one. `"Desktop"` with no
+#: `cmd` is Sunshine's own convention for "stream whatever is already on
+#: screen" rather than launching something new, which is exactly this render
+#: surface's whole job.
 def _sunshine_apps_json(unit: str) -> dict:
     return {
         "env": {},
-        "apps": [],
+        "apps": [
+            {
+                "name": "Desktop",
+                "image-path": "desktop.png",
+            }
+        ],
         "global_prep_cmd": [
             {
                 "do": f"systemctl start {unit}",
@@ -673,13 +748,22 @@ def configure_sunshine_prep_command() -> bool:
     os.chown(target, account.pw_uid, account.pw_gid)
     info(f"wrote {target}, wiring Sunshine into the gaming switch")
 
-    # Best-effort: a fresh install has nothing running yet to restart, and that
-    # is not a failure of this step, only of a later one.
-    run_as_account(
-        ["systemctl", "--user", "restart", "sunshine"],
+    _ensure_linger(player)
+
+    # `enable --now`, not `restart`: a fresh install has never started this
+    # unit at all, and `restart` on a unit that was never enabled starts it
+    # for this boot only — every reboot would need a person to do this again.
+    # `SUNSHINE_UNIT_NAME`, not the plain-looking guess `sunshine.service`:
+    # see that constant's own comment for what a wrong name costs silently.
+    result = run_as_account(
+        ["systemctl", "--user", "enable", "--now", SUNSHINE_UNIT_NAME],
         account,
         extra_env={"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"},
     )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        warn(f"could not enable {SUNSHINE_UNIT_NAME} for '{player}': {detail}")
+        return False
     return True
 
 
