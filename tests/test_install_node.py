@@ -289,3 +289,43 @@ def test_registration_sends_what_is_offered_now_not_what_was_declared(monkeypatc
     install_node.register_with_head()
 
     assert sent["capabilities"] == ["gaming"]
+
+
+def test_the_gaming_user_flag_is_read_in_either_spelling(monkeypatch):
+    for argv in (
+        ["--role=node", "--gaming-user", "ian"],
+        ["--gaming-user=ian", "--role=node"],
+    ):
+        monkeypatch.setattr(install_node.sys, "argv", ["install", *argv])
+        assert install_node._gaming_user_argument() == "ian"
+
+
+def test_the_gaming_user_defaults_to_whoever_ran_sudo(monkeypatch):
+    """Right almost always: the person running the installer on their own
+    laptop is the person who will play on it."""
+    monkeypatch.setattr(install_node.sys, "argv", ["install", "--role=node"])
+    monkeypatch.setenv("SUDO_USER", "ian")
+
+    assert install_node._gaming_user_argument() == "ian"
+
+
+def test_no_sudo_user_and_no_flag_means_nobody(monkeypatch):
+    """Already root, or a container. Returning None is what makes the polkit
+    step skip with a warning — guessing uid 1000 would write a Sunshine config
+    into the wrong home, and the symptom is a stream that connects and captures
+    nothing, which looks like a Sunshine bug for an afternoon."""
+    monkeypatch.setattr(install_node.sys, "argv", ["install", "--role=node"])
+    monkeypatch.delenv("SUDO_USER", raising=False)
+
+    assert install_node._gaming_user_argument() is None
+
+
+def test_no_systemd_skips_the_switch_rather_than_failing(monkeypatch, caplog):
+    """The container path, mirroring the model server's. It must finish the
+    install and say what a real node would have got."""
+    monkeypatch.setattr(install_node, "systemd_is_running", lambda: False)
+
+    with caplog.at_level("INFO"):
+        assert install_node.install_gaming() is False
+
+    assert "hands its GPU to a game" in caplog.text

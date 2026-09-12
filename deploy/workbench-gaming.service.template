@@ -1,0 +1,54 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+#
+# The switch that hands this node's GPU to whoever is standing at the TV.
+# `systemctl start __GAMING_UNIT__` stops the model server and tells the head
+# this node has withdrawn inference; stopping it puts both back.
+#
+# Oneshot with RemainAfterExit, so "is the GPU busy elsewhere" is a question
+# systemd answers rather than a file somebody has to remember to delete. That is
+# the whole reason this is a unit: a marker file survives a power cut, and a node
+# that came back from one still claiming to be mid-game would be invisible for
+# inference forever with nothing anywhere saying why. An un-enabled unit is
+# inactive after a boot, and ollama — which is enabled — comes back on its own.
+#
+# It is also the general "take this node's GPU away from Workbench" switch. A
+# person doing something heavy on the card by hand runs the same command, which
+# is the honest generalisation of what is being modelled here.
+#
+# Deliberately has no [Install] section: never enabled, never wanted at boot.
+#
+# Deliberately NOT Conflicts=ollama.service, which is the tempting declarative
+# spelling and is wrong twice. Conflicts is symmetric, so anything that started
+# ollama — a deploy, an apt hook, a person — would kill a live game; and an
+# ExecStop that starts a unit this one is ordered against deadlocks. The
+# exclusion is enforced in one direction, imperatively, on purpose.
+
+[Unit]
+Description=Workbench: this node's GPU is in use elsewhere (__SERVICE__)
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Root, because the job is to stop and start ollama.service. Nothing here writes
+# into the deployment — it reads the markers under data/ and makes one POST — so
+# this leaves no root-owned file for the service account to trip over later,
+# which is the trap the installer's own privilege drop exists to avoid.
+User=root
+WorkingDirectory=__REPO__
+
+ExecStart=__REPO__/.venv/bin/python -m workbench.gaming start
+ExecStop=__REPO__/.venv/bin/python -m workbench.gaming stop
+
+Environment=WORKBENCH_DB=__REPO__/data/workbench.db
+Environment=WORKBENCH_INSTANCE=__INSTANCE__
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Sunshine blocks on ExecStart before it launches the game, so this must not be
+# able to hang. Everything inside is bounded already; this is the backstop, and
+# it is short because there is a person waiting at a television.
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+Restart=no

@@ -24,10 +24,16 @@ from workbench.config import (
     agent_home,
     deploy_unit_name,
     deployment_root,
+    gaming_unit_name,
     service_account,
     service_name,
 )
-from workbench.install import InstallError, check_not_under_private_tmp, render_unit, units
+from workbench.install import (
+    InstallError,
+    check_not_under_private_tmp,
+    render_unit,
+    units,
+)
 
 UNIT_NAMES = [
     "workbench.service",
@@ -641,3 +647,79 @@ def test_the_interval_a_person_is_told_matches_the_one_configured():
 
     minutes = schedule.rsplit("/", 1)[-1]
     assert f"{minutes}min" == install.DEPLOY_INTERVAL
+
+
+def test_no_placeholder_survives_in_the_gaming_rule(monkeypatch):
+    """Outside `units()` like the run rule, and worse if unsubstituted: a rule
+    granting nothing to nobody means Sunshine's prep command is refused, the
+    game launches anyway, and the model keeps the card. Nothing looks broken."""
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+
+    leftover = [
+        line for line in render_unit("workbench-gaming.rules.template").splitlines() if "__" in line
+    ]
+
+    assert leftover == []
+
+
+def test_the_gaming_rule_grants_the_unit_the_switch_is(monkeypatch):
+    """The same agreement the run rule has to reach, between two more files.
+    A rule naming a different unit than the one that exists is an authorisation
+    error naming neither."""
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+
+    rule = render_unit("workbench-gaming.rules.template")
+    granted = re.search(r'action\.lookup\("unit"\) === "([^"]+)"', rule)
+
+    assert granted is not None
+    assert granted.group(1) == f"{gaming_unit_name()}.service"
+
+
+def _directives(rendered: str) -> str:
+    """A unit file without its commentary.
+
+    These templates explain at length which directives are deliberately absent,
+    so asserting that one is missing has to read the directives alone — or the
+    explanation of why `Conflicts=` is wrong reads as a `Conflicts=`.
+    """
+    return "\n".join(
+        line for line in rendered.splitlines() if not line.lstrip().startswith(("#", "//"))
+    )
+
+
+def test_the_gaming_rule_grants_the_recorded_person(monkeypatch):
+    """The whole reason the username is recorded rather than a boolean.
+    Sunshine runs in a human's graphical session, so the grant has to name one
+    — on the server that is emphatically not the account Workbench runs as,
+    though on a laptop checkout the two can happen to coincide."""
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "someone-else")
+
+    granted = re.search(
+        r'subject\.user !== "([^"]+)"', render_unit("workbench-gaming.rules.template")
+    )
+
+    assert granted is not None
+    assert granted.group(1) == "someone-else"
+
+
+def test_the_switch_runs_as_root_because_it_drives_ollama(monkeypatch):
+    """Unlike every other unit here. Stopping ollama.service needs it, and the
+    unit writes nothing into the deployment, so it leaves no root-owned file
+    for the service account to trip over."""
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+    service = render_unit("workbench-gaming.service.template")
+
+    assert re.search(r"^User=root$", service, re.MULTILINE)
+    assert re.search(r"^RemainAfterExit=yes$", service, re.MULTILINE)
+    # Never enabled, never wanted at boot: a reboot is what clears a stuck one.
+    assert "[Install]" not in _directives(service)
+
+
+def test_the_switch_does_not_conflict_with_ollama(monkeypatch):
+    """`Conflicts=` is symmetric, so anything starting ollama would kill a live
+    game, and an ExecStop that starts a unit it is ordered against deadlocks.
+    The exclusion is one-directional on purpose, and this pins that."""
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+    service = render_unit("workbench-gaming.service.template")
+
+    assert "Conflicts=" not in _directives(service)

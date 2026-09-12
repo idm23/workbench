@@ -179,6 +179,39 @@ CAPABILITIES = (INFERENCE, GAMING)
 DEFAULT_CAPABILITIES = (INFERENCE,)
 
 
+def gaming_user_marker() -> Path:
+    """The file recording whose graphical session Sunshine runs in."""
+    return data_dir() / "gaming-user"
+
+
+def gaming_user() -> str | None:
+    """The human account that plays games here, or None if nobody said.
+
+    A username rather than a boolean, because the fact that matters everywhere
+    downstream is that this is *not* the service account. Everything Workbench
+    owns runs as `workbench`; Sunshine has to run inside a person's graphical
+    session, so the polkit grant, the config files and the session checks all
+    need to name them.
+    """
+    configured = os.environ.get("WORKBENCH_GAMING_USER", "").strip()
+    if not configured:
+        try:
+            configured = gaming_user_marker().read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return configured or None
+
+
+def is_gaming_node() -> bool:
+    """Whether this machine was installed to drive a screen as well as a model.
+
+    Declared rather than detected. A node that happens to have Steam on it is
+    not a gaming node until someone says so, because the consequence is real:
+    this is what installs the switch that stops Workbench dispatching here.
+    """
+    return is_node() and GAMING in declared_capabilities()
+
+
 def capabilities_marker() -> Path:
     """The file recording what this node was installed to do.
 
@@ -534,6 +567,17 @@ def agent_home() -> Path:
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""
     return f"{service_name()}-deploy"
+
+
+def gaming_unit_name() -> str:
+    """The switch that takes this node's GPU away from Workbench.
+
+    Instance-scoped like every other unit here, though the contention it guards
+    is not: one card, one game. Two installs on one machine would each get their
+    own switch and could disagree about who holds the GPU — a problem worth
+    having only if anyone ever runs staging on a node.
+    """
+    return f"{service_name()}-gaming"
 
 
 def run_unit_prefix() -> str:

@@ -41,6 +41,7 @@ from workbench.config import (
     database_path,
     deploy_branch,
     ensure_data_dir,
+    gaming_unit_name,
     host,
     is_node,
     port,
@@ -359,6 +360,33 @@ def rebuild_and_restart() -> DeployFailed | None:
     return restart_service()
 
 
+def gpu_is_busy_elsewhere() -> bool:
+    """Whether something has taken this node's GPU away from Workbench.
+
+    Asked of systemd rather than of a file, because that is where the answer
+    lives — see `workbench-gaming.service`. A machine with no such unit, or no
+    systemd at all, answers no, which is what every node that never plays a
+    game should say.
+    """
+    if not install.systemd_is_running():
+        return False
+    try:
+        probe = subprocess.run(
+            ["systemctl", "is-active", "--quiet", f"{gaming_unit_name()}.service"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        # Not knowing is not the same as knowing it is idle, but a deploy that
+        # refused to converge because it could not ask systemd would be a node
+        # that stops updating over a transient. Converge, and say why.
+        logger.warning("Could not ask whether the GPU is busy: %s", error)
+        return False
+    return probe.returncode == 0
+
+
 def converge_node() -> DeployFailed | None:
     """Bring a node back in line with what the repo says, and say it is alive.
 
@@ -374,13 +402,24 @@ def converge_node() -> DeployFailed | None:
     """
     from workbench import install_node
 
-    try:
-        install_node.install_inference_server()
-    except Exception as error:
-        # Never fatal to a deploy. The node is still updated and still
-        # reachable; a model server that needs attention is a thing to say,
-        # not a reason to leave the checkout half-deployed.
-        logger.warning("Could not converge the model server: %s", error)
+    if gpu_is_busy_elsewhere():
+        # The one thing a deploy must not converge mid-game. Rewriting the
+        # drop-in restarts ollama, which takes the VRAM back from underneath
+        # whoever is playing — a five-minute timer doing that unannounced is
+        # the worst version of this whole feature. The next idle tick converges
+        # it instead, because deciding from state is what these ticks do.
+        logger.info(
+            "%s is active, so the model server was left alone this tick.",
+            gaming_unit_name(),
+        )
+    else:
+        try:
+            install_node.install_inference_server()
+        except Exception as error:
+            # Never fatal to a deploy. The node is still updated and still
+            # reachable; a model server that needs attention is a thing to say,
+            # not a reason to leave the checkout half-deployed.
+            logger.warning("Could not converge the model server: %s", error)
 
     try:
         # Every tick, not only the ones that pulled something. This is what
