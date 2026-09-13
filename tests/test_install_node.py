@@ -720,11 +720,22 @@ def test_the_prep_command_starts_and_stops_the_switch(monkeypatch, tmp_path):
     written = json.loads((tmp_path / ".config" / "sunshine" / "apps.json").read_text())
     [app] = written["apps"]
     assert app["name"] == "Desktop"
-    [prep] = written["global_prep_cmd"]
+
+    # The prep commands belong in sunshine.conf, NOT in apps.json: this
+    # version of Sunshine reads them from there and silently ignores the key
+    # in apps.json, which is how the switch spent its whole life never firing
+    # while every stream looked perfect. Asserted from both sides.
+    assert "global_prep_cmd" not in written
+    conf = (tmp_path / ".config" / "sunshine" / "sunshine.conf").read_text()
+    [line] = [n for n in conf.splitlines() if n.startswith("global_prep_cmd")]
+    [prep] = json.loads(line.split("=", 1)[1].strip())
     assert prep["do"] == f"systemctl start {install_node.gaming_unit_name()}"
     assert prep["undo"] == f"systemctl stop {install_node.gaming_unit_name()}"
-    assert prep["elevated"] is False
-    assert enabled == [["systemctl", "--user", "enable", "--now", install_node.SUNSHINE_UNIT_NAME]]
+    # `elevated` is a Windows-only field in Sunshine's own UI; on Linux the
+    # authorisation is the polkit rule.
+    assert "elevated" not in prep
+
+    assert ["systemctl", "--user", "enable", "--now", install_node.SUNSHINE_UNIT_NAME] in enabled
 
 
 def test_an_unchanged_prep_command_still_ensures_sunshine_is_enabled(monkeypatch, tmp_path):
@@ -763,26 +774,148 @@ def test_an_unchanged_prep_command_still_ensures_sunshine_is_enabled(monkeypatch
     # Written once already, byte-for-byte what this call would produce.
     config_dir = tmp_path / ".config" / "sunshine"
     config_dir.mkdir(parents=True)
-    rendered = (
-        json.dumps(install_node._sunshine_apps_json(install_node.gaming_unit_name()), indent=4)
-        + "\n"
+    (config_dir / "apps.json").write_text(
+        json.dumps(install_node._sunshine_apps_json(), indent=4) + "\n"
     )
-    (config_dir / "apps.json").write_text(rendered)
+    (config_dir / "sunshine.conf").write_text(
+        install_node._sunshine_conf_with_prep("", install_node.gaming_unit_name())
+    )
 
     assert install_node.configure_sunshine_prep_command() is True
-    assert enabled == [["systemctl", "--user", "enable", "--now", install_node.SUNSHINE_UNIT_NAME]]
+    assert ["systemctl", "--user", "enable", "--now", install_node.SUNSHINE_UNIT_NAME] in enabled
+
+
+def test_sunshine_is_wanted_by_a_target_a_headless_node_actually_reaches(monkeypatch, tmp_path):
+    """The bug this pins down was invisible until a reboot.
+
+    Sunshine ships `WantedBy=graphical-session.target`. A gaming node never
+    reaches that target — its X server is a system unit and nobody logs in —
+    so `systemctl --user enable` linked it somewhere that is never activated,
+    reported `enabled`, and the unit could not start at boot. `enable --now`
+    hid it completely: the `--now` half started Sunshine during the install,
+    so it was always streaming by the time anyone looked.
+    """
+    real = pwd.getpwuid(os.getuid())
+    fake_account = pwd.struct_passwd(
+        (
+            real.pw_name,
+            real.pw_passwd,
+            real.pw_uid,
+            real.pw_gid,
+            real.pw_gecos,
+            str(tmp_path),
+            real.pw_shell,
+        )
+    )
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    calls = []
+    monkeypatch.setattr(install_node.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda argv, *a, **k: calls.append(argv) or Ok()
+    )
+
+    assert install_node._ensure_headless_autostart(fake_account) is True
+
+    assert [
+        "systemctl",
+        "--user",
+        "add-wants",
+        "default.target",
+        install_node.SUNSHINE_UNIT_NAME,
+    ] in calls
+
+    dropin = tmp_path / install_node.HEADLESS_DROPIN
+    body = dropin.read_text()
+    # Clearing After= drops the ordering against a target this machine never
+    # reaches; the ExecStartPre replaces Sunshine's packaged `sleep 5` guess
+    # with a wait for the display it actually needs.
+    assert "After=\n" in body
+    assert "/tmp/.X11-unix/X0" in body
+
+
+def test_the_autostart_link_is_made_even_when_the_dropin_is_unchanged(monkeypatch, tmp_path):
+    """Same lesson as `enable --now`, one level up: the drop-in's content and
+    whether the symlink exists are two different questions, and only the
+    second one keeps a node streaming after a reboot."""
+    real = pwd.getpwuid(os.getuid())
+    fake_account = pwd.struct_passwd(
+        (
+            real.pw_name,
+            real.pw_passwd,
+            real.pw_uid,
+            real.pw_gid,
+            real.pw_gecos,
+            str(tmp_path),
+            real.pw_shell,
+        )
+    )
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    calls = []
+    monkeypatch.setattr(install_node.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda argv, *a, **k: calls.append(argv) or Ok()
+    )
+
+    dropin = tmp_path / install_node.HEADLESS_DROPIN
+    dropin.parent.mkdir(parents=True)
+    dropin.write_text(install_node.HEADLESS_DROPIN_BODY)
+
+    assert install_node._ensure_headless_autostart(fake_account) is False
+    assert [
+        "systemctl",
+        "--user",
+        "add-wants",
+        "default.target",
+        install_node.SUNSHINE_UNIT_NAME,
+    ] in calls
+
+
+def test_an_existing_sunshine_conf_keeps_its_other_settings(monkeypatch):
+    """Sunshine rewrites this whole file itself whenever anyone saves from its
+    web UI, so this has to converge rather than stack up a duplicate key per
+    install — and it must not eat the settings a person put there."""
+    existing = "csrf_allowed_origins = https://node:47990\nmin_log_level = 2\n"
+
+    once = install_node._sunshine_conf_with_prep(existing, "workbench-gaming.service")
+    assert "csrf_allowed_origins = https://node:47990" in once
+    assert "min_log_level = 2" in once
+    assert once.count("global_prep_cmd") == 1
+
+    # Run again over its own output: same file, not a second key.
+    twice = install_node._sunshine_conf_with_prep(once, "workbench-gaming.service")
+    assert twice == once
+
+    # And a stale command is replaced rather than appended beside.
+    moved = install_node._sunshine_conf_with_prep(once, "some-other.service")
+    assert moved.count("global_prep_cmd") == 1
+    assert "some-other.service" in moved
+    assert "workbench-gaming.service" not in moved
 
 
 def test_install_gaming_runs_every_step_in_order(monkeypatch):
-    """The switch's authorisation, a render surface, Steam, Sunshine, then
-    wiring Sunshine into the switch — in that order, because Sunshine's config
-    names a unit that has to already be installable by the time it is written."""
+    """The switch's authorisation, a render surface, Steam, Sunshine, audio,
+    then wiring Sunshine into the switch — in that order, because Sunshine's
+    config names a unit that has to already be installable by the time it is
+    written, and because Sunshine picks its capture device at startup, so the
+    step that leaves it running has to come after the one that creates a sink
+    for it to find."""
     order = []
     monkeypatch.setattr(install_node, "systemd_is_running", lambda: True)
     monkeypatch.setattr(install_node, "install_gaming_rule", lambda: order.append("rule"))
     monkeypatch.setattr(install_node.render, "install", lambda: order.append("render") or True)
     monkeypatch.setattr(install_node, "install_steam", lambda: order.append("steam") or True)
     monkeypatch.setattr(install_node, "install_sunshine", lambda: order.append("sunshine") or True)
+    monkeypatch.setattr(install_node, "install_audio", lambda: order.append("audio") or True)
     monkeypatch.setattr(
         install_node,
         "configure_sunshine_prep_command",
@@ -790,4 +923,4 @@ def test_install_gaming_runs_every_step_in_order(monkeypatch):
     )
 
     assert install_node.install_gaming() is True
-    assert order == ["rule", "render", "steam", "sunshine", "prep-cmd"]
+    assert order == ["rule", "render", "steam", "sunshine", "audio", "prep-cmd"]

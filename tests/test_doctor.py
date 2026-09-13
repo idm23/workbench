@@ -749,14 +749,91 @@ def test_sunshine_pairing_is_unknown_without_sunshine_installed(monkeypatch):
     assert doctor.check_sunshine_paired().state is CheckState.UNKNOWN
 
 
-def test_sunshine_pairing_is_unknown_even_when_installed(monkeypatch):
-    """Not yet located on real hardware — see the check's own docstring. This
-    locks in that it stays honest (UNKNOWN) rather than guessing OK or WARN
-    once that TODO is the only thing standing in the way."""
+def test_sunshine_pairing_reads_the_real_state_file(monkeypatch, tmp_path):
+    """`sunshine_state.json`, beside `apps.json` — found on real hardware, and
+    what retired this check's long-standing TODO. The client's own name is
+    reported rather than a count, because "paired with roth" answers the
+    question a person is actually asking."""
     monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(doctor, "_sunshine_config_dir", lambda: tmp_path)
+    (tmp_path / "sunshine_state.json").write_text(
+        json.dumps({"root": {"named_devices": [{"name": "roth", "enabled": "true"}]}})
+    )
+
+    check = doctor.check_sunshine_paired()
+    assert check.state is CheckState.OK
+    assert "roth" in check.detail
+
+
+def test_sunshine_pairing_warns_when_nothing_has_paired(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(doctor, "_sunshine_config_dir", lambda: tmp_path)
+
+    check = doctor.check_sunshine_paired()
+    assert check.state is CheckState.WARN
+    assert "47990" in check.detail
+
+
+def test_sunshine_pairing_is_unknown_when_the_state_cannot_be_read(monkeypatch, tmp_path):
+    """Mode 0600 in the gaming user's home is the *correct* state, so a person
+    running the doctor as themselves must not be told their pairing is gone —
+    the same reasoning as the pull request token's check."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(doctor, "_sunshine_config_dir", lambda: tmp_path)
+    (tmp_path / "sunshine_state.json").write_text("not json at all")
+
     check = doctor.check_sunshine_paired()
     assert check.state is CheckState.UNKNOWN
-    assert "47990" in check.detail
+
+
+def test_the_encoder_check_catches_a_gpu_node_encoding_on_the_cpu(monkeypatch, tmp_path):
+    """The check that would have caught the real thing. Sunshine's fallback to
+    libx264 is a feature on a node with no GPU and a silent failure on one
+    bought for its graphics card, and the only way to tell them apart is to
+    ask what was chosen."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(doctor, "_sunshine_config_dir", lambda: tmp_path)
+    (tmp_path / "sunshine.log").write_text(
+        "Error: [h264_nvenc] Driver does not support the required nvenc API version.\n"
+        "Info: Found H.264 encoder: libx264 [software]\n"
+    )
+
+    check = doctor.check_stream_encoder()
+    assert check.state is CheckState.WARN
+    assert "CPU" in check.detail
+
+
+def test_the_encoder_check_is_happy_about_nvenc(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(doctor, "_sunshine_config_dir", lambda: tmp_path)
+    (tmp_path / "sunshine.log").write_text("Info: Found H.264 encoder: h264_nvenc [nvenc]\n")
+
+    check = doctor.check_stream_encoder()
+    assert check.state is CheckState.OK
+    assert "h264_nvenc" in check.detail
+
+
+def test_the_encoder_check_reads_the_most_recent_choice(monkeypatch, tmp_path):
+    """Sunshine's log is append-only across restarts, so an old software
+    fallback must not outvote the nvenc the machine is using today."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(doctor, "_sunshine_config_dir", lambda: tmp_path)
+    (tmp_path / "sunshine.log").write_text(
+        "Info: Found H.264 encoder: libx264 [software]\n"
+        "Info: Found H.264 encoder: h264_nvenc [nvenc]\n"
+    )
+
+    assert doctor.check_stream_encoder().state is CheckState.OK
+
+
+def test_the_encoder_check_says_nothing_before_a_first_stream(monkeypatch, tmp_path):
+    """An honest UNKNOWN rather than a warning: a node nobody has streamed
+    from yet has not chosen badly, it has not chosen."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/sunshine")
+    monkeypatch.setattr(doctor, "_sunshine_config_dir", lambda: tmp_path)
+    (tmp_path / "sunshine.log").write_text("Info: Starting main loop\n")
+
+    assert doctor.check_stream_encoder().state is CheckState.UNKNOWN
 
 
 def test_a_gaming_node_gets_the_gaming_checks_too(monkeypatch):
