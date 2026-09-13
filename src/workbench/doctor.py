@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import sys
@@ -1238,6 +1239,19 @@ def check_render_session() -> Check:
     )
 
 
+def _sunshine_config_dir() -> Path | None:
+    """Where the gaming user's Sunshine state lives, or None if there is no
+    gaming user to ask about."""
+    player = gaming_user()
+    if not player:
+        return None
+    try:
+        account = pwd.getpwnam(player)
+    except KeyError:
+        return None
+    return Path(account.pw_dir) / ".config" / "sunshine"
+
+
 def check_sunshine_paired() -> Check:
     """Whether anything has paired with Sunshine yet.
 
@@ -1246,10 +1260,12 @@ def check_sunshine_paired() -> Check:
     no `fix` command, exactly as those report, rather than a command nobody
     can run for someone else.
 
-    TODO: verify against real hardware. Sunshine's paired-client state has not
-    been located on a real install yet, so this can only ever report
-    `UNKNOWN` today — replacing that with an actual read is real follow-up
-    work, not something this check can respond to yet.
+    This used to be a permanent `UNKNOWN` with a TODO, because Sunshine's
+    paired-client state had not been found on a real install. It is
+    `sunshine_state.json`, beside `apps.json`, and the clients are
+    `root.named_devices` — each with the name the person typed into Moonlight,
+    which is worth reporting rather than just counting: "paired with roth"
+    answers a question "1 client paired" only half answers.
     """
     key = "sunshine-paired"
     title = "Sunshine has a paired client"
@@ -1261,14 +1277,137 @@ def check_sunshine_paired() -> Check:
             state=CheckState.UNKNOWN,
             detail="Sunshine is not installed, so there is nothing to pair with yet.",
         )
+
+    config_dir = _sunshine_config_dir()
+    state = config_dir / "sunshine_state.json" if config_dir else None
+    if state is None or not state.is_file():
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                "Nothing has paired with Sunshine yet, so no client can stream from here. "
+                "Pair one at https://<this node>:47990."
+            ),
+        )
+
+    try:
+        devices = json.loads(state.read_text()).get("root", {}).get("named_devices", [])
+    except OSError, ValueError:
+        # Mode 0600 in the gaming user's home, so a person running the doctor
+        # as themselves cannot read it. `unknown`, never `fail` — the same
+        # reasoning as the pull request token's check: the unreadable state is
+        # the correct one, and telling someone their pairing is gone when it
+        # is fine is worse than saying nothing.
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Sunshine's paired-client state could not be read from this account.",
+        )
+
+    names = [device.get("name", "?") for device in devices if device.get("enabled") != "false"]
+    if not names:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                "Nothing has paired with Sunshine yet, so no client can stream from here. "
+                "Pair one at https://<this node>:47990."
+            ),
+        )
     return Check(
         key=key,
         title=title,
-        state=CheckState.UNKNOWN,
-        detail=(
-            "Whether this node has a paired Moonlight client could not be determined. "
-            "Pair one at https://<this node>:47990 if a stream has never connected."
-        ),
+        state=CheckState.OK,
+        detail=f"Paired with {', '.join(sorted(names))}.",
+    )
+
+
+#: What Sunshine writes when it has picked an encoder, one line per codec.
+#: `[nvenc]`, `[vaapi]`, `[software]` — the bracketed name is the encoder
+#: family, and `software` is the one that means the GPU is not being used.
+_ENCODER_LINE = re.compile(r"Found (\S+) encoder: (\S+) \[(\S+)\]")
+
+
+def check_stream_encoder() -> Check:
+    """Whether the last stream actually used the GPU this node exists for.
+
+    This is the check that would have caught the real thing. Sunshine probes
+    every encoder at stream time, logs each failure under its own "you can
+    safely ignore those errors" banner, and falls through to `libx264` on the
+    CPU. The stream *works* — it is smooth, it is the right resolution, and
+    nothing anywhere is red — so a gaming node can spend months software-
+    encoding on a machine bought for its graphics card.
+
+    What made it silent was that the fallback is a feature: it is exactly what
+    you want on a node with no GPU. The only way to tell the two apart is to
+    ask what was chosen, which nothing did.
+
+    Here it cost an entire driver series. Sunshine's ffmpeg wanted NVENC API
+    13.1 and the installed driver offered 13.0, which is one `apt install`
+    away and completely invisible from `nvidia-smi`, whose output is happy and
+    correct in both cases.
+    """
+    key = "stream-encoder"
+    title = "Streams are encoded on the GPU"
+
+    if shutil.which("sunshine") is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Sunshine is not installed, so nothing has chosen an encoder here.",
+        )
+
+    config_dir = _sunshine_config_dir()
+    log = config_dir / "sunshine.log" if config_dir else None
+    if log is None or not log.is_file():
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Sunshine has no log here yet, so no stream has chosen an encoder.",
+        )
+
+    try:
+        found = _ENCODER_LINE.findall(log.read_text(errors="replace"))
+    except OSError:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Sunshine's log could not be read from this account.",
+        )
+
+    if not found:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="No stream has started since Sunshine last started, so nothing has been chosen.",
+        )
+
+    # The last one wins: the log is append-only across restarts, and what
+    # matters is what this machine is doing now, not what it did in August.
+    codec, encoder, family = found[-1]
+    if family == "software":
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                f"The last stream encoded {codec} with {encoder} on the CPU, not the GPU. "
+                "Sunshine falls back silently, so streaming still works and looks fine."
+            ),
+            fix="sudo ubuntu-drivers install",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=f"{codec} is encoded by {encoder} [{family}].",
     )
 
 
@@ -1281,6 +1420,7 @@ GAMING_CHECKS = (
     check_sunshine,
     check_render_session,
     check_sunshine_paired,
+    check_stream_encoder,
 )
 
 
