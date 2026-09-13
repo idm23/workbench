@@ -740,13 +740,12 @@ def configure_sunshine_prep_command() -> bool:
 
     if target.is_file() and target.read_text() == rendered:
         info("Sunshine's prep command already configured")
-        return True
-
-    config_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(rendered)
-    os.chown(config_dir, account.pw_uid, account.pw_gid)
-    os.chown(target, account.pw_uid, account.pw_gid)
-    info(f"wrote {target}, wiring Sunshine into the gaming switch")
+    else:
+        config_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered)
+        os.chown(config_dir, account.pw_uid, account.pw_gid)
+        os.chown(target, account.pw_uid, account.pw_gid)
+        info(f"wrote {target}, wiring Sunshine into the gaming switch")
 
     _ensure_linger(player)
 
@@ -755,6 +754,13 @@ def configure_sunshine_prep_command() -> bool:
     # for this boot only — every reboot would need a person to do this again.
     # `SUNSHINE_UNIT_NAME`, not the plain-looking guess `sunshine.service`:
     # see that constant's own comment for what a wrong name costs silently.
+    #
+    # Run every time, not only when apps.json above changed — found the hard
+    # way that skipping it on an unchanged file leaves Sunshine
+    # enabled-but-stopped whenever something *else* in this same install (a
+    # group grant's `restart_user_manager`, most likely) stopped it in
+    # between. `enable --now` on an already-active unit is a harmless no-op,
+    # so there is no idempotency actually being bought by skipping it.
     result = run_as_account(
         ["systemctl", "--user", "enable", "--now", SUNSHINE_UNIT_NAME],
         account,

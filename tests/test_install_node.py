@@ -727,7 +727,12 @@ def test_the_prep_command_starts_and_stops_the_switch(monkeypatch, tmp_path):
     assert enabled == [["systemctl", "--user", "enable", "--now", install_node.SUNSHINE_UNIT_NAME]]
 
 
-def test_an_unchanged_prep_command_does_not_restart_sunshine(monkeypatch, tmp_path):
+def test_an_unchanged_prep_command_still_ensures_sunshine_is_enabled(monkeypatch, tmp_path):
+    """Found the hard way: skipping `enable --now` on an unchanged file left
+    Sunshine enabled-but-stopped whenever something else in the same install
+    (a group grant's `restart_user_manager`) stopped it in between. The
+    config file's idempotency and the unit's running state are two different
+    questions, and only the first one used to gate this call."""
     real = pwd.getpwuid(os.getuid())
     fake_account = pwd.struct_passwd(
         (
@@ -740,11 +745,19 @@ def test_an_unchanged_prep_command_does_not_restart_sunshine(monkeypatch, tmp_pa
             real.pw_shell,
         )
     )
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    enabled = []
     monkeypatch.setattr(install_node, "gaming_user", lambda: real.pw_name)
     monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: fake_account)
     monkeypatch.setattr(install_node.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(install_node, "_ensure_linger", lambda player: None)
     monkeypatch.setattr(
-        install_node, "run_as_account", lambda *a, **k: pytest.fail("nothing changed to restart")
+        install_node, "run_as_account", lambda argv, *a, **k: enabled.append(argv) or Ok()
     )
 
     # Written once already, byte-for-byte what this call would produce.
@@ -757,6 +770,7 @@ def test_an_unchanged_prep_command_does_not_restart_sunshine(monkeypatch, tmp_pa
     (config_dir / "apps.json").write_text(rendered)
 
     assert install_node.configure_sunshine_prep_command() is True
+    assert enabled == [["systemctl", "--user", "enable", "--now", install_node.SUNSHINE_UNIT_NAME]]
 
 
 def test_install_gaming_runs_every_step_in_order(monkeypatch):
