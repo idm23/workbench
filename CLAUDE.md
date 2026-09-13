@@ -567,6 +567,45 @@ judgment call under real uncertainty, not a fact, and one only running it on an 
 resolves. See `docs/gaming.md` for the practical guide, including exactly which parts of
 that recipe are documented rather than yet proven on this project's own hardware.
 
+**A real stream has now run, from the node to a Raspberry Pi on the television, and what it
+found was that every piece worked and the system as a whole did not.** Pairing, the render
+surface, the app list, the polkit grant and the unit were all correct and all proven. Four
+things were wrong underneath, and the reason they are worth recording together is that
+*none of them failed*. Streaming worked throughout. Every page was green.
+
+- **The GPU was never encoding.** Sunshine's ffmpeg wanted NVENC API 13.1, the driver
+  offered 13.0, and it fell through to `libx264` — smooth 1080p video, produced by the CPU,
+  on a machine chosen for its graphics card. Sunshine logs that under its own *ignore any
+  errors above* banner, because on a node with no GPU the fallback is exactly right. The
+  only thing that separates the two cases is *which encoder was chosen*, and nothing asked.
+  The doctor asks now.
+- **The switch had never once fired.** `global_prep_cmd` was written into `apps.json`,
+  where this Sunshine reads it from `sunshine.conf` instead — it is edited on the
+  *Configuration* page of the web UI, not the *Applications* page. Sunshine parsed the file,
+  listed the app, streamed happily, and silently ignored the key. So every stream left
+  Ollama running and the node still advertising inference on a GPU a game was using, which
+  is the precise state `workbench-gaming.service` exists to prevent.
+- **Sunshine could not survive a reboot.** Its packaged unit is
+  `WantedBy=graphical-session.target`; a gaming node never reaches that target, because its
+  X server is a *system* unit and nobody logs in. `enable --now` hid this completely — the
+  `--now` half starts it during the install, so the node was always streaming by the time
+  anyone looked, and `is-enabled` said `enabled` the whole time. Only the next reboot ended
+  streaming, silently. This is the third time this project has found a unit that was
+  enabled and not running, and the first where the *link target* was the lie.
+- **There was no audio at all**, because there is no sound card: PipeWire comes up with no
+  sink and Sunshine captures a sink's *monitor*. The stream carried perfect video and
+  `There will be no audio`.
+
+One thing was found and deliberately **not** fixed, because it is a design question rather
+than a defect. Sunshine runs its `undo` command when an app is *quit*, not when a client
+*disconnects* — and that is correct for gaming, where a Wi-Fi hiccup must not kill a
+running game. But it means a television switched off, or a dropped connection, leaves the
+switch latched and the node out of the inference pool until somebody notices. The unit's own
+comment already worried about exactly this shape for a power cut and solved that case by
+never enabling the unit; this is the same hole through a different door, and closing it
+means deciding how long a disconnected session should hold a GPU. Recorded as an open
+question below rather than guessed at.
+
 ## Deployment
 
 - systemd unit, `Restart=always`, logs to journald. systemd 259 supports
@@ -900,6 +939,22 @@ Unresolved. Recorded here so they are not rediscovered later.
   events on, and that table would also retire the `json_extract` scan. Note that
   `utilization` was null in both real samples, so the percentage bar is the optional
   extra and the status is the primary signal.
+
+- **How long should a disconnected stream hold the GPU?** Sunshine runs a prep command's
+  `undo` when the app is *quit*, never when a client merely *disconnects* — deliberately, so
+  a dropped connection does not kill a running game. Workbench's switch is latched by the
+  `do` half, so a television switched off at the wall leaves `workbench-gaming` active and
+  the node advertising no inference, indefinitely. Proven live: quitting properly
+  (`moonlight-qt quit <node>`) runs the undo and restores Ollama within a second; killing
+  the client does not, ever.
+
+  Three shapes, none obviously right. A timeout on the switch itself trades "a game paused
+  for lunch loses its GPU" against "an unattended node is lost until someone notices".
+  Polling Sunshine for whether a client is connected puts a reader on a second machine's
+  state, which is the thing nodes were built to avoid. Doing nothing and documenting "always
+  quit" is what the `input_idle_seconds` decision already argues against — a rule a person
+  has to remember, that a network outage breaks anyway. Note the failure is bounded rather
+  than permanent: the unit has no `[Install]` section, so a reboot clears it.
 
 - **Event log growth is unbounded.** Every tool call of every run is a row, kept forever.
   Fine now; wants pruning before it is not.

@@ -548,9 +548,21 @@ SUNSHINE_CLOUDSMITH_SETUP = (
 
 #: Groups Sunshine's own documentation asks for: `input` for the virtual
 #: controller/keyboard it presents to games, `video` for framebuffer access
-#: underneath NvFBC. Added, not assumed — checked against current membership
-#: first, same narrow-privilege instinct as the polkit rule's exact match.
-SUNSHINE_GROUPS = ("input", "video")
+#: underneath NvFBC, and `render` for the DRM render nodes every encoder
+#: except NvFBC reaches for. Added, not assumed — checked against current
+#: membership first, same narrow-privilege instinct as the polkit rule's
+#: exact match.
+#:
+#: `render` was missing for a while and cost nothing visible, which is the
+#: point worth recording. `/dev/dri/renderD*` is group `render`, not `video`
+#: — two different groups on the same directory — so Sunshine could open
+#: `card0` and not `renderD128`. Since NvFBC needs only the former, the whole
+#: enumeration still "succeeded": VAAPI failed with `Permission denied`,
+#: Sunshine logged it under its own "ignore any errors mentioned above"
+#: banner, and fell through to a working encoder. A missing group that only
+#: removes fallbacks is invisible until the path you were relying on is the
+#: one that breaks.
+SUNSHINE_GROUPS = ("input", "video", "render")
 
 #: The unit the `sunshine` package actually installs — confirmed on real
 #: hardware via `dpkg -L sunshine`. Not `sunshine.service`: LizardByte ships it
@@ -558,6 +570,23 @@ SUNSHINE_GROUPS = ("input", "video")
 #: `systemctl --user` reports "could not be found" and silently does nothing,
 #: which is exactly what happened before this was checked.
 SUNSHINE_UNIT_NAME = "app-dev.lizardbyte.app.Sunshine.service"
+
+
+def _package_installed(name: str) -> bool:
+    """Whether apt considers `name` installed.
+
+    `dpkg-query` rather than `shutil.which`, because two of these packages
+    (`pipewire-pulse`, `wireplumber`) are asked for by what they provide to
+    other services rather than by a command anyone runs, and a `which` probe
+    for them is a guess at a binary name.
+    """
+    probe = subprocess.run(
+        ["dpkg-query", "-W", "-f=${Status}", name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.returncode == 0 and "install ok installed" in probe.stdout
 
 
 def _in_group(player: str, group: str) -> bool:
@@ -587,6 +616,80 @@ def _ensure_linger(player: str) -> None:
         return
     run(["loginctl", "enable-linger", player], privileged=True)
     info(f"enabled linger for '{player}', so Sunshine's session survives nobody logging in")
+
+
+#: Sunshine ships `WantedBy=graphical-session.target`, which is right on a
+#: desktop and unreachable here. A gaming node has no graphical session and
+#: never will: its X server is the *system* unit `workbench-x11`, and nobody
+#: ever logs in. So `systemctl --user enable` dutifully writes the symlink
+#: into `graphical-session.target.wants/`, reports `enabled`, and the unit
+#: cannot start at boot — because that target is never activated.
+#:
+#: This hid behind `enable --now` for as long as it existed. The `--now` half
+#: starts Sunshine imperatively during the install, so a node was always
+#: streaming by the time anyone checked, and `systemctl --user is-enabled`
+#: said `enabled` the whole time. It was only ever the *next reboot* that
+#: silently ended Moonlight streaming, with nothing in any log to say why.
+#:
+#: `default.target` is the one a lingering user manager actually reaches.
+HEADLESS_DROPIN = (
+    Path(".config/systemd/user") / f"{SUNSHINE_UNIT_NAME}.d" / "10-workbench-headless.conf"
+)
+
+#: Two edits, and the second is not cosmetic. Clearing `After=` drops the
+#: ordering against targets this machine never reaches. The `ExecStartPre`
+#: replaces Sunshine's packaged `sleep 5` with a wait for the X socket itself:
+#: on a cold boot `workbench-x11` and this unit start together, and five
+#: seconds is a guess about a race rather than an answer to it. Sunshine's own
+#: `Restart=on-failure` allows five tries in 500 seconds, so losing that race
+#: repeatedly does not mean a late start — it means a node that has given up
+#: for good by the time the television is switched on.
+HEADLESS_DROPIN_BODY = """\
+[Unit]
+# Rendered by install.sh. This node has no graphical session and never will:
+# X here is the system unit workbench-x11, and nobody logs in.
+After=
+
+[Service]
+# Wait for the display rather than guessing at it — see the installer.
+ExecStartPre=
+ExecStartPre=/bin/sh -c 'until [ -S /tmp/.X11-unix/X0 ]; do sleep 1; done'
+"""
+
+
+def _ensure_headless_autostart(account: pwd.struct_passwd) -> bool:
+    """Make Sunshine start at boot on a machine with no graphical session.
+
+    `add-wants` rather than an `[Install]` section in the drop-in: systemd
+    reads `[Install]` from the unit file proper, and a drop-in carrying one is
+    not a reliable way to change what `enable` links. `add-wants` writes the
+    one symlink both would have written, and says so out loud.
+    """
+    target = Path(account.pw_dir) / HEADLESS_DROPIN
+    changed = not target.is_file() or target.read_text() != HEADLESS_DROPIN_BODY
+    if changed:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(HEADLESS_DROPIN_BODY)
+        for path in (target, target.parent, target.parent.parent):
+            os.chown(path, account.pw_uid, account.pw_gid)
+        info(f"wrote {target}, so Sunshine survives a reboot")
+        run_as_account(
+            ["systemctl", "--user", "daemon-reload"],
+            account,
+            extra_env={"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"},
+        )
+
+    # Idempotent in systemd itself, so it runs every time rather than only
+    # when the drop-in changed — the same lesson `enable --now` below records.
+    result = run_as_account(
+        ["systemctl", "--user", "add-wants", "default.target", SUNSHINE_UNIT_NAME],
+        account,
+        extra_env={"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"},
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        warn(f"could not add {SUNSHINE_UNIT_NAME} to default.target: {detail}")
+    return changed
 
 
 def install_steam() -> bool:
@@ -687,18 +790,13 @@ def install_sunshine() -> bool:
     return True
 
 
-#: Verified against real hardware: `apps.json`'s top-level `global_prep_cmd`
-#: is exactly the documented hook for a command that runs around every
-#: stream regardless of which app was launched.
-#:
-#: The one entry in `apps` matters as much as `global_prep_cmd` does and was
-#: missing at first: Sunshine ships with no apps of its own, and a
-#: `global_prep_cmd`-only file is a switch with nothing to flip it — Moonlight
-#: has nothing to select at all without at least one. `"Desktop"` with no
+#: Sunshine ships with no apps of its own, and Moonlight can only ask for an
+#: app that exists — with an empty list there is nothing on the client to
+#: select and so nothing that could ever start a stream. `"Desktop"` with no
 #: `cmd` is Sunshine's own convention for "stream whatever is already on
 #: screen" rather than launching something new, which is exactly this render
 #: surface's whole job.
-def _sunshine_apps_json(unit: str) -> dict:
+def _sunshine_apps_json() -> dict:
     return {
         "env": {},
         "apps": [
@@ -707,14 +805,45 @@ def _sunshine_apps_json(unit: str) -> dict:
                 "image-path": "desktop.png",
             }
         ],
-        "global_prep_cmd": [
-            {
-                "do": f"systemctl start {unit}",
-                "undo": f"systemctl stop {unit}",
-                "elevated": False,
-            }
-        ],
     }
+
+
+#: The prep commands go in `sunshine.conf`, NOT in `apps.json`, and that
+#: distinction cost a working-looking switch that had never once fired.
+#:
+#: `apps.json` grew a top-level `global_prep_cmd` here first, on the strength
+#: of documentation describing exactly that. Sunshine parsed the file, listed
+#: the app, streamed happily — and silently ignored the key, because this
+#: version reads global prep commands from `sunshine.conf` (they are edited on
+#: the *Configuration* page of its web UI, not the *Applications* page). The
+#: symptom was the worst available one: streaming worked, so nothing looked
+#: broken, while every stream left Ollama running and the node still
+#: advertising inference on a GPU a game was using.
+#:
+#: No `elevated` key: that field is Windows-only — Sunshine's own UI adds it
+#: only when the platform is Windows — and on Linux the authorisation comes
+#: from `install_gaming_rule`'s polkit grant instead.
+def _sunshine_prep_commands(unit: str) -> str:
+    commands = [{"do": f"systemctl start {unit}", "undo": f"systemctl stop {unit}"}]
+    return json.dumps(commands, separators=(",", ":"))
+
+
+def _sunshine_conf_with_prep(existing: str, unit: str) -> str:
+    """`sunshine.conf` with our `global_prep_cmd` line, leaving every other
+    setting alone.
+
+    Rewritten rather than appended blindly, because Sunshine rewrites this
+    whole file itself whenever anyone saves from its web UI — so this has to
+    be something that converges when run twice, not something that stacks up a
+    duplicate key per install.
+    """
+    kept = [
+        line for line in existing.splitlines() if not line.lstrip().startswith("global_prep_cmd")
+    ]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    kept.append(f"global_prep_cmd = {_sunshine_prep_commands(unit)}")
+    return "\n".join(kept) + "\n"
 
 
 def configure_sunshine_prep_command() -> bool:
@@ -735,26 +864,43 @@ def configure_sunshine_prep_command() -> bool:
         return False
 
     config_dir = Path(account.pw_dir) / ".config" / "sunshine"
-    target = config_dir / "apps.json"
-    rendered = json.dumps(_sunshine_apps_json(gaming_unit_name()), indent=4) + "\n"
-
-    if target.is_file() and target.read_text() == rendered:
-        info("Sunshine's prep command already configured")
-        return True
-
     config_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(rendered)
     os.chown(config_dir, account.pw_uid, account.pw_gid)
-    os.chown(target, account.pw_uid, account.pw_gid)
-    info(f"wrote {target}, wiring Sunshine into the gaming switch")
+
+    apps = config_dir / "apps.json"
+    rendered = json.dumps(_sunshine_apps_json(), indent=4) + "\n"
+    if apps.is_file() and apps.read_text() == rendered:
+        info("Sunshine's app list already configured")
+    else:
+        apps.write_text(rendered)
+        os.chown(apps, account.pw_uid, account.pw_gid)
+        info(f"wrote {apps}, giving Moonlight something to select")
+
+    conf = config_dir / "sunshine.conf"
+    existing = conf.read_text() if conf.is_file() else ""
+    wanted = _sunshine_conf_with_prep(existing, gaming_unit_name())
+    if existing == wanted:
+        info("Sunshine's prep command already configured")
+    else:
+        conf.write_text(wanted)
+        os.chown(conf, account.pw_uid, account.pw_gid)
+        info(f"wrote {conf}, wiring Sunshine into the gaming switch")
 
     _ensure_linger(player)
+    _ensure_headless_autostart(account)
 
     # `enable --now`, not `restart`: a fresh install has never started this
     # unit at all, and `restart` on a unit that was never enabled starts it
     # for this boot only — every reboot would need a person to do this again.
     # `SUNSHINE_UNIT_NAME`, not the plain-looking guess `sunshine.service`:
     # see that constant's own comment for what a wrong name costs silently.
+    #
+    # Run every time, not only when apps.json above changed — found the hard
+    # way that skipping it on an unchanged file leaves Sunshine
+    # enabled-but-stopped whenever something *else* in this same install (a
+    # group grant's `restart_user_manager`, most likely) stopped it in
+    # between. `enable --now` on an already-active unit is a harmless no-op,
+    # so there is no idempotency actually being bought by skipping it.
     result = run_as_account(
         ["systemctl", "--user", "enable", "--now", SUNSHINE_UNIT_NAME],
         account,
@@ -767,14 +913,112 @@ def configure_sunshine_prep_command() -> bool:
     return True
 
 
+#: A gaming node has no sound card. PipeWire therefore comes up with no sink
+#: at all, and Sunshine — which captures a sink's *monitor* — has nothing to
+#: record, so every stream is silent.
+#:
+#: Found the same way as everything else here: the first real stream logged
+#: `Couldn't connect to pulseaudio: Access denied` followed by `There will be
+#: no audio`, and carried on delivering perfect video. Nothing failed, so
+#: nothing said so.
+#:
+#: `pulseaudio-utils` is for the person diagnosing it rather than for
+#: Sunshine: `pactl list short sinks` is the one command that answers "is
+#: there anything to capture", and a node without it cannot be asked.
+AUDIO_PACKAGES = ("pipewire", "pipewire-pulse", "wireplumber", "pulseaudio-utils")
+
+#: A virtual sink for games to play into and Sunshine to read back. Sunshine
+#: makes its own `sink-sunshine-stereo` per stream and restores the previous
+#: default afterwards — this is the thing it restores *to*, and without one
+#: there is no valid default for it to put back.
+NULL_SINK_PATH = Path(".config/pipewire/pipewire.conf.d/10-workbench-null-sink.conf")
+
+NULL_SINK_BODY = """\
+# Rendered by install.sh. A gaming node has no sound card, so PipeWire starts
+# with no sink and Sunshine has nothing to capture.
+context.objects = [
+    { factory = adapter
+      args = {
+          factory.name     = support.null-audio-sink
+          node.name        = workbench-stream
+          node.description = "Workbench stream"
+          media.class      = Audio/Sink
+          audio.position   = [ FL FR ]
+          monitor.channel-volumes = true
+      }
+    }
+]
+"""
+
+#: `pipewire.socket` and `pipewire-pulse.socket` alongside the services: the
+#: sockets are what a client actually connects to, and Sunshine speaks the
+#: PulseAudio protocol rather than PipeWire's own.
+AUDIO_UNITS = (
+    "pipewire.socket",
+    "pipewire.service",
+    "wireplumber.service",
+    "pipewire-pulse.socket",
+    "pipewire-pulse.service",
+)
+
+
+def install_audio() -> bool:
+    """Give the gaming user an audio server, and something in it to capture.
+
+    Depends on `_ensure_linger` having run, like Sunshine does: these are
+    `--user` units on an account nobody logs into.
+    """
+    player = gaming_user()
+    if not player:
+        warn("no gaming user recorded, so no audio was configured.")
+        return False
+    try:
+        account = pwd.getpwnam(player)
+    except KeyError:
+        warn(f"'{player}' is not a real account; no audio was configured.")
+        return False
+
+    missing = [name for name in AUDIO_PACKAGES if not _package_installed(name)]
+    if missing:
+        step(f"Installing {', '.join(missing)}")
+        try:
+            run(["apt-get", "install", "-y", *missing], privileged=True, stream=True)
+        except InstallError as error:
+            warn(f"could not install the audio stack: {error}")
+            return False
+
+    target = Path(account.pw_dir) / NULL_SINK_PATH
+    if not target.is_file() or target.read_text() != NULL_SINK_BODY:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(NULL_SINK_BODY)
+        for path in (target, target.parent, target.parent.parent):
+            os.chown(path, account.pw_uid, account.pw_gid)
+        info(f"wrote {target}, so a stream has something to capture")
+
+    _ensure_linger(player)
+    result = run_as_account(
+        ["systemctl", "--user", "enable", "--now", *AUDIO_UNITS],
+        account,
+        extra_env={"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"},
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        warn(f"could not start the audio stack for '{player}': {detail}")
+        return False
+    return True
+
+
 def install_gaming() -> bool:
     """Everything a gaming node needs beyond the switch itself.
 
     In order: the switch's authorisation (existing), a render surface for
-    Steam and Sunshine to use, Steam, Sunshine, and Sunshine's own wiring back
-    into the switch. Each step is independent and degrades honestly — "Steam
-    installed, Sunshine did not" is a real, reportable state, not a reason to
-    abort the rest of the install.
+    Steam and Sunshine to use, Steam, Sunshine, an audio server for the stream
+    to carry, and Sunshine's own wiring back into the switch. Each step is
+    independent and degrades honestly — "Steam installed, Sunshine did not" is
+    a real, reportable state, not a reason to abort the rest of the install.
+
+    Audio goes before the prep command deliberately: that step is what leaves
+    Sunshine running, and Sunshine picks its capture device at startup.
     """
     if not systemd_is_running():
         warn("no systemd here, so the gaming switch was not installed.")
@@ -785,6 +1029,7 @@ def install_gaming() -> bool:
     render.install()
     install_steam()
     install_sunshine()
+    install_audio()
     configure_sunshine_prep_command()
     return True
 

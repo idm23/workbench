@@ -529,6 +529,104 @@ noting the test that would have caught it: every existing test asserted on a run
 running or already finished, and none on a run in the state the page is actually first
 rendered in.
 
+## A fallback that works is how a GPU node spends a month encoding on its CPU
+
+Sunshine probes every encoder it knows at stream time, in order, and takes the first that
+opens. On this project's node the first one did not:
+
+```
+Error: [h264_nvenc] Driver does not support the required nvenc API version. Required: 13.1 Found: 13.0
+Info: Encoder [nvenc] failed
+Error: Couldn't open /dev/dri/renderD128: Permission denied
+Info: Encoder [vaapi] failed
+Info: Found H.264 encoder: libx264 [software]
+```
+
+Then it streamed 1080p perfectly, on the CPU, and printed all of that under its own banner
+reading `// Ignore any errors mentioned above, they are not relevant. //`. Which is honest:
+that banner is there because the probe *is* supposed to generate errors, and on a node with
+no GPU the software encoder is the correct answer rather than a degraded one.
+
+**The failure has no error, because it is the same code path as the success.** Nothing
+distinguishes "fell back correctly" from "fell back catastrophically" except what the
+machine was for, which no log line knows. `nvidia-smi` is no help either — it reported a
+healthy driver the entire time, because the driver *was* healthy; it was one API revision
+short of what the ffmpeg inside Sunshine was compiled against, and nothing surfaces that
+comparison. The whole gap was `nvidia-driver-595` where `nvidia-driver-610` was wanted, both
+sitting in the same apt repository.
+
+The check that catches it is three lines: read back which encoder was chosen and warn if the
+answer is `[software]`. That is the same shape as `claude auth status` not answering "does
+this work" — a probe that reports a *component* being fine while the thing built from it is
+not, and the fix in both cases is to ask the question you actually care about.
+
+The `render` group in that second error is worth its own note. `/dev/dri/card*` is group
+`video` and `/dev/dri/renderD*` is group `render` — two groups on the same directory, and
+the installer granted only the first. It cost nothing visible, because NvFBC needs only
+`card*`, so the missing group silently removed a *fallback* rather than the primary path.
+Those are the ones that sit there for months: a permission that only matters on the day
+something else has already gone wrong.
+
+## `systemctl --user enable` will happily link a unit to a target that never runs
+
+Sunshine ships `WantedBy=graphical-session.target`. A headless gaming node has no graphical
+session and never will — its X server is a *system* unit, and nobody logs in. So:
+
+```
+$ systemctl --user is-enabled app-dev.lizardbyte.app.Sunshine.service
+enabled
+$ systemctl --user is-active app-dev.lizardbyte.app.Sunshine.service
+inactive
+```
+
+`enable` did exactly what it was asked: wrote the symlink into
+`graphical-session.target.wants/`. That target is simply never activated, so the unit could
+not start at boot, and `is-enabled` has no opinion about whether the target it linked into
+is reachable.
+
+**What hid it for so long was `enable --now`.** The `--now` half starts the unit
+imperatively, right there in the install, so every install ended with Sunshine running and
+every check afterwards agreed. Only a *reboot* revealed it, and a node that streams to a
+television is rebooted rarely and tested immediately after an install — the two moments
+where it always looked fine.
+
+The fix is `systemctl --user add-wants default.target <unit>`, which is the target a
+lingering user manager actually reaches. Worth knowing: an `[Install]` section inside a
+drop-in is not a reliable way to change this, because `enable` reads `[Install]` from the
+unit file proper; `add-wants` writes the one symlink directly and says so.
+
+This is the third instance of the same family in this project — units the installer created
+that a deploy never converged, the polkit rule, the push keypair — and the first where the
+thing that lied was not *whether* something was enabled but *what it was enabled into*.
+
+## Configuration that is parsed, ignored, and never mentioned again
+
+Sunshine's `global_prep_cmd` — the hook the entire gaming switch hangs on — went into
+`apps.json`, on the strength of documentation describing exactly that key at exactly that
+top level. Sunshine read the file, listed the app, streamed from it, and ignored the key,
+because this version reads global prep commands from `sunshine.conf`. You can tell which
+from the web UI's own source: `global_prep_cmd` is rendered by the *Configuration* page's
+bundle, not the *Applications* one.
+
+There is no warning for an unrecognised key, and there is no reason to expect one — JSON
+config with unknown fields ignored is the normal, forgiving thing. The result was a switch
+that had never fired once, on a node where everything about it was correct: the unit
+existed, the polkit rule matched, and running `systemctl start workbench-gaming` by hand as
+the gaming user worked perfectly. Every individual piece passed its own test.
+
+**The test that would have caught it could not have been a unit test**, because the thing
+being asserted is what a third-party binary does with a file. What caught it was streaming
+for real and then asking a question about a *different* process: was Ollama stopped? The
+general lesson is that config handed to someone else's program is only verified by observing
+that program's behaviour, and `journalctl -u <the thing it should have done>` is the
+assertion.
+
+Confirmation of the fix came from the same place, and reads better than any test:
+
+```
+Info: Executing Do Cmd: [systemctl start workbench-gaming]
+```
+
 ## Small ones
 
 **`curl -I` sends HEAD**, and FastAPI does not auto-add HEAD to a GET route. A `405` with
