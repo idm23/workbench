@@ -1,22 +1,64 @@
 # Nodes
 
-A **head** runs Workbench. A **node** lends it a GPU. Both come from this repository and
-one command each, which is the reproducibility rule applied to more than one machine:
-hand someone N boxes and they end up with one head and N-1 nodes, without a conversation.
+A **head** runs Workbench. A **node** lends it something the head does not have. Both come
+from this repository and one command each, which is the reproducibility rule applied to
+more than one machine: hand someone N boxes and they end up with one head and N-1 nodes,
+without a conversation.
 
 This is the practical guide. The reasoning behind the split is in `CLAUDE.md` under
 *Machines: a head and its nodes*.
 
 ## What a node actually is
 
-A machine with a GPU, serving an OpenAI-compatible `/v1/chat/completions` that
-`workbench/agents/local.py` drives. It runs:
+**As little as possible.** `--role=node` on its own produces the smallest machine that can
+be reached, kept up to date, and asked what it is:
 
-- **Ollama**, bound to every interface on port 11434, with a model pulled.
+- **A role marker and a head to report to**, so it registers itself and heartbeats.
 - **The deploy timer**, so it updates itself from `main` like everything else.
 
-It does not run the web app, hold a database, or execute runs. Runs happen on the head,
-in the head's worktrees; only the model's tokens come from the node.
+That is the whole of it. It does not run the web app, hold a database, or execute runs.
+
+**Everything a node actually *does* is a capability**, declared at install time and
+recorded in `data/capabilities`:
+
+| Capability | What it adds | Wants |
+|---|---|---|
+| `inference` | Ollama on port 11434 with a model pulled, serving `/v1/chat/completions` for `agents/local.py` | An NVIDIA GPU |
+| `gaming` | Steam, Sunshine, a render surface, and the switch that hands the GPU to a television | A GPU and a person who plays |
+| `client` | `moonlight-qt` as a systemd unit on KMSDRM — the television's end of a `gaming` node's link | A screen, and a Lite image |
+
+Capabilities compose: one machine may declare all three. They are also the only thing that
+decides what gets installed and what the doctor asks about, so a node declared `client`
+is never told to install an NVIDIA driver and never probed for a model server.
+
+**`inference` is the default when nobody says**, and only for compatibility: every node
+installed before capabilities existed serves models and must keep doing exactly that.
+
+## Client nodes
+
+A client node puts a stream on a screen. It is the other half of a `gaming` node.
+
+```sh
+./install.sh --role=node --capabilities=client \
+  --head https://homebox-core.tail4c4cf3.ts.net \
+  --stream-host 192.168.1.155
+```
+
+`--stream-host` is the machine it streams *from* — a gaming node. Recorded in
+`data/stream-host` and, like `--head`, left alone by a re-install that does not mention it.
+
+**Use a Lite image with no desktop, and that is load-bearing rather than tidiness.** The
+client renders with `SDL_VIDEODRIVER=kmsdrm`, straight to the display. Under a desktop
+compositor it cannot take DRM master, so its hardware-decode path fails and it falls back
+to decoding on the CPU — or renders a black screen while reporting success, which is what
+happened on this project's own Raspberry Pi running labwc. There is no setting that fixes
+this: `moonlight-qt stream` ignores both `--video-decoder` and `videodecoderselection` in
+its own config file. Not having a compositor is the only lever that works.
+
+**Pairing is manual**, the same shape as joining the tailnet or signing the agent in: visit
+`https://<the gaming node>:47990` and pair this client. The unit is installed and enabled
+but deliberately not started until then — a client pointed at a machine that will not
+accept it would restart every five seconds forever.
 
 ## Installing one
 

@@ -45,12 +45,16 @@ from workbench.config import (
     gaming_user,
     head_url,
     inference_base_url,
+    is_client_node,
     is_gaming_node,
+    is_inference_node,
     local_model,
     repo_root,
+    stream_host,
 )
 from workbench.install import (
     DEPLOY_INTERVAL,
+    SYSTEMD_DIR,
     InstallError,
     _service_passwd,
     _venv_bin,
@@ -71,6 +75,7 @@ from workbench.install import (
     record_gaming_user,
     record_head,
     record_role,
+    record_stream_host,
     relocate,
     report_outstanding,
     restart_user_manager,
@@ -438,6 +443,22 @@ def _head_argument() -> str | None:
         if argument.startswith("--head="):
             return argument.split("=", 1)[1].strip().rstrip("/") or None
         if argument == "--head" and index + 1 < len(argv):
+            return argv[index + 1].strip().rstrip("/") or None
+    return None
+
+
+def _stream_host_argument() -> str | None:
+    """The `--stream-host` this install was given, or None if it said nothing.
+
+    Same hand-parse and the same "None means leave it alone" rule as
+    `--head`: a re-install that does not mention it must leave a client
+    streaming from exactly what it streamed from before.
+    """
+    argv = sys.argv[1:]
+    for index, argument in enumerate(argv):
+        if argument.startswith("--stream-host="):
+            return argument.split("=", 1)[1].strip().rstrip("/") or None
+        if argument == "--stream-host" and index + 1 < len(argv):
             return argv[index + 1].strip().rstrip("/") or None
     return None
 
@@ -1008,6 +1029,126 @@ def install_audio() -> bool:
     return True
 
 
+#: What a client node needs to put a stream on a screen. `moonlight-qt` is the
+#: client; the rest is audio. `rtkit` is not optional in practice — Moonlight
+#: raises its audio thread with `setpriority()`, and without rtkit granting
+#: that, the thread competes with decoding and the stream crackles and drops
+#: out. Found on real hardware, where it sounded like a network fault.
+CLIENT_PACKAGES = (
+    "moonlight-qt",
+    "pipewire",
+    "pipewire-pulse",
+    "wireplumber",
+    "rtkit",
+    "pulseaudio-utils",
+)
+
+#: Groups the account running the client needs: `video` and `render` to open
+#: the DRM devices it renders through, `input` for the virtual gamepad it
+#: presents, `audio` for the HDMI sink.
+CLIENT_GROUPS = ("video", "render", "input", "audio")
+
+CLIENT_UNIT_NAME = "workbench-client.service"
+
+
+def _client_unit(host: str, account: pwd.struct_passwd) -> str:
+    """The unit that streams `host` onto this machine's screen.
+
+    `SDL_VIDEODRIVER=kmsdrm` is the entire point, and is why a client node
+    wants a *Lite* image with no desktop on it. Under a compositor the client
+    cannot take DRM master, so its hardware-decode path fails and it falls
+    back to decoding on the CPU — which on a Raspberry Pi 4 is the difference
+    between a cheap appliance and a hot one. Learned the hard way on a machine
+    running labwc: the client picked the hardware renderer, could not have the
+    display, and showed a black screen while reporting success.
+
+    No `--video-decoder` flag: `moonlight-qt stream` ignores it, and ignores
+    `videodecoderselection` in its own config file too. The only lever that
+    actually works is not having a compositor in the way.
+    """
+    return f"""\
+# Rendered by install.sh — do not edit; re-run the installer instead.
+[Unit]
+Description=Workbench: stream {host} onto this screen
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={account.pw_name}
+SupplementaryGroups={" ".join(CLIENT_GROUPS)}
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=XDG_RUNTIME_DIR=/run/user/{account.pw_uid}
+ExecStart=/usr/bin/moonlight-qt stream {host} Desktop
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def install_client() -> bool:
+    """Everything a client node needs to show a stream.
+
+    Deliberately not started here. Pairing with the machine it streams from is
+    a one-time browser action nobody can automate — the same shape as joining
+    the tailnet or signing the agent in — so the unit is installed and enabled
+    and `report_outstanding` says what is left. Starting it before pairing
+    would produce a unit that restarts every five seconds forever, which is a
+    worse way to learn the same thing.
+    """
+    if not systemd_is_running():
+        warn("no systemd here, so the client was not installed.")
+        info("A real client node would get a unit that streams to its screen.")
+        return False
+
+    missing = [name for name in CLIENT_PACKAGES if not _package_installed(name)]
+    if missing:
+        step(f"Installing {', '.join(missing)}")
+        try:
+            run(["apt-get", "install", "-y", *missing], privileged=True, stream=True)
+        except InstallError as error:
+            warn(f"could not install the client: {error}")
+            return False
+
+    account = _service_passwd()
+    changed = False
+    for group in CLIENT_GROUPS:
+        if _in_group(account.pw_name, group):
+            continue
+        run(["usermod", "-aG", group, account.pw_name], privileged=True)
+        info(f"added '{account.pw_name}' to the '{group}' group")
+        changed = True
+    if changed:
+        # Same lesson the gaming install records: a `usermod` does nothing for
+        # an already-running manager, and this account's one may be running.
+        restart_user_manager(account)
+
+    _ensure_linger(account.pw_name)
+    audio = run_as_account(
+        ["systemctl", "--user", "enable", "--now", *AUDIO_UNITS],
+        account,
+        extra_env={"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"},
+    )
+    if audio.returncode != 0:
+        warn(f"could not start audio: {(audio.stderr or audio.stdout or '').strip()}")
+
+    host = stream_host()
+    if not host:
+        warn("no stream host recorded, so the client unit was not written.")
+        info("Re-run with --stream-host <the machine to stream from>.")
+        return False
+
+    target = SYSTEMD_DIR / CLIENT_UNIT_NAME
+    write_privileged(target, _client_unit(host, account), staged_as="workbench-client")
+    run(["systemctl", "daemon-reload"], privileged=True)
+    run(["systemctl", "enable", CLIENT_UNIT_NAME], privileged=True)
+    info(f"installed {CLIENT_UNIT_NAME}, streaming from {host}")
+    return True
+
+
 def install_gaming() -> bool:
     """Everything a gaming node needs beyond the switch itself.
 
@@ -1043,7 +1184,11 @@ def main() -> int:
 
         step("Checking prerequisites")
         check_prerequisites()
-        check_gpu()
+        # Only a node that will serve a model cares whether there is a card in
+        # this machine. Asking on a client is how a Raspberry Pi gets told to
+        # go install an NVIDIA driver.
+        if is_inference_node():
+            check_gpu()
 
         become_root(ENTRY)
 
@@ -1074,15 +1219,32 @@ def main() -> int:
             record_capabilities(offering, account)
         if is_gaming_node() and (player := _gaming_user_argument()) is not None:
             record_gaming_user(player, account)
+        if is_client_node() and (source := _stream_host_argument()) is not None:
+            record_stream_host(source, account)
 
-        step("Installing the model server")
-        serving = install_inference_server()
-        if serving:
-            pull_model()
+        # Everything below is a *capability*. `--role=node` on its own is the
+        # smallest machine that can be reached, kept up to date and asked what
+        # it is: a role marker, a head to report to, units and a deploy timer.
+        # Each job a node does beyond that is declared, never assumed.
+        #
+        # This used to install the model server unconditionally, which was
+        # fine while every node was an inference node and wrong the moment one
+        # was not — an arm64 Raspberry Pi whose job is to *display* a stream
+        # was still handed Ollama and a CUDA-shaped install it could not use.
+        serving = False
+        if is_inference_node():
+            step("Installing the model server")
+            serving = install_inference_server()
+            if serving:
+                pull_model()
 
         if is_gaming_node():
             step("Installing the gaming switch")
             install_gaming()
+
+        if is_client_node():
+            step("Installing the client")
+            install_client()
 
         step("Installing the updater")
         if not systemd_is_running():

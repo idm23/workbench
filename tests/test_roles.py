@@ -12,6 +12,7 @@ import pytest
 
 from workbench import deploy, doctor, install
 from workbench.config import (
+    CLIENT,
     GAMING,
     INFERENCE,
     ROLE_HEAD,
@@ -19,7 +20,9 @@ from workbench.config import (
     capabilities_marker,
     declared_capabilities,
     gaming_unit_name,
+    is_client_node,
     is_gaming_node,
+    is_inference_node,
     is_node,
     role,
     role_marker,
@@ -254,6 +257,61 @@ def test_the_environment_beats_the_capabilities_marker(offering, monkeypatch):
     monkeypatch.setenv("WORKBENCH_CAPABILITIES", "gaming")
 
     assert declared_capabilities() == [GAMING]
+
+
+def test_a_client_node_serves_no_model(offering, monkeypatch):
+    """The decomposition this refactor is for. `--role=node` is the minimum to
+    be reachable and updatable; serving a model is a capability like any other.
+
+    Before this, every node installed Ollama whether or not it would ever
+    answer - which on an arm64 Raspberry Pi meant a CUDA-shaped install on a
+    machine whose job is to *display* a stream."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("client\n")
+
+    assert is_client_node()
+    assert not is_inference_node()
+    assert not is_gaming_node()
+
+
+def test_an_inference_node_is_not_a_client(offering, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference\n")
+
+    assert is_inference_node()
+    assert not is_client_node()
+
+
+def test_capabilities_compose(offering, monkeypatch):
+    """Nothing says a machine does one job. The head asks about each
+    separately, which is why this is a list rather than a kind."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference,gaming,client\n")
+
+    assert is_inference_node()
+    assert is_gaming_node()
+    assert is_client_node()
+
+
+def test_a_head_is_never_a_client_however_it_is_declared(offering, monkeypatch):
+    """Same reasoning as the gaming switch: these describe what a *node* lends
+    the system, and a head is the thing being lent to."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "head")
+    offering.write_text("inference,client\n")
+
+    assert not is_client_node()
+    assert not is_inference_node()
+
+
+def test_client_is_a_known_capability(offering, monkeypatch, caplog):
+    """A typo is warned about and dropped; `client` must not be one of them."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("client\n")
+
+    with caplog.at_level("WARNING"):
+        assert CLIENT in declared_capabilities()
+
+    assert "client" not in caplog.text
 
 
 def test_a_gaming_node_also_gets_the_switch(offering, monkeypatch):
