@@ -465,6 +465,21 @@ to teach someone to skim the one report that matters. `DEFAULT_CAPABILITIES` sta
 `inference` purely for compatibility: every node installed before this existed serves
 models and must keep doing exactly that.
 
+**The client must be operable from somewhere else, and that disqualified the obvious
+choice.** `moonlight-qt` streams well and cannot be driven from a script: it ignores
+`--video-decoder`, ignores `videodecoderselection` in its own config file, and shows its
+pairing PIN only in a GUI dialog. The third is what settled it — pairing is a one-time
+step this project already tolerates several of, but on a machine with no keyboard and a
+television in another room that PIN was not *manual*, it was unobtainable. Moonlight
+Embedded prints it to stdout, so `install_client()` builds it from source: it is packaged
+for nothing, which is a real maintenance cost taken deliberately, because the alternative
+could not be operated at all.
+
+**Sound has to be told to leave by the cable the picture leaves by.** PipeWire's default
+sink on a Raspberry Pi is the 3.5mm analogue jack, so a client node plays perfect audio
+into a socket with nothing in it. Found twice, once per Pi, because nothing anywhere
+reports it — which is why the installer now sets HDMI explicitly and the doctor asks.
+
 **A client node is the television's end of a gaming node's link**, and the one thing it
 needs is to *not* have a desktop. It renders with `SDL_VIDEODRIVER=kmsdrm`, straight to
 the display; under a compositor it cannot take DRM master, so the hardware decoder it
@@ -475,7 +490,10 @@ stream` ignores both `--video-decoder` and its own config file's
 `videodecoderselection` — so the install targets a Lite image and the absence of a
 compositor *is* the mechanism. Worth knowing before concluding the hardware is at fault:
 on that machine four CPU cores decode 1080p faster than the dedicated block does
-(119fps against 83), so hardware decode buys power and heat, not frames.
+(119fps against 83), so hardware decode buys power and heat, not frames. Measured on the
+real thing since: 1080p60 costs about 40% of the Pi, leaving ~59% idle at 42°C with
+`throttled=0x0`. Nothing on that board is short of anything, so the dead end costs
+nothing at this resolution.
 
 **The role is one recorded fact, and three things read it.** `install_node` writes
 `data/role`, `config.role()` reads it, and `install.units()`, `deploy.rebuild_and_restart()`

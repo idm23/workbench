@@ -1425,15 +1425,18 @@ def check_client_installed() -> Check:
     key = "client-installed"
     title = "The streaming client is installed"
 
-    if shutil.which("moonlight-qt") is not None:
+    if shutil.which("moonlight") is not None:
         return Check(
-            key=key, title=title, state=CheckState.OK, detail="moonlight-qt is on this machine."
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail="Moonlight Embedded is on this machine.",
         )
     return Check(
         key=key,
         title=title,
         state=CheckState.WARN,
-        detail="moonlight-qt is not installed, so this node cannot show anything.",
+        detail="Moonlight Embedded is not installed, so this node cannot show anything.",
         fix="sudo ./install.sh --role=node --capabilities=client",
     )
 
@@ -1455,60 +1458,87 @@ def check_stream_host() -> Check:
     )
 
 
-#: What the client logs once it has picked a decoder. `h264` on its own is the
-#: software decoder; anything `_v4l2m2m` or `_v4l2request` is the hardware
-#: block. Read back for the same reason the gaming node's encoder is: falling
-#: back to the CPU is correct on a machine with no decoder and a silent waste
-#: on a machine bought for one, and nothing else tells the two apart.
-_CLIENT_DECODER = re.compile(r"Chose (\S+) for codec (\S+)")
+def check_client_unit() -> Check:
+    """Whether the client unit is installed and what it is doing.
 
-
-def check_client_decoder() -> Check:
-    """Whether the last stream decoded on this machine's hardware.
-
-    The failure this exists for showed no error at all: the client picked the
-    hardware decoder, could not take DRM master because a desktop compositor
-    held it, and rendered a black screen while reporting success. The fix was
-    to stop running a desktop - which is why a client node wants a Lite image
-    - but nothing anywhere said that was the problem.
+    Replaced an earlier check that read back which decoder the last stream
+    chose. That worked for `moonlight-qt` and matches nothing here: Moonlight
+    Embedded writes nothing to its journal while streaming, so the check could
+    only ever report `unknown`. A check that cannot match is a decoration -
+    which is the same criticism this file already makes of a permanent TODO.
     """
-    key = "client-decoder"
-    title = "Streams decode on this machine's hardware"
+    key = "client-unit"
+    title = "The client unit is installed"
 
-    probe = _run(["journalctl", "-u", CLIENT_UNIT, "-n", "400", "--no-pager"])
+    probe = _run(["systemctl", "is-enabled", CLIENT_UNIT])
+    if probe is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="systemctl could not be run here.",
+        )
+    if probe.returncode != 0:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=f"{CLIENT_UNIT} is not installed, so nothing streams at boot.",
+            fix="sudo ./install.sh --role=node --capabilities=client",
+        )
+
+    active = _run(["systemctl", "is-active", CLIENT_UNIT])
+    running = active is not None and active.stdout.strip() == "active"
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=("Enabled and streaming now." if running else "Enabled, not streaming right now."),
+    )
+
+
+#: A television is reached by one cable, and the sound has to go down it.
+#: PipeWire's own default on a Raspberry Pi is the 3.5mm analogue jack, which
+#: on a client node is always wrong - and silently so: the stream carries
+#: perfect audio to a socket with nothing plugged into it. Hit twice on real
+#: hardware, once per Pi, because nothing anywhere reported it.
+def check_client_audio() -> Check:
+    """Whether sound will leave by the same cable as the picture."""
+    key = "client-audio"
+    title = "Sound leaves by HDMI"
+
+    probe = _run(["wpctl", "status"])
     if probe is None or probe.returncode != 0:
         return Check(
             key=key,
             title=title,
             state=CheckState.UNKNOWN,
-            detail="The client's log could not be read from this account.",
+            detail="The audio devices could not be read from this account.",
         )
 
-    found = _CLIENT_DECODER.findall(probe.stdout)
-    if not found:
+    for line in probe.stdout.splitlines():
+        # The default sink is the one wpctl marks with an asterisk.
+        if "*" not in line or "." not in line:
+            continue
+        if "hdmi" in line.lower():
+            return Check(
+                key=key, title=title, state=CheckState.OK, detail="The default sink is HDMI."
+            )
         return Check(
             key=key,
             title=title,
-            state=CheckState.UNKNOWN,
-            detail="No stream has run since the client last started.",
+            state=CheckState.WARN,
+            detail=(
+                f"The default sink is not HDMI ({line.strip().lstrip('│ *')}), so the stream "
+                "plays video in silence."
+            ),
         )
 
-    renderer, codec = found[-1]
-    if codec.endswith(("_v4l2m2m", "_v4l2request")):
-        return Check(
-            key=key,
-            title=title,
-            state=CheckState.OK,
-            detail=f"{codec} via {renderer}.",
-        )
     return Check(
         key=key,
         title=title,
-        state=CheckState.WARN,
-        detail=(
-            f"The last stream decoded with {codec} on the CPU. Streaming still works and "
-            "looks fine, which is why this is easy to miss."
-        ),
+        state=CheckState.UNKNOWN,
+        detail="No default audio sink was reported.",
     )
 
 
@@ -1529,7 +1559,8 @@ GAMING_CHECKS = (
 CLIENT_CHECKS = (
     check_client_installed,
     check_stream_host,
-    check_client_decoder,
+    check_client_unit,
+    check_client_audio,
 )
 
 

@@ -627,6 +627,86 @@ Confirmation of the fix came from the same place, and reads better than any test
 Info: Executing Do Cmd: [systemctl start workbench-gaming]
 ```
 
+## A tool that cannot be scripted is the wrong tool, however well it works
+
+`moonlight-qt` streams beautifully. It is also undrivable from a script, in three
+independent ways, each discovered only after the previous one was worked around:
+
+- `--video-decoder software` is parsed and ignored.
+- `videodecoderselection` in its own `Moonlight.conf` is ignored by the `stream`
+  subcommand too, so there is no file to write either.
+- Its pairing PIN appears only in a GUI dialog — on a machine whose entire purpose is to
+  have no desktop, behind a modal warning that needs a keyboard to dismiss.
+
+The third is the one that settled it. Pairing is a one-time step, and this project already
+accepts a handful of those. But it was not *manual*, it was **impossible**: there was no
+way to obtain that PIN over SSH at all. The machine has no working keyboard path and its
+only display is a television in another room.
+
+Moonlight Embedded prints the PIN to stdout:
+
+```
+Please enter the following PIN on the target PC: 1697
+```
+
+That is the whole difference, and it is worth more than any amount of polish. A headless
+box needs a client whose interface is text. Note the cost being accepted here: Moonlight
+Embedded is packaged for nothing — its own apt repository serves a `trixie` suite
+containing no such package — so `install_client()` builds it from source, about two
+minutes on a Pi 4. That is a real maintenance burden, taken deliberately, because the
+alternative could not be operated at all.
+
+## Raspberry Pi OS Trixie provisions with cloud-init, not `custom.toml`
+
+Writing `custom.toml` to the boot partition of a 2026-06 Trixie image does nothing. The
+file is never read, the image boots into its interactive first-boot wizard, and on a
+headless machine that is a brick — a working install that cannot be logged into.
+
+The give-away was sitting on the stock boot partition all along:
+
+```
+meta-data       dsmode: local, instance_id: rpios-image
+network-config  netplan-compatible, applied on first boot
+```
+
+That is cloud-init's NoCloud datasource. `custom.toml` is the older Imager mechanism.
+The file to write is `user-data`, `#cloud-config`, with `hostname`, `users:` carrying
+`ssh_authorized_keys`, and `ssh_pwauth: false`.
+
+**And `user-data` still does not enable SSH.** Pi OS ships `sshd` disabled and switches it
+on from `sshswitch.service`, which looks for a file literally named `ssh` on the boot
+partition. Configuring sshd is not starting it: the first boot produced a correctly
+provisioned machine, with the right user and the right key, refusing connections on port
+22. Two boot cycles were spent learning that, one per mechanism.
+
+The general lesson is narrower than "read the docs": **check what the artefact in front of
+you actually consumes** before writing config for it. The stock image listed its own
+answer in a directory listing.
+
+## Two interfaces on one subnet is a LAN-wide fault, not a local one
+
+A Raspberry Pi with `eth0` and `wlan0` both on `192.168.1.0/24`, Wi-Fi in `DORMANT` state
+and holding the route:
+
+```
+192.168.1.155 via wlan0   →  100% packet loss
+eth0                      →   41% packet loss
+```
+
+Two things are worth keeping from this. The first is that it presented as *audio*: the
+stream's video degraded gracefully via FEC while the audio crackled and dropped out, so
+the obvious diagnosis was audio — realtime priority, buffer sizes, `rtkit`. All of that
+was a red herring; on a clean network the same stack is silent-clean with none of it.
+
+The second is that it was not confined to the offending machine. Another host on the same
+switch became unreachable for seventeen minutes while its own journal recorded no network
+event whatsoever — no carrier loss, no link-down, nothing. MAC-table confusion from one
+machine claiming a subnet twice is enough to disrupt its neighbours, and the neighbour has
+no way to see why.
+
+**Check the physical and link layer first when a working setup breaks after being moved.**
+That is exactly when it is most likely, and it is the layer that reports nothing.
+
 ## Small ones
 
 **`curl -I` sends HEAD**, and FastAPI does not auto-add HEAD to a GET route. A `405` with

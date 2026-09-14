@@ -914,37 +914,64 @@ def test_one_machine_can_be_asked_every_list(monkeypatch):
         assert set(group) <= set(checks)
 
 
-def test_the_client_decoder_check_catches_a_silent_software_fallback(monkeypatch):
-    """The failure it exists for showed no error: the client picked the
-    hardware decoder, could not take DRM master because a compositor held it,
-    and rendered black while reporting success."""
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/moonlight-qt")
+def test_the_client_audio_check_catches_sound_going_to_the_wrong_socket(monkeypatch):
+    """The failure it exists for is silent: PipeWire's default on a Pi is the
+    3.5mm jack, so the stream carries perfect audio to a socket with nothing
+    plugged into it. Hit twice on real hardware because nothing reported it."""
 
-    class Ok:
+    class Listing:
         returncode = 0
-        stdout = "Chose SdlRenderer for codec h264 due to compatible pixel format\n"
+        stdout = "   *   68. Built-in Audio Stereo   [vol: 0.40]\n"
         stderr = ""
 
-    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Ok())
+    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Listing())
 
-    check = doctor.check_client_decoder()
+    check = doctor.check_client_audio()
     assert check.state is CheckState.WARN
-    assert "CPU" in check.detail
+    assert "silence" in check.detail
 
 
-def test_the_client_decoder_check_is_happy_about_the_hardware_block(monkeypatch):
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/moonlight-qt")
-
-    class Ok:
+def test_the_client_audio_check_is_happy_about_hdmi(monkeypatch):
+    class Listing:
         returncode = 0
-        stdout = "Chose DrmRenderer for codec h264_v4l2m2m due to preferred pixel format\n"
+        stdout = "   *   69. Built-in Audio Digital Stereo (HDMI)  [vol: 0.90]\n"
         stderr = ""
 
-    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Ok())
+    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Listing())
 
-    check = doctor.check_client_decoder()
+    assert doctor.check_client_audio().state is CheckState.OK
+
+
+def test_the_client_unit_check_reports_whether_it_is_streaming(monkeypatch):
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(
+        doctor,
+        "_run",
+        lambda argv, *a, **k: Result("active\n" if "is-active" in argv else "enabled\n"),
+    )
+
+    check = doctor.check_client_unit()
     assert check.state is CheckState.OK
-    assert "h264_v4l2m2m" in check.detail
+    assert "streaming now" in check.detail
+
+
+def test_an_uninstalled_client_unit_is_a_warning_with_a_fix(monkeypatch):
+    class Missing:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Missing())
+
+    check = doctor.check_client_unit()
+    assert check.state is CheckState.WARN
+    assert check.fix is not None
 
 
 def test_a_client_with_no_stream_host_says_so(monkeypatch):
