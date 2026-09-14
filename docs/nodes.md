@@ -47,18 +47,60 @@ A client node puts a stream on a screen. It is the other half of a `gaming` node
 `--stream-host` is the machine it streams *from* — a gaming node. Recorded in
 `data/stream-host` and, like `--head`, left alone by a re-install that does not mention it.
 
-**Use a Lite image with no desktop, and that is load-bearing rather than tidiness.** The
-client renders with `SDL_VIDEODRIVER=kmsdrm`, straight to the display. Under a desktop
-compositor it cannot take DRM master, so its hardware-decode path fails and it falls back
-to decoding on the CPU — or renders a black screen while reporting success, which is what
-happened on this project's own Raspberry Pi running labwc. There is no setting that fixes
-this: `moonlight-qt stream` ignores both `--video-decoder` and `videodecoderselection` in
-its own config file. Not having a compositor is the only lever that works.
+### Bootstrap first
 
-**Pairing is manual**, the same shape as joining the tailnet or signing the agent in: visit
-`https://<the gaming node>:47990` and pair this client. The unit is installed and enabled
-but deliberately not started until then — a client pointed at a machine that will not
-accept it would restart every five seconds forever.
+A Lite image has neither `git`, `curl` nor `tailscale`, and `install.sh` needs all three —
+the clone needs git, and the installer hard-requires curl and git before it will start. So
+the reproducibility promise for this role really begins one step earlier:
+
+```sh
+sudo apt update && sudo apt install -y git curl
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up          # prints a URL; approve the machine
+```
+
+**Tailscale before `install.sh`, not after.** `--head` is a MagicDNS name, so without the
+tailnet up the install completes and then fails to register, and you run it twice.
+
+Keep the clone in `~`, never under `/tmp` — the unit runs `PrivateTmp=yes`, so the service
+cannot see a checkout there, and systemd reports only "the control process exited with
+error code" with an empty journal.
+
+### Why a Lite image, and why this client
+
+**No desktop, and that is load-bearing rather than tidiness.** The client renders straight
+to the display. Under a compositor it cannot take DRM master, so it either falls back to
+decoding on the CPU or renders a black screen while reporting success — both observed on
+this project's own Pi running labwc.
+
+**Moonlight Embedded, not `moonlight-qt`, and that is a requirement.** `moonlight-qt`
+cannot be driven from a script: it ignores `--video-decoder`, ignores
+`videodecoderselection` in its own config file, and shows its pairing PIN only in a GUI
+dialog — unobtainable over SSH on a machine with no keyboard and a television for a
+display. Moonlight Embedded prints the PIN to stdout and streams without a window system.
+It is packaged for nothing, so the installer builds it from source (about two minutes on a
+Pi 4), which is a cost taken deliberately.
+
+**Hardware decode does not work on a Pi 4 here, and it does not matter.** H.264 uses the
+stateful `bcm2835-codec`, whose frames cannot be exported for zero-copy; HEVC needs the
+stateless `rpi-hevc-dec`, which ffmpeg's `v4l2request` cannot configure. Software decode is
+also simply *faster* on this board — 119fps against the hardware block's 83 at 1080p — and
+costs about 40% of the CPU at 1080p60, leaving ~59% idle at 42°C with no throttling.
+
+### Pairing
+
+One-time, and done over SSH:
+
+```sh
+sudo -u workbench env HOME=/home/workbench moonlight pair <the gaming node>
+```
+
+It prints a PIN; enter that at `https://<the gaming node>:47990`. **Pair as the service
+account**, not as yourself — Moonlight keeps its client certificate per-user, and pairing
+as a person produces a working manual test and a unit that is still unpaired.
+
+The unit is installed and enabled but deliberately not started until pairing has happened:
+a client pointed at a machine that will not accept it restarts every five seconds forever.
 
 ## Installing one
 
