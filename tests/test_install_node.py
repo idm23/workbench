@@ -902,21 +902,120 @@ def test_an_existing_sunshine_conf_keeps_its_other_settings(monkeypatch):
     assert "workbench-gaming.service" not in moved
 
 
+def test_a_client_node_does_not_claim_to_serve_a_model(monkeypatch, caplog):
+    """It used to. A client node finished its install announcing that it was
+    "serving qwen3:8b" at a loopback endpoint nothing listened on, and told the
+    reader to point a head at it. Every word false, printed in bold, by an
+    install that had otherwise succeeded."""
+    monkeypatch.setattr(install_node, "is_inference_node", lambda: False)
+    monkeypatch.setattr(install_node, "is_gaming_node", lambda: False)
+    monkeypatch.setattr(install_node, "is_client_node", lambda: True)
+    monkeypatch.setattr(install_node, "stream_host", lambda: "192.168.1.155")
+
+    with caplog.at_level("INFO"):
+        install_node.report_success()
+
+    assert "serving" not in caplog.text
+    assert "11434" not in caplog.text
+    assert "ollama" not in caplog.text
+    # It should say what it actually does, and what is left.
+    assert "streaming to a screen" in caplog.text
+    assert "192.168.1.155" in caplog.text
+
+
+def test_an_inference_node_still_gets_its_endpoint_and_commands(monkeypatch, caplog):
+    monkeypatch.setattr(install_node, "is_inference_node", lambda: True)
+    monkeypatch.setattr(install_node, "is_gaming_node", lambda: False)
+    monkeypatch.setattr(install_node, "is_client_node", lambda: False)
+
+    with caplog.at_level("INFO"):
+        install_node.report_success()
+
+    assert "11434" in caplog.text
+    assert "ollama" in caplog.text
+
+
 def test_the_client_unit_renders_without_a_compositor(monkeypatch):
-    """`SDL_VIDEODRIVER=kmsdrm` is the whole point of a client node, and why it
-    wants a Lite image. Under a compositor the client cannot take DRM master,
-    so its hardware-decode path fails and it renders a black screen while
-    reporting success - proven on real hardware running labwc."""
+    """The client must be drivable from a script. moonlight-qt is not: it
+    ignores --video-decoder, ignores videodecoderselection in its own config
+    file, and shows its pairing PIN only in a GUI dialog - unobtainable over
+    SSH on a machine with no desktop. Moonlight Embedded is CLI-native, which
+    is why the unit calls `moonlight` and sets no window-system hints at all."""
     real = pwd.getpwuid(os.getuid())
 
     unit = install_node._client_unit("192.168.1.155", real)
 
-    assert "SDL_VIDEODRIVER=kmsdrm" in unit
-    assert "moonlight-qt stream 192.168.1.155 Desktop" in unit
+    assert "/usr/local/bin/moonlight stream 192.168.1.155" in unit
+    assert "-app Desktop" in unit
+    # No Qt platform, no SDL video driver: there is no window system to hint at.
+    assert "SDL_VIDEODRIVER" not in unit
+    assert "moonlight-qt" not in unit
+    # Audio needs the runtime dir, or the stream plays video in silence.
+    assert "XDG_RUNTIME_DIR" in unit
     assert f"User={real.pw_name}" in unit
     # It must come back by itself: nobody is looking at this machine.
     assert "Restart=on-failure" in unit
     assert "WantedBy=multi-user.target" in unit
+
+
+def test_the_client_grants_journal_access_so_its_doctor_check_can_answer():
+    """Without `systemd-journal` the service account cannot open the unit's
+    journal, so the decoder check reports `unknown` forever whatever the
+    machine is doing - a check occupying the space where an answer would go."""
+    assert "systemd-journal" in install_node.CLIENT_GROUPS
+
+
+def test_a_built_client_is_not_rebuilt(monkeypatch):
+    """Idempotent on the only check that means anything: does the binary run."""
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: "/usr/local/bin/moonlight")
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda *a, **k: pytest.fail("nothing to rebuild")
+    )
+
+    assert install_node.build_moonlight(pwd.getpwuid(os.getuid())) is True
+
+
+def test_client_audio_is_pushed_out_of_hdmi(monkeypatch):
+    """PipeWire's default on a Pi is the 3.5mm jack, which on a machine wired to
+    a television by one HDMI cable is always wrong - and silently so: the
+    stream carries perfect audio to a socket with nothing in it. Hit twice on
+    real hardware, once per Pi, because nothing anywhere reports it."""
+    real = pwd.getpwuid(os.getuid())
+
+    class Listing:
+        returncode = 0
+        stderr = ""
+        stdout = (
+            "  Sinks:\n"
+            "   *   68. Built-in Audio Stereo               [vol: 0.40]\n"
+            "       69. Built-in Audio Digital Stereo (HDMI) [vol: 0.40]\n"
+        )
+
+    calls = []
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda argv, *a, **k: calls.append(argv) or Listing()
+    )
+
+    assert install_node.prefer_hdmi_audio(real) is True
+    assert ["wpctl", "set-default", "69"] in calls
+    # 69, not 68: the analogue jack is the one it must not pick.
+    assert ["wpctl", "set-default", "68"] not in calls
+
+
+def test_no_hdmi_sink_is_a_warning_not_a_crash(monkeypatch, caplog):
+    real = pwd.getpwuid(os.getuid())
+
+    class Listing:
+        returncode = 0
+        stderr = ""
+        stdout = "   *   68. Built-in Audio Stereo   [vol: 0.40]\n"
+
+    monkeypatch.setattr(install_node, "run_as_account", lambda *a, **k: Listing())
+
+    with caplog.at_level("WARNING"):
+        assert install_node.prefer_hdmi_audio(real) is False
+
+    assert "silent" in caplog.text
 
 
 def test_the_client_unit_grants_the_groups_the_display_needs(monkeypatch):
@@ -953,6 +1052,8 @@ def test_a_client_with_no_stream_host_writes_no_unit(monkeypatch, caplog):
     monkeypatch.setattr(install_node, "_in_group", lambda user, group: True)
     monkeypatch.setattr(install_node, "_ensure_linger", lambda player: None)
     monkeypatch.setattr(install_node, "stream_host", lambda: None)
+    monkeypatch.setattr(install_node, "build_moonlight", lambda account: True)
+    monkeypatch.setattr(install_node, "prefer_hdmi_audio", lambda account: True)
 
     class Ok:
         returncode = 0

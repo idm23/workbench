@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import pwd
+import re
 import shutil
 import socket
 import subprocess
@@ -276,28 +277,58 @@ def wait_for_endpoint() -> None:
 
 
 def report_success() -> None:
-    """What this node now is, and the one thing a person still has to do."""
-    logger.info("\n%s", paint(BOLD, f"This machine is a Workbench node, serving {local_model()}"))
-    logger.info(
-        "%s",
-        f"""
-It serves {inference_base_url()} and updates itself from '{deploy_branch()}'
-every {DEPLOY_INTERVAL}. Nothing needs running here again.
+    """What this node now is, and the one thing a person still has to do.
 
-Point a head at it — on the head, in /etc/workbench/env:
+    Written per capability rather than as one story, because the one story used
+    to be the inference one: a client node finished its install by announcing
+    that it was "serving qwen3:8b" at a loopback endpoint nothing listened on,
+    and telling the reader to point a head at it. Every word of that was false,
+    and the install had just printed it in bold.
+    """
+    doing = []
+    if is_inference_node():
+        doing.append(f"serving {local_model()}")
+    if is_gaming_node():
+        doing.append("lending its GPU to a screen")
+    if is_client_node():
+        doing.append("streaming to a screen")
+    summary = ", ".join(doing) if doing else "connected and updating itself"
+    logger.info("\n%s", paint(BOLD, f"This machine is a Workbench node, {summary}"))
+
+    lines = [
+        f"\nIt updates itself from '{deploy_branch()}' every {DEPLOY_INTERVAL}.",
+    ]
+
+    if is_inference_node():
+        lines.append(
+            f"""
+It serves {inference_base_url()}. Point a head at it — on the head,
+in /etc/workbench/env:
 
     WORKBENCH_AGENT_BACKEND=local
     WORKBENCH_INFERENCE_URL=http://{_lan_address() or "this-machine"}:11434/v1
 
-Useful commands:
-
-    {_venv_bin("python")} -m workbench.doctor   # re-check everything below
-
     systemctl status ollama
     journalctl -u ollama -f
-    ollama ps                                    # what is loaded right now
-""",
+    ollama ps                                    # what is loaded right now"""
+        )
+
+    if is_client_node():
+        lines.append(
+            f"""
+It streams from {stream_host() or "nothing yet"}. The unit is installed but not
+started: pair this client first, at https://{stream_host() or "<the host>"}:47990.
+
+    systemctl status {CLIENT_UNIT_NAME}
+    journalctl -u {CLIENT_UNIT_NAME} -f"""
+        )
+
+    lines.append(
+        f"""
+    {_venv_bin("python")} -m workbench.doctor   # re-check everything below
+"""
     )
+    logger.info("%s", "\n".join(lines))
 
 
 #: Addresses to leave out of what a node advertises. Docker's bridge is
@@ -1034,21 +1065,82 @@ def install_audio() -> bool:
 #: raises its audio thread with `setpriority()`, and without rtkit granting
 #: that, the thread competes with decoding and the stream crackles and drops
 #: out. Found on real hardware, where it sounded like a network fault.
+#: Build dependencies for Moonlight Embedded, plus the audio stack.
+#:
+#: Built from source rather than installed, because it is packaged for nothing
+#: this runs on - its own apt repository serves a `trixie` suite that contains
+#: no `moonlight-embedded` at all. The build is cheap (about two minutes on a
+#: Pi 4) and the alternative was disqualifying: see `MOONLIGHT_EMBEDDED_REPO`.
 CLIENT_PACKAGES = (
-    "moonlight-qt",
+    "cmake",
+    "gcc",
+    "g++",
+    "pkg-config",
+    "git",
+    "libasound2-dev",
+    "libavahi-client-dev",
+    "libcurl4-openssl-dev",
+    "libevdev-dev",
+    "libexpat1-dev",
+    "libopus-dev",
+    "libudev-dev",
+    "libva-dev",
+    "libvdpau-dev",
+    "libpulse-dev",
+    "uuid-dev",
+    "libsdl2-dev",
+    "libssl-dev",
+    "libdrm-dev",
+    "libavcodec-dev",
+    "libavutil-dev",
+    "libswscale-dev",
+    "libavformat-dev",
     "pipewire",
     "pipewire-pulse",
     "wireplumber",
-    "rtkit",
     "pulseaudio-utils",
 )
 
 #: Groups the account running the client needs: `video` and `render` to open
 #: the DRM devices it renders through, `input` for the virtual gamepad it
 #: presents, `audio` for the HDMI sink.
-CLIENT_GROUPS = ("video", "render", "input", "audio")
+#:
+#: `systemd-journal` is for the *doctor* rather than the unit, and is the
+#: difference between a check and a decoration. `check_client_decoder` reads
+#: back what the last stream did, and the doctor runs as the service account -
+#: which without this cannot open the unit's journal at all and so reports
+#: `unknown` forever, whatever the machine is really doing. A check that can
+#: never answer is worse than no check, because it occupies the space where a
+#: real answer would go.
+#:
+#: Granted only inside a client install, and worth stating plainly: it lets
+#: this account read every journal on the machine, not only its own unit. On a
+#: box whose whole job is to display a stream that is a fair trade; on a head
+#: it would deserve more thought, which is why it is not granted there.
+CLIENT_GROUPS = ("video", "render", "input", "audio", "systemd-journal")
 
 CLIENT_UNIT_NAME = "workbench-client.service"
+
+#: Moonlight Embedded, built from source. `moonlight-qt` was here first and is
+#: disqualified, for one reason with three faces: **it cannot be driven from a
+#: script.**
+#:
+#: It ignores `--video-decoder` on the command line. It ignores
+#: `videodecoderselection` in its own config file. And its pairing PIN is shown
+#: only in a GUI dialog - on a machine whose entire purpose is to have no
+#: desktop, behind a modal warning that needs a keyboard to dismiss. Proven on
+#: real hardware: the PIN was unobtainable over SSH by any means.
+#:
+#: Moonlight Embedded is the CLI-native client. `moonlight pair <host>` prints
+#: the PIN to stdout and `moonlight stream <host>` needs no window system at
+#: all, so every part of a client node can be operated from somewhere else -
+#: which is the point of a machine nobody can stand in front of.
+MOONLIGHT_EMBEDDED_REPO = "https://github.com/moonlight-stream/moonlight-embedded.git"
+
+#: Where the source is built. Under the service account's home rather than the
+#: checkout, because the checkout is what the deploy timer fast-forwards and a
+#: build tree in it would make every deploy refuse as "dirty".
+MOONLIGHT_BUILD_DIR = "moonlight-embedded"
 
 
 def _client_unit(host: str, account: pwd.struct_passwd) -> str:
@@ -1062,9 +1154,11 @@ def _client_unit(host: str, account: pwd.struct_passwd) -> str:
     running labwc: the client picked the hardware renderer, could not have the
     display, and showed a black screen while reporting success.
 
-    No `--video-decoder` flag: `moonlight-qt stream` ignores it, and ignores
-    `videodecoderselection` in its own config file too. The only lever that
-    actually works is not having a compositor in the way.
+    Moonlight Embedded rather than `moonlight-qt`: see
+    `MOONLIGHT_EMBEDDED_REPO` for why that is a requirement rather than a
+    preference. It needs no window system, so there is no Qt platform to
+    choose and no SDL video driver to hint at - which is also why this unit no
+    longer sets `SDL_VIDEODRIVER`.
     """
     return f"""\
 # Rendered by install.sh — do not edit; re-run the installer instead.
@@ -1077,9 +1171,10 @@ Wants=network-online.target
 Type=simple
 User={account.pw_name}
 SupplementaryGroups={" ".join(CLIENT_GROUPS)}
-Environment=SDL_VIDEODRIVER=kmsdrm
+# XDG_RUNTIME_DIR is for audio: PipeWire's socket lives there, and without it
+# the stream plays perfect video in silence.
 Environment=XDG_RUNTIME_DIR=/run/user/{account.pw_uid}
-ExecStart=/usr/bin/moonlight-qt stream {host} Desktop
+ExecStart=/usr/local/bin/moonlight stream {host} -app Desktop -1080 -fps 60 -bitrate 20000
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
@@ -1087,6 +1182,92 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def build_moonlight(account: pwd.struct_passwd) -> bool:
+    """Build and install Moonlight Embedded from source.
+
+    Idempotent by the only check that means anything here: whether the binary
+    exists and runs. A source tree present but half-built is not a reason to
+    skip, and a rebuild costs about two minutes.
+    """
+    if shutil.which("moonlight") is not None:
+        info("Moonlight Embedded already installed")
+        return True
+
+    tree = Path(account.pw_dir) / MOONLIGHT_BUILD_DIR
+    build = tree / "build"
+    step("Building Moonlight Embedded from source")
+    try:
+        if not tree.exists():
+            run_as_account(
+                [
+                    "git",
+                    "clone",
+                    "--recurse-submodules",
+                    "--depth",
+                    "1",
+                    MOONLIGHT_EMBEDDED_REPO,
+                    str(tree),
+                ],
+                account,
+                stream=True,
+            )
+        # `sh -c` with an explicit cd: cmake and make are the two commands here
+        # that care where they run, and `run_as_account` has no cwd of its own.
+        run_as_account(
+            ["sh", "-c", f"mkdir -p {build} && cd {build} && cmake .. && make -j4"],
+            account,
+            stream=True,
+        )
+        run(["sh", "-c", f"cd {build} && make install"], privileged=True, stream=True)
+        # Without this the freshly installed binary cannot find its own
+        # libraries in /usr/local/lib and dies on `libgamestream.so.4:
+        # cannot open shared object file` - which looks like a broken build
+        # rather than a stale linker cache.
+        run(["ldconfig"], privileged=True)
+    except InstallError as error:
+        warn(f"could not build Moonlight Embedded: {error}")
+        return False
+
+    if shutil.which("moonlight") is None:
+        warn("Moonlight Embedded built but is not on PATH.")
+        return False
+    return True
+
+
+#: The card a client node's audio must come out of. PipeWire's own default on
+#: a Raspberry Pi is the 3.5mm analogue jack, which on a machine wired to a
+#: television by one HDMI cable is always wrong - and silently so: the stream
+#: carries perfect audio to a socket with nothing in it. Found twice on real
+#: hardware, once per Pi, because nothing anywhere reports it.
+HDMI_SINK_HINT = "hdmi"
+
+
+def prefer_hdmi_audio(account: pwd.struct_passwd) -> bool:
+    """Make HDMI the default sink, so sound leaves by the same cable as picture."""
+    env = {"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"}
+    listing = run_as_account(["wpctl", "status"], account, extra_env=env)
+    if listing.returncode != 0:
+        warn("could not read the audio devices; left the default sink alone.")
+        return False
+
+    for line in listing.stdout.splitlines():
+        if HDMI_SINK_HINT not in line.lower():
+            continue
+        # Lines look like "│      69. Built-in Audio Digital Stereo (HDMI) ..."
+        match = re.search(r"(\d+)\.", line)
+        if not match:
+            continue
+        sink = match.group(1)
+        run_as_account(["wpctl", "set-default", sink], account, extra_env=env)
+        run_as_account(["wpctl", "set-volume", sink, "0.9"], account, extra_env=env)
+        run_as_account(["wpctl", "set-mute", sink, "0"], account, extra_env=env)
+        info(f"audio will leave by HDMI (sink {sink})")
+        return True
+
+    warn("no HDMI audio sink found; the stream may be silent.")
+    return False
 
 
 def install_client() -> bool:
@@ -1106,14 +1287,21 @@ def install_client() -> bool:
 
     missing = [name for name in CLIENT_PACKAGES if not _package_installed(name)]
     if missing:
-        step(f"Installing {', '.join(missing)}")
+        step(f"Installing {len(missing)} packages for the client")
         try:
-            run(["apt-get", "install", "-y", *missing], privileged=True, stream=True)
+            run(
+                ["apt-get", "install", "-y", "--no-install-recommends", *missing],
+                privileged=True,
+                stream=True,
+            )
         except InstallError as error:
-            warn(f"could not install the client: {error}")
+            warn(f"could not install the client's dependencies: {error}")
             return False
 
     account = _service_passwd()
+    if not build_moonlight(account):
+        return False
+
     changed = False
     for group in CLIENT_GROUPS:
         if _in_group(account.pw_name, group):
@@ -1134,6 +1322,8 @@ def install_client() -> bool:
     )
     if audio.returncode != 0:
         warn(f"could not start audio: {(audio.stderr or audio.stdout or '').strip()}")
+    else:
+        prefer_hdmi_audio(account)
 
     host = stream_host()
     if not host:
