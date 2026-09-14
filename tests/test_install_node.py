@@ -902,6 +902,39 @@ def test_an_existing_sunshine_conf_keeps_its_other_settings(monkeypatch):
     assert "workbench-gaming.service" not in moved
 
 
+def test_a_client_node_does_not_claim_to_serve_a_model(monkeypatch, caplog):
+    """It used to. A client node finished its install announcing that it was
+    "serving qwen3:8b" at a loopback endpoint nothing listened on, and told the
+    reader to point a head at it. Every word false, printed in bold, by an
+    install that had otherwise succeeded."""
+    monkeypatch.setattr(install_node, "is_inference_node", lambda: False)
+    monkeypatch.setattr(install_node, "is_gaming_node", lambda: False)
+    monkeypatch.setattr(install_node, "is_client_node", lambda: True)
+    monkeypatch.setattr(install_node, "stream_host", lambda: "192.168.1.155")
+
+    with caplog.at_level("INFO"):
+        install_node.report_success()
+
+    assert "serving" not in caplog.text
+    assert "11434" not in caplog.text
+    assert "ollama" not in caplog.text
+    # It should say what it actually does, and what is left.
+    assert "streaming to a screen" in caplog.text
+    assert "192.168.1.155" in caplog.text
+
+
+def test_an_inference_node_still_gets_its_endpoint_and_commands(monkeypatch, caplog):
+    monkeypatch.setattr(install_node, "is_inference_node", lambda: True)
+    monkeypatch.setattr(install_node, "is_gaming_node", lambda: False)
+    monkeypatch.setattr(install_node, "is_client_node", lambda: False)
+
+    with caplog.at_level("INFO"):
+        install_node.report_success()
+
+    assert "11434" in caplog.text
+    assert "ollama" in caplog.text
+
+
 def test_the_client_unit_renders_without_a_compositor(monkeypatch):
     """`SDL_VIDEODRIVER=kmsdrm` is the whole point of a client node, and why it
     wants a Lite image. Under a compositor the client cannot take DRM master,
