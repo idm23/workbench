@@ -902,6 +902,74 @@ def test_an_existing_sunshine_conf_keeps_its_other_settings(monkeypatch):
     assert "workbench-gaming.service" not in moved
 
 
+def test_the_client_unit_renders_without_a_compositor(monkeypatch):
+    """`SDL_VIDEODRIVER=kmsdrm` is the whole point of a client node, and why it
+    wants a Lite image. Under a compositor the client cannot take DRM master,
+    so its hardware-decode path fails and it renders a black screen while
+    reporting success - proven on real hardware running labwc."""
+    real = pwd.getpwuid(os.getuid())
+
+    unit = install_node._client_unit("192.168.1.155", real)
+
+    assert "SDL_VIDEODRIVER=kmsdrm" in unit
+    assert "moonlight-qt stream 192.168.1.155 Desktop" in unit
+    assert f"User={real.pw_name}" in unit
+    # It must come back by itself: nobody is looking at this machine.
+    assert "Restart=on-failure" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_the_client_unit_grants_the_groups_the_display_needs(monkeypatch):
+    """`video`/`render` open the DRM devices, `input` is the virtual gamepad,
+    `audio` is the HDMI sink. A missing group here is invisible until the one
+    path that needed it is the one that breaks."""
+    real = pwd.getpwuid(os.getuid())
+
+    unit = install_node._client_unit("node", real)
+
+    for group in ("video", "render", "input", "audio"):
+        assert group in unit
+
+
+def test_the_stream_host_argument_is_parsed_in_both_spellings(monkeypatch):
+    for argv in (["--stream-host", "node-1"], ["--stream-host=node-1"]):
+        monkeypatch.setattr(install_node.sys, "argv", ["install_node.py", *argv])
+        assert install_node._stream_host_argument() == "node-1"
+
+
+def test_saying_nothing_about_the_stream_host_leaves_it_alone(monkeypatch):
+    """Same rule as `--head`: a re-install that does not mention it must leave
+    a client streaming from exactly what it streamed from before."""
+    monkeypatch.setattr(install_node.sys, "argv", ["install_node.py", "--role=node"])
+    assert install_node._stream_host_argument() is None
+
+
+def test_a_client_with_no_stream_host_writes_no_unit(monkeypatch, caplog):
+    """Refused rather than guessed. A unit pointed at nothing would restart
+    every five seconds forever, which is a worse way to learn the same thing."""
+    monkeypatch.setattr(install_node, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(install_node, "_package_installed", lambda name: True)
+    monkeypatch.setattr(install_node, "_service_passwd", lambda: pwd.getpwuid(os.getuid()))
+    monkeypatch.setattr(install_node, "_in_group", lambda user, group: True)
+    monkeypatch.setattr(install_node, "_ensure_linger", lambda player: None)
+    monkeypatch.setattr(install_node, "stream_host", lambda: None)
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(install_node, "run_as_account", lambda *a, **k: Ok())
+    written = []
+    monkeypatch.setattr(install_node, "write_privileged", lambda *a, **k: written.append(a))
+
+    with caplog.at_level("WARNING"):
+        assert install_node.install_client() is False
+
+    assert written == []
+    assert "stream host" in caplog.text
+
+
 def test_install_gaming_runs_every_step_in_order(monkeypatch):
     """The switch's authorisation, a render surface, Steam, Sunshine, audio,
     then wiring Sunshine into the switch — in that order, because Sunshine's

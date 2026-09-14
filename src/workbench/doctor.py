@@ -55,12 +55,15 @@ from workbench.config import (
     gaming_user,
     head_url,
     instance,
+    is_client_node,
     is_gaming_node,
+    is_inference_node,
     is_node,
     port,
     repo_root,
     restore_from,
     service_account,
+    stream_host,
 )
 from workbench.logs import BOLD, GREEN, RED, YELLOW, configure_console_logging, paint
 
@@ -1411,6 +1414,104 @@ def check_stream_encoder() -> Check:
     )
 
 
+#: The unit `install_node.install_client()` writes. Named here rather than
+#: imported, because the doctor must stay importable on a machine where the
+#: installer never ran.
+CLIENT_UNIT = "workbench-client.service"
+
+
+def check_client_installed() -> Check:
+    """Whether this client node has the thing it exists to run."""
+    key = "client-installed"
+    title = "The streaming client is installed"
+
+    if shutil.which("moonlight-qt") is not None:
+        return Check(
+            key=key, title=title, state=CheckState.OK, detail="moonlight-qt is on this machine."
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="moonlight-qt is not installed, so this node cannot show anything.",
+        fix="sudo ./install.sh --role=node --capabilities=client",
+    )
+
+
+def check_stream_host() -> Check:
+    """Whether this client knows which machine to put on its screen."""
+    key = "stream-host"
+    title = "This client knows what to stream"
+
+    host = stream_host()
+    if host:
+        return Check(key=key, title=title, state=CheckState.OK, detail=f"Streaming from {host}.")
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="No stream host recorded, so the client unit was never written.",
+        fix="sudo ./install.sh --role=node --capabilities=client --stream-host <machine>",
+    )
+
+
+#: What the client logs once it has picked a decoder. `h264` on its own is the
+#: software decoder; anything `_v4l2m2m` or `_v4l2request` is the hardware
+#: block. Read back for the same reason the gaming node's encoder is: falling
+#: back to the CPU is correct on a machine with no decoder and a silent waste
+#: on a machine bought for one, and nothing else tells the two apart.
+_CLIENT_DECODER = re.compile(r"Chose (\S+) for codec (\S+)")
+
+
+def check_client_decoder() -> Check:
+    """Whether the last stream decoded on this machine's hardware.
+
+    The failure this exists for showed no error at all: the client picked the
+    hardware decoder, could not take DRM master because a desktop compositor
+    held it, and rendered a black screen while reporting success. The fix was
+    to stop running a desktop - which is why a client node wants a Lite image
+    - but nothing anywhere said that was the problem.
+    """
+    key = "client-decoder"
+    title = "Streams decode on this machine's hardware"
+
+    probe = _run(["journalctl", "-u", CLIENT_UNIT, "-n", "400", "--no-pager"])
+    if probe is None or probe.returncode != 0:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="The client's log could not be read from this account.",
+        )
+
+    found = _CLIENT_DECODER.findall(probe.stdout)
+    if not found:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="No stream has run since the client last started.",
+        )
+
+    renderer, codec = found[-1]
+    if codec.endswith(("_v4l2m2m", "_v4l2request")):
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail=f"{codec} via {renderer}.",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail=(
+            f"The last stream decoded with {codec} on the CPU. Streaming still works and "
+            "looks fine, which is why this is easy to miss."
+        ),
+    )
+
+
 #: Additional questions asked only of a node declared for gaming, on top of
 #: everything every other node already answers. A node that never said
 #: `--capabilities=inference,gaming` gets none of these — the same reasoning
@@ -1421,6 +1522,14 @@ GAMING_CHECKS = (
     check_render_session,
     check_sunshine_paired,
     check_stream_encoder,
+)
+
+#: Asked only of a node declared for `client` - the television's end of the
+#: link `GAMING_CHECKS` describes from the other side.
+CLIENT_CHECKS = (
+    check_client_installed,
+    check_stream_host,
+    check_client_decoder,
 )
 
 
@@ -1445,12 +1554,23 @@ HEAD_CHECKS = (
 #: commits, opens no pull requests, and publishes no web app. Answering those
 #: anyway would fill a node's report with failures that are all correct and
 #: none actionable, which is the fastest way to teach someone to skim it.
+#: What every node answers, whatever it was installed to do. Deliberately
+#: small: a node is a machine that can be reached, kept up to date and asked
+#: what it is. Everything else is a capability and has its own list.
 NODE_CHECKS = (
     check_deployment,
     check_home_directory,
+    check_head,
+)
+
+#: Asked only of a node declared for `inference`. These used to be in
+#: `NODE_CHECKS`, which meant a client node with no GPU and no model server
+#: reported a missing card and a dead endpoint - both correct, neither
+#: actionable, which is the fastest way to teach someone to skim the one
+#: report that matters.
+INFERENCE_CHECKS = (
     check_gpu,
     check_inference_endpoint,
-    check_head,
 )
 
 
@@ -1462,7 +1582,14 @@ def checks_for_this_machine() -> tuple[Callable[[], Check], ...]:
     warning about worker nodes on every machine that has never wanted one.
     """
     if is_node():
-        return (*NODE_CHECKS, *GAMING_CHECKS) if is_gaming_node() else NODE_CHECKS
+        checks = NODE_CHECKS
+        if is_inference_node():
+            checks = (*checks, *INFERENCE_CHECKS)
+        if is_gaming_node():
+            checks = (*checks, *GAMING_CHECKS)
+        if is_client_node():
+            checks = (*checks, *CLIENT_CHECKS)
+        return checks
     if default_agent_backend() == INFERENCE_BACKEND:
         return (*HEAD_CHECKS, check_inference_node)
     return HEAD_CHECKS

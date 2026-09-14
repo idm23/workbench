@@ -68,6 +68,7 @@ from workbench.config import (
     run_unit_prefix,
     service_account,
     service_name,
+    stream_host_marker,
     vapid_private_key,
 )
 from workbench.logs import BOLD, YELLOW, paint
@@ -493,6 +494,15 @@ def record_head(url: str, account: pwd.struct_passwd) -> None:
     marker.write_text(f"{url}\n", encoding="utf-8")
     os.chown(marker, account.pw_uid, account.pw_gid)
     info(f"reporting to the head at {url}")
+
+
+def record_stream_host(host: str, account: pwd.struct_passwd) -> None:
+    """Write down which machine this client streams from. See `record_role`."""
+    marker = stream_host_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{host}\n", encoding="utf-8")
+    os.chown(marker, account.pw_uid, account.pw_gid)
+    info(f"streaming from {host}")
 
 
 def record_gaming_user(name: str, account: pwd.struct_passwd) -> None:

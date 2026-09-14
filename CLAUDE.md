@@ -445,10 +445,37 @@ the database, the worktrees, the runs. A **node** lends the head something it do
 have; today that is a GPU serving an OpenAI-compatible endpoint for `agents/local.py`,
 and the shape is meant to hold when the next machine is good at something else.
 
-A node runs no web app, holds no database, and executes no runs. It answers
-`/v1/chat/completions` and keeps itself up to date, and that is deliberately the whole of
-it: the smaller the node's job, the less there is to go wrong on a machine nobody is
-looking at.
+A node runs no web app, holds no database, and executes no runs. It keeps itself up to
+date and answers what it is, and that is deliberately the whole of it: the smaller the
+node's job, the less there is to go wrong on a machine nobody is looking at.
+
+**A node is a minimum, and every job it does is a capability.** `--role=node` on its own
+installs a role marker, a head to report to, units and a deploy timer — the smallest
+machine that can be reached and updated. `inference` adds Ollama and the model;
+`gaming` adds Steam, Sunshine, the render surface and the switch; `client` adds a
+Moonlight unit that puts a stream on a screen. They compose, and they are the only thing
+that decides what gets installed and what the doctor asks about.
+
+That split was forced rather than chosen. The model server used to install
+unconditionally, which was correct while every node was an inference node and wrong the
+moment one was not: an arm64 Raspberry Pi whose entire job is to *display* a stream was
+still handed a CUDA-shaped install it could not use, and then asked by the doctor about a
+missing GPU and a dead endpoint — both true, neither actionable, which is the fastest way
+to teach someone to skim the one report that matters. `DEFAULT_CAPABILITIES` stays
+`inference` purely for compatibility: every node installed before this existed serves
+models and must keep doing exactly that.
+
+**A client node is the television's end of a gaming node's link**, and the one thing it
+needs is to *not* have a desktop. It renders with `SDL_VIDEODRIVER=kmsdrm`, straight to
+the display; under a compositor it cannot take DRM master, so the hardware decoder it
+already reaches for fails and it either falls back to the CPU or renders black while
+reporting success. Both happened here, on a Pi 4 whose H.264 block decodes 1080p at 83fps
+perfectly well when asked directly. There is no setting that fixes it — `moonlight-qt
+stream` ignores both `--video-decoder` and its own config file's
+`videodecoderselection` — so the install targets a Lite image and the absence of a
+compositor *is* the mechanism. Worth knowing before concluding the hardware is at fault:
+on that machine four CPU cores decode 1080p faster than the dedicated block does
+(119fps against 83), so hardware decode buys power and heat, not frames.
 
 **The role is one recorded fact, and three things read it.** `install_node` writes
 `data/role`, `config.role()` reads it, and `install.units()`, `deploy.rebuild_and_restart()`
@@ -1036,3 +1063,19 @@ Wanted, not urgent. Grouped because they are one change to how promotion works.
   the same "start a run" code path.
 - Cross-project "what should I work on next" view.
 - Optional GitHub Issues sync.
+- **Let a client node's fan run only when it needs to.** `homebox-node-2` has a fan wired
+  to a GPIO header pin (believed physical pin 8 / GPIO 14, unverified) and it runs
+  constantly, which is loud in a living room — the one place a machine's noise is the
+  whole point of noticing.
+
+  The likely answer needs no code at all: `dtoverlay=gpio-fan,gpiopin=<n>,temp=<millidegrees>`
+  in `config.txt` hands the fan to the kernel's thermal governor, which runs it above a
+  threshold and stops it below. That would make it a line `install_client()` writes and a
+  question the doctor can ask, rather than something anyone manages by hand.
+
+  **Confirm the pin against the running machine before writing anything.** A wrong GPIO
+  here fails in one of two silent ways — a fan that never runs on a board that then
+  throttles, or one that never stops and looks exactly like today. Physical pin 8 *is*
+  GPIO 14 (UART TXD), so the recollection is self-consistent, but "self-consistent" is not
+  "measured", and GPIO 14 being the UART transmit line is worth noticing before claiming
+  it: if the fan is really there, enabling the serial console would fight it.
