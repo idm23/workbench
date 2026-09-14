@@ -1063,3 +1063,19 @@ Wanted, not urgent. Grouped because they are one change to how promotion works.
   the same "start a run" code path.
 - Cross-project "what should I work on next" view.
 - Optional GitHub Issues sync.
+- **Let a client node's fan run only when it needs to.** `homebox-node-2` has a fan wired
+  to a GPIO header pin (believed physical pin 8 / GPIO 14, unverified) and it runs
+  constantly, which is loud in a living room — the one place a machine's noise is the
+  whole point of noticing.
+
+  The likely answer needs no code at all: `dtoverlay=gpio-fan,gpiopin=<n>,temp=<millidegrees>`
+  in `config.txt` hands the fan to the kernel's thermal governor, which runs it above a
+  threshold and stops it below. That would make it a line `install_client()` writes and a
+  question the doctor can ask, rather than something anyone manages by hand.
+
+  **Confirm the pin against the running machine before writing anything.** A wrong GPIO
+  here fails in one of two silent ways — a fan that never runs on a board that then
+  throttles, or one that never stops and looks exactly like today. Physical pin 8 *is*
+  GPIO 14 (UART TXD), so the recollection is self-consistent, but "self-consistent" is not
+  "measured", and GPIO 14 being the UART transmit line is worth noticing before claiming
+  it: if the fan is really there, enabling the serial console would fight it.
