@@ -1076,7 +1076,20 @@ CLIENT_PACKAGES = (
 #: Groups the account running the client needs: `video` and `render` to open
 #: the DRM devices it renders through, `input` for the virtual gamepad it
 #: presents, `audio` for the HDMI sink.
-CLIENT_GROUPS = ("video", "render", "input", "audio")
+#:
+#: `systemd-journal` is for the *doctor* rather than the unit, and is the
+#: difference between a check and a decoration. `check_client_decoder` reads
+#: back which decoder the last stream chose, and the doctor runs as the
+#: service account — which without this cannot open the unit's journal at all
+#: and so reports `unknown` forever, whatever the machine is actually doing.
+#: A check that can never answer is worse than no check, because it occupies
+#: the space where a real answer would go.
+#:
+#: Granted only here, inside a client install, and worth stating plainly: it
+#: lets this account read every journal on the machine, not just its own unit.
+#: On a client node that is a box whose whole job is to display a stream; it
+#: would deserve more thought on a head, which is why it is not granted there.
+CLIENT_GROUPS = ("video", "render", "input", "audio", "systemd-journal")
 
 CLIENT_UNIT_NAME = "workbench-client.service"
 

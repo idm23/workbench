@@ -964,6 +964,13 @@ def test_the_client_unit_grants_the_groups_the_display_needs(monkeypatch):
         assert group in unit
 
 
+def test_the_client_grants_journal_access_so_its_doctor_check_can_answer(monkeypatch):
+    """Without `systemd-journal` the service account cannot open the unit's
+    journal, so `check_client_decoder` reports `unknown` forever whatever the
+    machine is doing - a check occupying the space where an answer would go."""
+    assert "systemd-journal" in install_node.CLIENT_GROUPS
+
+
 def test_the_stream_host_argument_is_parsed_in_both_spellings(monkeypatch):
     for argv in (["--stream-host", "node-1"], ["--stream-host=node-1"]):
         monkeypatch.setattr(install_node.sys, "argv", ["install_node.py", *argv])
