@@ -276,28 +276,58 @@ def wait_for_endpoint() -> None:
 
 
 def report_success() -> None:
-    """What this node now is, and the one thing a person still has to do."""
-    logger.info("\n%s", paint(BOLD, f"This machine is a Workbench node, serving {local_model()}"))
-    logger.info(
-        "%s",
-        f"""
-It serves {inference_base_url()} and updates itself from '{deploy_branch()}'
-every {DEPLOY_INTERVAL}. Nothing needs running here again.
+    """What this node now is, and the one thing a person still has to do.
 
-Point a head at it — on the head, in /etc/workbench/env:
+    Written per capability rather than as one story, because the one story used
+    to be the inference one: a client node finished its install by announcing
+    that it was "serving qwen3:8b" at a loopback endpoint nothing listened on,
+    and telling the reader to point a head at it. Every word of that was false,
+    and the install had just printed it in bold.
+    """
+    doing = []
+    if is_inference_node():
+        doing.append(f"serving {local_model()}")
+    if is_gaming_node():
+        doing.append("lending its GPU to a screen")
+    if is_client_node():
+        doing.append("streaming to a screen")
+    summary = ", ".join(doing) if doing else "connected and updating itself"
+    logger.info("\n%s", paint(BOLD, f"This machine is a Workbench node, {summary}"))
+
+    lines = [
+        f"\nIt updates itself from '{deploy_branch()}' every {DEPLOY_INTERVAL}.",
+    ]
+
+    if is_inference_node():
+        lines.append(
+            f"""
+It serves {inference_base_url()}. Point a head at it — on the head,
+in /etc/workbench/env:
 
     WORKBENCH_AGENT_BACKEND=local
     WORKBENCH_INFERENCE_URL=http://{_lan_address() or "this-machine"}:11434/v1
 
-Useful commands:
-
-    {_venv_bin("python")} -m workbench.doctor   # re-check everything below
-
     systemctl status ollama
     journalctl -u ollama -f
-    ollama ps                                    # what is loaded right now
-""",
+    ollama ps                                    # what is loaded right now"""
+        )
+
+    if is_client_node():
+        lines.append(
+            f"""
+It streams from {stream_host() or "nothing yet"}. The unit is installed but not
+started: pair this client first, at https://{stream_host() or "<the host>"}:47990.
+
+    systemctl status {CLIENT_UNIT_NAME}
+    journalctl -u {CLIENT_UNIT_NAME} -f"""
+        )
+
+    lines.append(
+        f"""
+    {_venv_bin("python")} -m workbench.doctor   # re-check everything below
+"""
     )
+    logger.info("%s", "\n".join(lines))
 
 
 #: Addresses to leave out of what a node advertises. Docker's bridge is
@@ -1050,6 +1080,17 @@ CLIENT_GROUPS = ("video", "render", "input", "audio")
 
 CLIENT_UNIT_NAME = "workbench-client.service"
 
+#: Moonlight's own Cloudsmith apt repository, the same shape already proven for
+#: Sunshine's. Needed because `moonlight-qt` is in no Debian suite at all -
+#: `apt-cache search moonlight` on a fresh Raspberry Pi OS Trixie returns
+#: nothing, and the install died on `E: Unable to locate package`. The previous
+#: Pi had it only because this repository had been added there by hand once,
+#: which is exactly the undocumented manual step the reproducibility rule
+#: exists to prevent.
+MOONLIGHT_CLOUDSMITH_SETUP = (
+    "https://dl.cloudsmith.io/public/moonlight-game-streaming/moonlight-qt/cfg/setup/bash.deb.sh"
+)
+
 
 def _client_unit(host: str, account: pwd.struct_passwd) -> str:
     """The unit that streams `host` onto this machine's screen.
@@ -1106,6 +1147,17 @@ def install_client() -> bool:
 
     missing = [name for name in CLIENT_PACKAGES if not _package_installed(name)]
     if missing:
+        if not _package_installed("moonlight-qt"):
+            step("Adding Moonlight's apt repository")
+            try:
+                run(
+                    ["sh", "-c", f"curl -1sLf {MOONLIGHT_CLOUDSMITH_SETUP} | sudo -E bash"],
+                    stream=True,
+                )
+            except InstallError as error:
+                warn(f"could not add Moonlight's apt repository: {error}")
+                return False
+
         step(f"Installing {', '.join(missing)}")
         try:
             run(["apt-get", "install", "-y", *missing], privileged=True, stream=True)
