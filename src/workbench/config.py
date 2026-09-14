@@ -172,10 +172,16 @@ def head_url() -> str | None:
 #: this same word reached from either side.
 INFERENCE = "inference"
 GAMING = "gaming"
-CAPABILITIES = (INFERENCE, GAMING)
+CLIENT = "client"
+CAPABILITIES = (INFERENCE, GAMING, CLIENT)
 
 #: What a node offers when nobody said. Every node installed before this file
 #: existed serves models and nothing else, and must keep doing exactly that.
+#:
+#: Note this is a *compatibility* default, not a statement that inference is
+#: what nodes are for. `--role=node` on its own installs the smallest thing
+#: that can be reached and kept up to date; every job beyond that is a
+#: capability. See `install_node.main()`.
 DEFAULT_CAPABILITIES = (INFERENCE,)
 
 
@@ -202,6 +208,30 @@ def gaming_user() -> str | None:
     return configured or None
 
 
+def stream_host_marker() -> Path:
+    """The file recording which machine a client node streams from."""
+    return data_dir() / "stream-host"
+
+
+def stream_host() -> str | None:
+    """The node this client puts on its screen, or None if nobody said.
+
+    Recorded rather than discovered, for now. A client could ask the head which
+    node offers `gaming` and stream from that, and probably should once there
+    is more than one — but "ask a second machine which third machine to talk
+    to" is a lot of moving parts to put between a television and a picture,
+    and every one of them is a way for the screen to stay black. An address in
+    a file is a thing a person can read and a script can set.
+    """
+    configured = os.environ.get("WORKBENCH_STREAM_HOST", "").strip()
+    if not configured:
+        try:
+            configured = stream_host_marker().read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return configured or None
+
+
 def is_gaming_node() -> bool:
     """Whether this machine was installed to drive a screen as well as a model.
 
@@ -210,6 +240,29 @@ def is_gaming_node() -> bool:
     this is what installs the switch that stops Workbench dispatching here.
     """
     return is_node() and GAMING in declared_capabilities()
+
+
+def is_inference_node() -> bool:
+    """Whether this machine was installed to serve a model.
+
+    Declared like the others, and asked in the one place it decides something:
+    a node without this capability installs no Ollama, pulls no weights, and
+    is never waited on for an endpoint that is never coming. Before this
+    existed every node installed the model server whether or not it would ever
+    answer — which on a Raspberry Pi meant an arm64 machine being handed a
+    CUDA-shaped install it could not use.
+    """
+    return is_node() and INFERENCE in declared_capabilities()
+
+
+def is_client_node() -> bool:
+    """Whether this machine was installed to put a picture in front of a person.
+
+    The mirror of `is_gaming_node()`: that one lends a GPU *to* a television,
+    this one is the television's end of the same link. It lends the head a
+    screen in a room, which is as real a thing to lend as a card is.
+    """
+    return is_node() and CLIENT in declared_capabilities()
 
 
 #: How a gaming node gives Steam and Sunshine something to render into. Named

@@ -836,9 +836,22 @@ def test_the_encoder_check_says_nothing_before_a_first_stream(monkeypatch, tmp_p
     assert doctor.check_stream_encoder().state is CheckState.UNKNOWN
 
 
-def test_a_gaming_node_gets_the_gaming_checks_too(monkeypatch):
+def _declare(monkeypatch, *, inference=False, gaming=False, client=False):
+    """Say what this node was installed to do, for the selection tests below.
+
+    All three are patched every time, deliberately. Patching only the one a
+    test cares about leaves the others reading the real markers, which is how
+    two of these tests used to pass for a reason that had nothing to do with
+    what they claimed to assert.
+    """
     monkeypatch.setattr(doctor, "is_node", lambda: True)
-    monkeypatch.setattr(doctor, "is_gaming_node", lambda: True)
+    monkeypatch.setattr(doctor, "is_inference_node", lambda: inference)
+    monkeypatch.setattr(doctor, "is_gaming_node", lambda: gaming)
+    monkeypatch.setattr(doctor, "is_client_node", lambda: client)
+
+
+def test_a_gaming_node_gets_the_gaming_checks_too(monkeypatch):
+    _declare(monkeypatch, inference=True, gaming=True)
 
     checks = doctor.checks_for_this_machine()
 
@@ -847,9 +860,96 @@ def test_a_gaming_node_gets_the_gaming_checks_too(monkeypatch):
 
 
 def test_a_plain_node_does_not_get_the_gaming_checks(monkeypatch):
-    monkeypatch.setattr(doctor, "is_node", lambda: True)
-    monkeypatch.setattr(doctor, "is_gaming_node", lambda: False)
+    _declare(monkeypatch, inference=True)
 
     checks = doctor.checks_for_this_machine()
 
-    assert checks == doctor.NODE_CHECKS
+    assert set(doctor.GAMING_CHECKS).isdisjoint(checks)
+    assert set(doctor.NODE_CHECKS) <= set(checks)
+
+
+def test_a_node_that_declares_nothing_answers_only_the_base_questions(monkeypatch):
+    """`--role=node` on its own is the smallest machine that can be reached and
+    kept up to date. It has no GPU to report on and no endpoint to probe."""
+    _declare(monkeypatch)
+
+    assert doctor.checks_for_this_machine() == doctor.NODE_CHECKS
+
+
+def test_a_client_node_is_not_asked_about_a_gpu_or_a_model_server(monkeypatch):
+    """The bug this pins down: these checks used to live in `NODE_CHECKS`, so a
+    Raspberry Pi whose job is to display a stream reported a missing card and a
+    dead inference endpoint. Both true, neither actionable, and noise is how a
+    report stops being read."""
+    _declare(monkeypatch, client=True)
+
+    checks = doctor.checks_for_this_machine()
+
+    assert set(doctor.CLIENT_CHECKS) <= set(checks)
+    assert doctor.check_gpu not in checks
+    assert doctor.check_inference_endpoint not in checks
+
+
+def test_an_inference_node_is_asked_about_its_gpu(monkeypatch):
+    _declare(monkeypatch, inference=True)
+
+    checks = doctor.checks_for_this_machine()
+
+    assert set(doctor.INFERENCE_CHECKS) <= set(checks)
+
+
+def test_one_machine_can_be_asked_every_list(monkeypatch):
+    """Capabilities compose. A laptop that serves models, lends its GPU to a
+    television and shows a stream is a legitimate, if unlikely, machine."""
+    _declare(monkeypatch, inference=True, gaming=True, client=True)
+
+    checks = doctor.checks_for_this_machine()
+
+    for group in (
+        doctor.NODE_CHECKS,
+        doctor.INFERENCE_CHECKS,
+        doctor.GAMING_CHECKS,
+        doctor.CLIENT_CHECKS,
+    ):
+        assert set(group) <= set(checks)
+
+
+def test_the_client_decoder_check_catches_a_silent_software_fallback(monkeypatch):
+    """The failure it exists for showed no error: the client picked the
+    hardware decoder, could not take DRM master because a compositor held it,
+    and rendered black while reporting success."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/moonlight-qt")
+
+    class Ok:
+        returncode = 0
+        stdout = "Chose SdlRenderer for codec h264 due to compatible pixel format\n"
+        stderr = ""
+
+    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Ok())
+
+    check = doctor.check_client_decoder()
+    assert check.state is CheckState.WARN
+    assert "CPU" in check.detail
+
+
+def test_the_client_decoder_check_is_happy_about_the_hardware_block(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/moonlight-qt")
+
+    class Ok:
+        returncode = 0
+        stdout = "Chose DrmRenderer for codec h264_v4l2m2m due to preferred pixel format\n"
+        stderr = ""
+
+    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Ok())
+
+    check = doctor.check_client_decoder()
+    assert check.state is CheckState.OK
+    assert "h264_v4l2m2m" in check.detail
+
+
+def test_a_client_with_no_stream_host_says_so(monkeypatch):
+    monkeypatch.setattr(doctor, "stream_host", lambda: None)
+
+    check = doctor.check_stream_host()
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "--stream-host" in check.fix
