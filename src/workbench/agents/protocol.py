@@ -269,6 +269,26 @@ class Backend(Protocol):
         """The identifier stored in `runs.backend`. Matches the registry key."""
         ...
 
+    @property
+    def wants_endpoint(self) -> bool:
+        """Whether an inference endpoint means anything to this backend.
+
+        Declared by the backend rather than decided by the runner, so that
+        adding a third backend is a property on its class and not another
+        branch somewhere above the seam.
+
+        False for anything talking to a hosted service — which is what
+        `AgentRequest.endpoint`'s own contract already said ("None means you
+        decide, which is what every backend that talks to a hosted service
+        will always get") and what the runner did not implement. It chose a
+        worker node for *every* run, so a Claude run was handed a worker's
+        Ollama URL and its model name and died on `model_not_found` before it
+        reached the first turn. The code disagreed with its own documented
+        contract, and the run's event log recorded both halves of the
+        contradiction one line apart.
+        """
+        ...
+
     def run(self, request: AgentRequest) -> AgentStream:
         """Drive one attempt, yielding events as they arrive.
 
