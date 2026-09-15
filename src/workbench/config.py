@@ -232,6 +232,48 @@ def stream_host() -> str | None:
     return configured or None
 
 
+#: Where a client node's fan is wired, and when it should run. Recorded rather
+#: than detected: which header pin a fan sits on is a fact about one machine's
+#: wiring that nothing on the machine reports. `homebox-node-2` has it on
+#: GPIO14 (header pin 8), which was *measured* rather than assumed — under an
+#: identical load the board reached 82°C and climbing with that pin held low,
+#: and plateaued at ~63°C with it high.
+#:
+#: The threshold is a default rather than a decision: 60°C sits above idle
+#: (~33°C) and above a streaming workload (~42°C), so the fan stays silent in
+#: ordinary use and spins only when something is actually working the board.
+DEFAULT_FAN_TEMP_MILLICELSIUS = 60000
+
+
+def fan_gpio_marker() -> Path:
+    """The file recording which GPIO a client node's fan is wired to."""
+    return data_dir() / "fan-gpio"
+
+
+def fan_gpio() -> int | None:
+    """The GPIO pin controlling this machine's fan, or None if nobody said.
+
+    None means "leave the fan alone", which is the right default: a node with
+    no fan, or one wired straight to 5V with no control line, must not have a
+    `gpio-fan` overlay written for it. An overlay naming a pin that controls
+    nothing is the worst outcome available — it looks like thermal management
+    and silently is not.
+    """
+    configured = os.environ.get("WORKBENCH_FAN_GPIO", "").strip()
+    if not configured:
+        try:
+            configured = fan_gpio_marker().read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    if not configured:
+        return None
+    try:
+        return int(configured)
+    except ValueError:
+        logger.warning("Fan GPIO %r is not a number; ignoring it.", configured)
+        return None
+
+
 def is_gaming_node() -> bool:
     """Whether this machine was installed to drive a screen as well as a model.
 
