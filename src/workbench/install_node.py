@@ -38,10 +38,12 @@ from pathlib import Path
 from workbench import render
 from workbench.config import (
     CAPABILITIES,
+    DEFAULT_FAN_TEMP_MILLICELSIUS,
     INFERENCE,
     ROLE_NODE,
     declared_capabilities,
     deploy_branch,
+    fan_gpio,
     gaming_unit_name,
     gaming_user,
     head_url,
@@ -73,6 +75,7 @@ from workbench.install import (
     install_units,
     needs_relocation,
     record_capabilities,
+    record_fan_gpio,
     record_gaming_user,
     record_head,
     record_role,
@@ -492,6 +495,28 @@ def _stream_host_argument() -> str | None:
         if argument == "--stream-host" and index + 1 < len(argv):
             return argv[index + 1].strip().rstrip("/") or None
     return None
+
+
+def _fan_gpio_argument() -> int | None:
+    """The `--fan-gpio` this install was given, or None if it said nothing.
+
+    Same hand-parse and the same "None means leave it alone" rule as
+    `--head`: a re-install that does not mention it must leave a machine's fan
+    exactly as it was.
+    """
+    argv = sys.argv[1:]
+    raw: str | None = None
+    for index, argument in enumerate(argv):
+        if argument.startswith("--fan-gpio="):
+            raw = argument.split("=", 1)[1].strip()
+        elif argument == "--fan-gpio" and index + 1 < len(argv):
+            raw = argv[index + 1].strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as error:
+        raise InstallError(f"--fan-gpio wants a pin number, not {raw!r}.") from error
 
 
 def _capabilities_argument() -> list[str] | None:
@@ -1270,6 +1295,62 @@ def prefer_hdmi_audio(account: pwd.struct_passwd) -> bool:
     return False
 
 
+#: Where the firmware reads its device tree overlays from.
+BOOT_CONFIG = Path("/boot/firmware/config.txt")
+
+#: Marks the block this installer owns, so it can be replaced rather than
+#: appended to on every re-install.
+FAN_BLOCK_START = "# --- workbench: thermal fan control ---"
+FAN_BLOCK_END = "# --- end workbench fan control ---"
+
+
+def _fan_block(pin: int, temp: int) -> str:
+    return f"""{FAN_BLOCK_START}
+# Hands the fan to the kernel's thermal governor, so it runs only above the
+# threshold rather than whenever the machine has power. Below it the driver
+# holds the pin low and the fan is silent.
+#
+# The pin is a fact about this machine's wiring and is recorded, never guessed:
+# an overlay naming a pin that controls nothing looks exactly like working
+# thermal management and silently is not.
+dtoverlay=gpio-fan,gpiopin={pin},temp={temp}
+{FAN_BLOCK_END}"""
+
+
+def configure_fan() -> bool:
+    """Put this machine's fan under thermal control, if one was declared.
+
+    Returns whether `config.txt` changed — which the caller reports, because a
+    device tree overlay only takes effect at boot and an install that quietly
+    did nothing until the next reboot would be indistinguishable from one that
+    failed.
+    """
+    pin = fan_gpio()
+    if pin is None:
+        return False
+    if not BOOT_CONFIG.is_file():
+        warn(f"no {BOOT_CONFIG}; the fan was left alone.")
+        return False
+
+    existing = BOOT_CONFIG.read_text()
+    wanted = _fan_block(pin, DEFAULT_FAN_TEMP_MILLICELSIUS)
+    if FAN_BLOCK_START in existing:
+        head, _, rest = existing.partition(FAN_BLOCK_START)
+        _, _, tail = rest.partition(FAN_BLOCK_END)
+        updated = f"{head}{wanted}{tail}"
+    else:
+        updated = existing.rstrip("\n") + "\n\n" + wanted + "\n"
+
+    if updated == existing:
+        info(f"fan already under thermal control on GPIO{pin}")
+        return False
+
+    write_privileged(BOOT_CONFIG, updated, staged_as="config.txt")
+    info(f"fan on GPIO{pin} will run only above {DEFAULT_FAN_TEMP_MILLICELSIUS // 1000}C")
+    warn("a reboot is needed before the fan overlay takes effect.")
+    return True
+
+
 def install_client() -> bool:
     """Everything a client node needs to show a stream.
 
@@ -1324,6 +1405,8 @@ def install_client() -> bool:
         warn(f"could not start audio: {(audio.stderr or audio.stdout or '').strip()}")
     else:
         prefer_hdmi_audio(account)
+
+    configure_fan()
 
     host = stream_host()
     if not host:
@@ -1411,6 +1494,8 @@ def main() -> int:
             record_gaming_user(player, account)
         if is_client_node() and (source := _stream_host_argument()) is not None:
             record_stream_host(source, account)
+        if (pin := _fan_gpio_argument()) is not None:
+            record_fan_gpio(pin, account)
 
         # Everything below is a *capability*. `--role=node` on its own is the
         # smallest machine that can be reached, kept up to date and asked what

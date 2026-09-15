@@ -672,6 +672,12 @@ class ClaudeBackend:
     """
 
     @property
+    def wants_endpoint(self) -> bool:
+        """A hosted service: there is no endpoint to choose, and a worker node's
+        URL means nothing here. See `Backend.wants_endpoint`."""
+        return False
+
+    @property
     def name(self) -> str:
         return BACKEND_NAME
 

@@ -53,6 +53,7 @@ from workbench.config import (
     deploy_branch,
     deploy_unit_name,
     deployment_root,
+    fan_gpio_marker,
     gaming_unit_name,
     gaming_user,
     gaming_user_marker,
@@ -503,6 +504,15 @@ def record_stream_host(host: str, account: pwd.struct_passwd) -> None:
     marker.write_text(f"{host}\n", encoding="utf-8")
     os.chown(marker, account.pw_uid, account.pw_gid)
     info(f"streaming from {host}")
+
+
+def record_fan_gpio(pin: int, account: pwd.struct_passwd) -> None:
+    """Write down which GPIO this machine's fan is on. See `record_role`."""
+    marker = fan_gpio_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{pin}\n", encoding="utf-8")
+    os.chown(marker, account.pw_uid, account.pw_gid)
+    info(f"fan is on GPIO{pin}")
 
 
 def record_gaming_user(name: str, account: pwd.struct_passwd) -> None:

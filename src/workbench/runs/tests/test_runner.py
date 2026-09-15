@@ -599,6 +599,8 @@ def test_an_unavailable_agent_is_a_failure_with_no_diffstat(db, run, checkout, m
 
 def test_a_backend_that_yields_no_outcome_still_ends_the_run(db, run, checkout, monkeypatch):
     class Silent:
+        wants_endpoint = False
+
         name = "silent"
 
         async def run(self, request: AgentRequest):
@@ -616,6 +618,8 @@ def test_a_backend_that_raises_does_not_leave_the_run_running(db, run, checkout,
     """The protocol says it should not. The runner cannot rely on that."""
 
     class Exploding:
+        wants_endpoint = False
+
         name = "exploding"
 
         async def run(self, request: AgentRequest):
@@ -658,6 +662,8 @@ def test_a_signalled_run_is_cancelled_rather_than_lost(db, run, checkout, monkey
     """A deploy restarting the service is the ordinary cause of this."""
 
     class Slow:
+        wants_endpoint = False
+
         name = "slow"
 
         async def run(self, request: AgentRequest):
@@ -676,6 +682,8 @@ def test_a_signalled_run_is_cancelled_rather_than_lost(db, run, checkout, monkey
 
 def test_work_done_before_the_signal_is_still_in_the_log(db, run, checkout, monkeypatch):
     class Slow:
+        wants_endpoint = False
+
         name = "slow"
 
         async def run(self, request: AgentRequest):
@@ -881,6 +889,8 @@ def test_watch_for_input_does_not_miss_a_row_committed_near_the_idle_deadline(
 
 
 class InputCapturingBackend:
+    wants_endpoint = False
+
     """A fake that actually drains `request.inputs`, unlike the usual
     `FakeBackend`, which is what makes it possible to prove a typed message
     reaches the backend at all rather than just that the plumbing compiles."""
