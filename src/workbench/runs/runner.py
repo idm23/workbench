@@ -188,7 +188,7 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
     # A conversation runs on the same backend as anything else, so it gets the
     # same node. Left out, a project conversation on the local backend would be
     # the one path that ignored the machine holding the weights.
-    node = _endpoint(db, run)
+    node = _endpoint(db, run) if backend.wants_endpoint else None
 
     if task is not None:
         # Continuing one task's finished run. It must run in *that* worktree:
@@ -372,7 +372,10 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     if isinstance(backend, UnknownBackend):
         return NotPrepared(backend.message)
 
-    node = _endpoint(db, run)
+    # Only when the backend has any use for one — see `Backend.wants_endpoint`.
+    # Asking unconditionally is what handed a Claude run a worker node's Ollama
+    # URL and its model name, and killed it on `model_not_found`.
+    node = _endpoint(db, run) if backend.wants_endpoint else None
     return Prepared(
         backend=backend,
         request=AgentRequest(

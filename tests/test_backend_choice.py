@@ -228,3 +228,35 @@ def test_continuing_a_run_never_moves_it(db, project, monkeypatch):
 
     assert isinstance(continued, Run)
     assert continued.backend == "claude"
+
+
+def test_a_hosted_backend_wants_no_worker_node():
+    """The bug this pins down killed every Claude run on a machine that had a
+    worker node registered.
+
+    The runner chose a node for *every* run and passed its URL and model into
+    the request, so a Claude run was handed `http://<node>:11434/v1` and
+    `qwen3:8b` and died on `model_not_found` before its first turn. The run's
+    own event log carried both halves of the contradiction one line apart:
+    "Backend claude, billing subscription" directly above "Serving this run
+    from homebox-node-1 ... serving qwen3:8b".
+
+    `AgentRequest.endpoint` already documented the right answer - "None means
+    you decide, which is what every backend that talks to a hosted service will
+    always get" - so the code disagreed with its own stated contract.
+    """
+    from workbench.agents.registry import UnknownBackend, get_backend
+
+    backend = get_backend("claude")
+    assert not isinstance(backend, UnknownBackend)
+    assert backend.wants_endpoint is False
+
+
+def test_the_local_backend_wants_one():
+    """The whole point of that backend: it talks to whichever
+    OpenAI-compatible server the runner picked, possibly on another machine."""
+    from workbench.agents.registry import UnknownBackend, get_backend
+
+    backend = get_backend("local")
+    assert not isinstance(backend, UnknownBackend)
+    assert backend.wants_endpoint is True

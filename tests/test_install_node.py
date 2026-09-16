@@ -958,6 +958,87 @@ def test_the_client_unit_renders_without_a_compositor(monkeypatch):
     assert "WantedBy=multi-user.target" in unit
 
 
+def test_no_fan_gpio_means_no_overlay_is_written(monkeypatch, tmp_path):
+    """The most important case. A node with no fan, or one wired straight to
+    5V with no control line, must not get a `gpio-fan` overlay: an overlay
+    naming a pin that controls nothing looks exactly like working thermal
+    management and silently is not."""
+    monkeypatch.setattr(install_node, "fan_gpio", lambda: None)
+    written = []
+    monkeypatch.setattr(install_node, "write_privileged", lambda *a, **k: written.append(a))
+
+    assert install_node.configure_fan() is False
+    assert written == []
+
+
+def test_the_fan_overlay_names_the_recorded_pin(monkeypatch, tmp_path):
+    config = tmp_path / "config.txt"
+    config.write_text("dtparam=audio=on\n")
+    monkeypatch.setattr(install_node, "fan_gpio", lambda: 14)
+    monkeypatch.setattr(install_node, "BOOT_CONFIG", config)
+    written = {}
+    monkeypatch.setattr(
+        install_node, "write_privileged", lambda target, content, **k: written.update(body=content)
+    )
+
+    assert install_node.configure_fan() is True
+    assert "dtoverlay=gpio-fan,gpiopin=14,temp=60000" in written["body"]
+    # Whatever was already there is kept.
+    assert "dtparam=audio=on" in written["body"]
+
+
+def test_rewriting_the_fan_overlay_replaces_rather_than_appends(monkeypatch, tmp_path):
+    """A re-install must converge. Appending would stack a second overlay per
+    run, and two gpio-fan overlays on one pin is not twice the cooling."""
+    config = tmp_path / "config.txt"
+    monkeypatch.setattr(install_node, "BOOT_CONFIG", config)
+    monkeypatch.setattr(install_node, "fan_gpio", lambda: 14)
+
+    body = {}
+    monkeypatch.setattr(
+        install_node, "write_privileged", lambda target, content, **k: body.update(t=content)
+    )
+    config.write_text("dtparam=audio=on\n")
+    install_node.configure_fan()
+
+    # Feed its own output back in, then ask for a different pin.
+    config.write_text(body["t"])
+    monkeypatch.setattr(install_node, "fan_gpio", lambda: 18)
+    install_node.configure_fan()
+
+    assert body["t"].count("dtoverlay=gpio-fan") == 1
+    assert "gpiopin=18" in body["t"]
+    assert "gpiopin=14" not in body["t"]
+
+
+def test_an_unchanged_fan_overlay_writes_nothing(monkeypatch, tmp_path):
+    config = tmp_path / "config.txt"
+    monkeypatch.setattr(install_node, "BOOT_CONFIG", config)
+    monkeypatch.setattr(install_node, "fan_gpio", lambda: 14)
+    config.write_text(
+        "dtparam=audio=on\n\n"
+        + install_node._fan_block(14, install_node.DEFAULT_FAN_TEMP_MILLICELSIUS)
+        + "\n"
+    )
+    monkeypatch.setattr(
+        install_node, "write_privileged", lambda *a, **k: pytest.fail("nothing changed")
+    )
+
+    assert install_node.configure_fan() is False
+
+
+def test_the_fan_pin_argument_is_parsed_in_both_spellings(monkeypatch):
+    for argv in (["--fan-gpio", "14"], ["--fan-gpio=14"]):
+        monkeypatch.setattr(install_node.sys, "argv", ["install_node.py", *argv])
+        assert install_node._fan_gpio_argument() == 14
+
+
+def test_a_nonsense_fan_pin_is_refused_rather_than_ignored(monkeypatch):
+    monkeypatch.setattr(install_node.sys, "argv", ["install_node.py", "--fan-gpio=banana"])
+    with pytest.raises(install_node.InstallError):
+        install_node._fan_gpio_argument()
+
+
 def test_the_client_grants_journal_access_so_its_doctor_check_can_answer():
     """Without `systemd-journal` the service account cannot open the unit's
     journal, so the decoder check reports `unknown` forever whatever the

@@ -52,6 +52,7 @@ import httpx
 from workbench.config import (
     default_agent_backend,
     deployment_root,
+    fan_gpio,
     gaming_user,
     head_url,
     instance,
@@ -1554,6 +1555,63 @@ GAMING_CHECKS = (
     check_stream_encoder,
 )
 
+
+def check_fan_control() -> Check:
+    """Whether this machine's fan runs on temperature or runs constantly.
+
+    Reports rather than fixes, and says `unknown` rather than `ok` when no fan
+    was declared — a node with no fan, or one wired straight to 5V with no
+    control line, has nothing to manage and should not be told it is missing
+    something.
+
+    The failure worth catching is the *configured but wrong* one: an overlay
+    naming a pin that controls nothing looks exactly like working thermal
+    management. So this asks the kernel whether a cooling device actually
+    registered, not whether the line is in `config.txt`.
+    """
+    key = "fan-control"
+    title = "The fan runs only when it is needed"
+
+    pin = fan_gpio()
+    if pin is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="No fan GPIO recorded, so nothing here manages a fan.",
+        )
+
+    devices = sorted(Path("/sys/class/thermal").glob("cooling_device*"))
+    for device in devices:
+        try:
+            kind = (device / "type").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if kind != "gpio-fan":
+            continue
+        try:
+            current = (device / "cur_state").read_text(encoding="utf-8").strip()
+        except OSError:
+            current = "?"
+        spinning = "spinning now" if current not in {"0", "?"} else "idle"
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail=f"Thermal governor owns GPIO{pin}; the fan is {spinning}.",
+        )
+
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail=(
+            f"GPIO{pin} is recorded but no gpio-fan cooling device registered, so the fan "
+            "is not under thermal control. A reboot is needed after the overlay is written."
+        ),
+    )
+
+
 #: Asked only of a node declared for `client` - the television's end of the
 #: link `GAMING_CHECKS` describes from the other side.
 CLIENT_CHECKS = (
@@ -1561,6 +1619,7 @@ CLIENT_CHECKS = (
     check_stream_host,
     check_client_unit,
     check_client_audio,
+    check_fan_control,
 )
 
 
