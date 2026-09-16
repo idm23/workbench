@@ -51,6 +51,13 @@ class FakeBackend:
         self.requests: list[AgentRequest] = []
 
     @property
+    def wants_endpoint(self) -> bool:
+        """No: a fake talks to nothing, so a worker node's URL means nothing
+        to it. Matches the hosted backends, which is the case worth defaulting
+        to — see `Backend.wants_endpoint`."""
+        return False
+
+    @property
     def name(self) -> str:
         return self._name
 

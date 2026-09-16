@@ -480,6 +480,38 @@ sink on a Raspberry Pi is the 3.5mm analogue jack, so a client node plays perfec
 into a socket with nothing in it. Found twice, once per Pi, because nothing anywhere
 reports it — which is why the installer now sets HDMI explicitly and the doctor asks.
 
+**A client node's fan runs on temperature now, and the pin was measured rather than
+guessed.** `homebox-node-2`'s fan is on GPIO14 (header pin 8), active high — but the
+first evidence said otherwise. `pinctrl` reported GPIO14 as an *input*, and across the
+whole board only eight pins were outputs, every one a known system function (LEDs,
+Bluetooth and WiFi power, SD card power, reset). That looked conclusively like a fan
+wired straight to 5V with no control line at all, and the honest answer looked like
+"nothing to control".
+
+What settled it was a thermal A/B rather than an inspection, because the fan's *effect*
+is measurable from anywhere and its noise is not — which mattered, since nobody was in
+the building. Under an identical 4-core load: pin low reached 82°C and was still
+climbing; pin high plateaued at ~63°C. Eighteen degrees apart, and one of them past the
+throttle point.
+
+So `install_client()` writes `dtoverlay=gpio-fan,gpiopin=<n>,temp=60000` and the kernel's
+thermal governor owns the pin. Verified closed-loop: off at 45°C, on crossing 60°C,
+holding ~62°C under sustained load, off again on cooldown. Idle is ~33°C and a streaming
+workload ~42°C, so in ordinary use it should never spin.
+
+Three things worth keeping. **The pin is recorded, never guessed** (`--fan-gpio`,
+`data/fan-gpio`), because which header pin a fan sits on is a fact about one machine's
+wiring that nothing on the machine reports — and an overlay naming a pin that controls
+nothing looks exactly like working thermal management. **A node that declares no fan
+gets no overlay**, which is why the doctor reports `unknown` there rather than
+complaining about a fan that does not exist. And **the doctor asks the kernel whether a
+cooling device actually registered**, not whether the line is in `config.txt`: an
+overlay only takes effect at boot, so "written" and "working" are different questions.
+
+GPIO14 is also the UART transmit line, and `console=serial0` was in `cmdline.txt`. No
+live conflict — the mini-UART was never enabled, which is why the pin read as a plain
+input — but removed while claiming the pin rather than left to surprise someone.
+
 **A client node is the television's end of a gaming node's link**, and the one thing it
 needs is to *not* have a desktop. It renders with `SDL_VIDEODRIVER=kmsdrm`, straight to
 the display; under a compositor it cannot take DRM master, so the hardware decoder it
@@ -1100,19 +1132,3 @@ Wanted, not urgent. Grouped because they are one change to how promotion works.
   the same "start a run" code path.
 - Cross-project "what should I work on next" view.
 - Optional GitHub Issues sync.
-- **Let a client node's fan run only when it needs to.** `homebox-node-2` has a fan wired
-  to a GPIO header pin (believed physical pin 8 / GPIO 14, unverified) and it runs
-  constantly, which is loud in a living room — the one place a machine's noise is the
-  whole point of noticing.
-
-  The likely answer needs no code at all: `dtoverlay=gpio-fan,gpiopin=<n>,temp=<millidegrees>`
-  in `config.txt` hands the fan to the kernel's thermal governor, which runs it above a
-  threshold and stops it below. That would make it a line `install_client()` writes and a
-  question the doctor can ask, rather than something anyone manages by hand.
-
-  **Confirm the pin against the running machine before writing anything.** A wrong GPIO
-  here fails in one of two silent ways — a fan that never runs on a board that then
-  throttles, or one that never stops and looks exactly like today. Physical pin 8 *is*
-  GPIO 14 (UART TXD), so the recollection is self-consistent, but "self-consistent" is not
-  "measured", and GPIO 14 being the UART transmit line is worth noticing before claiming
-  it: if the fan is really there, enabling the serial console would fight it.

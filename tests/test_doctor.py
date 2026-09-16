@@ -974,6 +974,44 @@ def test_an_uninstalled_client_unit_is_a_warning_with_a_fix(monkeypatch):
     assert check.fix is not None
 
 
+def test_no_fan_declared_is_unknown_not_a_complaint(monkeypatch):
+    """A node with no fan, or one wired straight to 5V with no control line,
+    has nothing to manage and must not be told it is missing something."""
+    monkeypatch.setattr(doctor, "fan_gpio", lambda: None)
+
+    check = doctor.check_fan_control()
+    assert check.state is CheckState.UNKNOWN
+
+
+def test_a_recorded_pin_with_no_cooling_device_is_a_warning(monkeypatch, tmp_path):
+    """The failure worth catching: configured but not actually in effect. An
+    overlay that never registered looks exactly like working thermal
+    management, which is why this asks the kernel rather than config.txt."""
+    monkeypatch.setattr(doctor, "fan_gpio", lambda: 14)
+    monkeypatch.setattr(doctor, "Path", lambda *a: tmp_path / "nothing-here")
+
+    check = doctor.check_fan_control()
+    assert check.state is CheckState.WARN
+    assert "reboot" in check.detail.lower()
+
+
+def test_a_registered_gpio_fan_is_reported_with_what_it_is_doing(monkeypatch, tmp_path):
+    thermal = tmp_path / "thermal"
+    device = thermal / "cooling_device0"
+    device.mkdir(parents=True)
+    (device / "type").write_text("gpio-fan")
+    (device / "cur_state").write_text("0")
+    monkeypatch.setattr(doctor, "fan_gpio", lambda: 14)
+    monkeypatch.setattr(doctor, "Path", lambda *a: thermal)
+
+    check = doctor.check_fan_control()
+    assert check.state is CheckState.OK
+    assert "idle" in check.detail
+
+    (device / "cur_state").write_text("1")
+    assert "spinning now" in doctor.check_fan_control().detail
+
+
 def test_a_client_with_no_stream_host_says_so(monkeypatch):
     monkeypatch.setattr(doctor, "stream_host", lambda: None)
 

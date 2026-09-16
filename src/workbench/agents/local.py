@@ -472,6 +472,12 @@ class LocalBackend:
     """
 
     @property
+    def wants_endpoint(self) -> bool:
+        """The whole point of this backend: it talks to whatever OpenAI-compatible
+        server the runner picked, which may be another machine entirely."""
+        return True
+
+    @property
     def name(self) -> str:
         return BACKEND_NAME
 
