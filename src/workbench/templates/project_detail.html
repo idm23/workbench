@@ -348,6 +348,14 @@
                 <form method="post" action="/tasks/{{ node.task.id }}/sync">
                   <button class="slim secondary" type="submit">Sync</button>
                 </form>
+                {# Next to the button it unblocks, because that is the only
+                   context it makes sense in: Sync refuses a dirty worktree,
+                   and nothing could resolve that refusal without a shell on
+                   the server. It stashes rather than destroys, so it stays a
+                   secondary and asks for no confirmation. #}
+                <form method="post" action="/tasks/{{ node.task.id }}/discard-changes">
+                  <button class="slim secondary" type="submit">Discard changes</button>
+                </form>
               {% endif %}
               {% if effective_status in ('done', 'cancelled') %}
                 {# Off the tree, not deleted — see the archive page linked

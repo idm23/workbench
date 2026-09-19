@@ -11,14 +11,17 @@ import subprocess
 import pytest
 
 from workbench.git.worktrees import (
+    Discarded,
     GitFailed,
     GitOk,
+    NothingToDiscard,
     Synced,
     SyncRefused,
     WorktreeReady,
     branch_name,
     clone_path_for,
     diffstat,
+    discard_changes,
     ensure_push_remote,
     ensure_worktree,
     fetch_checkout,
@@ -526,3 +529,79 @@ def test_a_base_that_resolves_to_nothing_is_reported_not_assumed_empty(branched_
     _, worktree = branched_from_staging
 
     assert isinstance(has_commits(worktree, "no-such-branch"), GitFailed)
+
+
+# --- Discarding what blocks a sync ------------------------------------------
+#
+# The point of this is to be reversible. A test that only checked the worktree
+# came back clean would pass just as happily on `reset --hard`, which is the
+# implementation this deliberately is not.
+
+
+def test_discard_clears_a_dirty_worktree(cloned_repo):
+    _, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    (worktree.path / "README.md").write_text("edited\n")
+
+    result = discard_changes(worktree.path)
+
+    assert isinstance(result, Discarded)
+    assert isinstance(sync_worktree(checkout, worktree.path, "main"), Synced)
+
+
+def test_discard_keeps_the_work_it_took(cloned_repo):
+    """`git stash pop` has to bring it all back, or this is just deletion."""
+    _, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    (worktree.path / "README.md").write_text("edited by hand\n")
+
+    result = discard_changes(worktree.path)
+    assert isinstance(result, Discarded)
+    subprocess.run(("git", "stash", "pop"), cwd=worktree.path, check=True, capture_output=True)
+
+    assert (worktree.path / "README.md").read_text() == "edited by hand\n"
+
+
+def test_discard_takes_untracked_files_too(cloned_repo):
+    """An untracked file blocks a sync exactly as a modified one does."""
+    _, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    (worktree.path / "scratch.txt").write_text("never added\n")
+
+    assert isinstance(discard_changes(worktree.path), Discarded)
+    assert not (worktree.path / "scratch.txt").exists()
+    assert isinstance(sync_worktree(checkout, worktree.path, "main"), Synced)
+
+
+def test_discard_on_a_clean_worktree_is_not_a_failure(cloned_repo):
+    """Pressing the button twice is an ordinary thing to do."""
+    _, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+
+    assert isinstance(discard_changes(worktree.path), NothingToDiscard)
+
+
+def test_discard_names_the_stash_it_made(cloned_repo):
+    """The notice quotes this back, so it has to be a real reference."""
+    _, checkout = cloned_repo
+    worktree = ensure_worktree(checkout, task_id=1, title="x", base_branch="main")
+    assert isinstance(worktree, WorktreeReady)
+    (worktree.path / "first.txt").write_text("one\n")
+    discard_changes(worktree.path)
+    (worktree.path / "second.txt").write_text("two\n")
+
+    result = discard_changes(worktree.path)
+
+    assert isinstance(result, Discarded)
+    listed = subprocess.run(
+        ("git", "stash", "list", "--format=%gd"),
+        cwd=worktree.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stash in listed.stdout.split()
