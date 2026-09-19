@@ -303,6 +303,27 @@ def sync_worktree(repo: Path, worktree: Path, base_branch: str) -> SyncResult:
     return Synced(merged.stdout)
 
 
+def commits_behind(worktree: Path, base_branch: str) -> int | GitFailed:
+    """How far this worktree's branch trails its origin, in commits.
+
+    Purely to say so out loud. `sync_worktree` already decides whether the gap
+    can be closed; this answers "how bad is it" for the notice that reports a
+    gap it could not close, because "could not be brought forward" and "could
+    not be brought forward, and you are 27 commits back" are the same sentence
+    with very different urgency.
+
+    Counts `ref..HEAD`'s mirror image — commits the base has that this branch
+    does not — so a branch carrying work of its own still reports the drift it
+    is missing rather than netting the two against each other.
+    """
+    ref = _resolve_ref(worktree, base_branch)
+    result = _run_git(["rev-list", "--count", f"HEAD..{ref}"], cwd=worktree)
+    if isinstance(result, GitFailed):
+        return result
+    counted = result.stdout.strip()
+    return int(counted) if counted.isdigit() else 0
+
+
 def has_commits(worktree: Path, base_branch: str) -> bool | GitFailed:
     """Whether anything was actually committed on this branch.
 
