@@ -491,6 +491,74 @@ def test_syncing_a_missing_task_is_a_404(client, session):
     assert client.post("/tasks/9999/sync").status_code == 404
 
 
+# --- Discarding what blocks a sync ------------------------------------------
+
+
+def test_discarding_with_no_worktree_is_refused(client, session):
+    response = client.post(f"/tasks/{a_task(session).id}/discard-changes")
+
+    assert "no+worktree" in response.headers["location"]
+
+
+def test_discarding_while_a_run_is_active_is_refused(client, session, executor):
+    """An agent is writing into that directory right now."""
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "plan"})
+
+    response = client.post(f"/tasks/{task.id}/discard-changes")
+
+    assert "in+progress" in response.headers["location"]
+
+
+def test_a_discard_says_where_the_work_went(client, session, monkeypatch, cloned):
+    """The whole argument for stashing is that it is recoverable, which is
+    worth nothing if the notice does not say how."""
+    from workbench.git.worktrees import Discarded
+
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    monkeypatch.setattr(
+        "workbench.app.discard_changes",
+        lambda *a, **k: Discarded(stash="stash@{0}", summary="app.py | 2 +-"),
+    )
+
+    response = client.post(f"/tasks/{task.id}/discard-changes")
+
+    assert "stash" in response.headers["location"]
+    assert "pop" in response.headers["location"]
+
+
+def test_discarding_a_clean_worktree_is_not_an_error(client, session, monkeypatch, cloned):
+    from workbench.git.worktrees import NothingToDiscard
+
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    monkeypatch.setattr("workbench.app.discard_changes", lambda *a, **k: NothingToDiscard())
+
+    response = client.post(f"/tasks/{task.id}/discard-changes")
+
+    assert "notice=" in response.headers["location"]
+    assert "error=" not in response.headers["location"]
+
+
+def test_discarding_a_missing_task_is_a_404(client, session):
+    assert client.post("/tasks/9999/discard-changes").status_code == 404
+
+
+def test_a_task_with_a_worktree_is_offered_a_discard(client, session, cloned):
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/tasks/{task.id}/discard-changes" in page
+
+
 # --- What the page offers --------------------------------------------------
 
 

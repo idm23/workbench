@@ -59,9 +59,12 @@ from workbench.git.github import (
 from workbench.git.revision import head_revision
 from workbench.git.worktrees import (
     Cloned,
+    Discarded,
+    NothingToDiscard,
     Synced,
     SyncRefused,
     clone_project,
+    discard_changes,
     local_checkout,
     sync_worktree,
 )
@@ -781,6 +784,52 @@ def sync_task(db: DbSession, task_id: int) -> RedirectResponse:
         return _redirect(target, notice=f"Synced with {base_branch}.")
     if isinstance(result, SyncRefused):
         return _redirect(target, error=result.message)
+    return _redirect(target, error=f"{result.message} {result.stderr}".strip())
+
+
+@app.post("/tasks/{task_id}/discard-changes")
+def discard_task_changes(db: DbSession, task_id: int) -> RedirectResponse:
+    """Stash whatever is uncommitted in a task's worktree, so Sync can run.
+
+    `Sync` refuses a worktree with uncommitted changes — correctly, since that
+    is someone's in-progress work — but until now nothing could resolve that
+    refusal from the app, on any device. A worktree left dirty by an abandoned
+    run was therefore stuck permanently: it could not be brought forward, and
+    the only way to clear it was a shell on the server. Task 50's sat that way
+    while its runs planned against code 27 commits old.
+
+    Named `discard-changes` rather than `discard`, because the tree already has
+    a Discard that cancels a *run*. Two buttons a press apart should not share
+    a word when one ends an agent and the other touches a filesystem.
+
+    Nothing is destroyed — see `discard_changes`, which stashes — so this needs
+    no confirmation step, which matters because the thing it unblocks is most
+    often reached from a phone.
+    """
+    task = _get_task_or_404(db, task_id)
+    target = f"/projects/{task.project_id}"
+
+    if task.worktree_path is None:
+        return _redirect(target, error="This task has no worktree yet.")
+
+    if active_run_for_task(db, task.id) is not None:
+        # The same guard `sync_task` uses, for a stronger reason: an agent is
+        # writing into this directory right now.
+        return _redirect(target, error="Wait for the run in progress to finish first.")
+
+    result = discard_changes(Path(task.worktree_path))
+    if isinstance(result, NothingToDiscard):
+        return _redirect(target, notice="Nothing to discard — the worktree is already clean.")
+    if isinstance(result, Discarded):
+        # The reference, not just the fact: this is recoverable, and a notice
+        # that does not say how is no better than having destroyed it.
+        return _redirect(
+            target,
+            notice=(
+                f"Stashed the worktree's changes as {result.stash}; "
+                f"`git stash pop` in the worktree restores them."
+            ),
+        )
     return _redirect(target, error=f"{result.message} {result.stderr}".strip())
 
 

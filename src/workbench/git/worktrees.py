@@ -375,6 +375,59 @@ def uncommitted_diffstat(worktree: Path) -> str:
     return result.stdout
 
 
+@dataclass(frozen=True)
+class Discarded:
+    """The worktree is clean, and what was there is recoverable."""
+
+    #: `git stash` reference the changes went to, e.g. `stash@{0}`.
+    stash: str
+    summary: str
+
+
+@dataclass(frozen=True)
+class NothingToDiscard:
+    """Already clean. Not a failure — pressing the button twice is fine."""
+
+
+type DiscardResult = Discarded | NothingToDiscard | GitFailed
+
+
+def discard_changes(worktree: Path) -> DiscardResult:
+    """Put a worktree back to its last commit without destroying anything.
+
+    `git stash push -u` rather than `reset --hard` plus `clean -fd`, for the
+    same reason relocating a deployment copies rather than moves: the point is
+    to unblock `sync_worktree`, not to be rid of the work, and a button on a
+    phone is the worst possible place to make something irreversible. The stash
+    is named, so `git stash list` in the worktree says where it came from and
+    `git stash pop` undoes this completely.
+
+    Untracked files are included (`-u`), because the thing actually blocking a
+    sync is `git status --porcelain` being non-empty, and a file the agent
+    created but never added counts. Ignored files are deliberately not: those
+    are `data/`, `.venv` and friends, which are exactly what a sync must not
+    disturb.
+    """
+    status = _run_git(["status", "--porcelain"], cwd=worktree)
+    if isinstance(status, GitFailed):
+        return status
+    if not status.stdout.strip():
+        return NothingToDiscard()
+
+    summary = uncommitted_diffstat(worktree)
+    pushed = _run_git(
+        ["stash", "push", "-u", "-m", "workbench: discarded before sync"], cwd=worktree
+    )
+    if isinstance(pushed, GitFailed):
+        return pushed
+
+    # Asked for rather than assumed to be `stash@{0}`: a worktree may already
+    # have stashes, and the reference is the only way back to this one.
+    listed = _run_git(["stash", "list", "-1", "--format=%gd"], cwd=worktree)
+    ref = listed.stdout.strip() if isinstance(listed, GitOk) else "stash@{0}"
+    return Discarded(stash=ref or "stash@{0}", summary=summary)
+
+
 def ensure_push_remote(worktree: Path) -> GitResult:
     """Point `origin`'s *push* URL at SSH, leaving its fetch URL alone.
 
