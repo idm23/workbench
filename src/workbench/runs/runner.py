@@ -67,6 +67,9 @@ from workbench.database.models import (
 from workbench.git.github import PullRequestFailed, RepoRef, open_pull_request
 from workbench.git.worktrees import (
     GitFailed,
+    Synced,
+    SyncRefused,
+    commits_behind,
     diffstat,
     ensure_worktree,
     fetch_checkout,
@@ -74,6 +77,7 @@ from workbench.git.worktrees import (
     local_checkout,
     push_branch,
     run_setup_command,
+    sync_worktree,
     uncommitted_diffstat,
 )
 from workbench.nodes import Endpoint, inference_endpoint, known_nodes
@@ -305,6 +309,48 @@ def _model_for(run: Run, node: Endpoint | None) -> str | None:
     return local_model_override() or (node.model if node else None)
 
 
+def _bring_forward(worktree: Path, checkout: Path, task: Task) -> dict[str, str]:
+    """Fast-forward an existing worktree onto its origin, and say what happened.
+
+    The second and every later run on a task used to skip this entirely.
+    `prepare` fetched only on the branch that *creates* a worktree, reasoning
+    that an existing one already has its branch fixed — true of the branch, and
+    false of everything the branch was cut from. So a task planned one week and
+    executed the next handed its agent a checkout frozen at the first run, with
+    nothing but "Reusing the existing worktree." to say so.
+
+    Found on task 50, whose worktree sat 27 commits behind `staging` while the
+    agent planned confidently against an `app.py` that had since moved by 200
+    lines. The plan it produced was coherent, well argued, and addressed to code
+    that no longer existed — which is the expensive kind of wrong, because
+    nothing about it looks wrong.
+
+    Never fatal, and that is the constraint that shapes the rest. A branch that
+    carries its own commits cannot fast-forward, and that is the *normal* state
+    of a task between its execute run and the conversation after it — so a
+    refusal here must not be able to block the run, or fixing staleness would
+    break every second run on every task. It is reported instead, with the size
+    of the gap attached, because "could not be brought forward" and "could not
+    be brought forward, and you are 27 commits back" call for different actions
+    from whoever reads the run.
+    """
+    origin = origin_branch_for(task)
+    synced = sync_worktree(checkout, worktree, origin)
+    if isinstance(synced, Synced):
+        return {"text": f"Worktree is up to date with {origin}."}
+
+    reason = (
+        synced.message
+        if isinstance(synced, SyncRefused)
+        else f"{synced.message} {synced.stderr}".strip()
+    )
+    behind = commits_behind(worktree, origin)
+    gap = (
+        f" It is {behind} commit(s) behind {origin}." if isinstance(behind, int) and behind else ""
+    )
+    return {"text": f"Could not bring the worktree forward. {reason}{gap}"}
+
+
 def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     """Get the worktree and the backend ready, or explain why not.
 
@@ -347,7 +393,7 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
         # placeholder rather than a real choice — the branch was fixed the
         # first time this task was prepared.
         base_branch = task.branch or (project.default_branch or "main")
-        notice = {"text": "Reusing the existing worktree."}
+        notice = _bring_forward(Path(task.worktree_path), checkout, task)
 
     append_event(db, run.id, RunEventKind.NOTICE, notice)
 

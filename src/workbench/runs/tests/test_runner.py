@@ -9,6 +9,8 @@ each failure path gets its own test.
 import asyncio
 import os
 import signal
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -766,21 +768,68 @@ def test_prepare_fetches_before_creating_a_new_worktree(db, run, checkout, monke
     assert calls == [checkout]
 
 
-def test_prepare_does_not_refetch_once_a_worktree_already_exists(
-    db, run, checkout, backend, monkeypatch
-):
-    """Re-fetching a large repository on every execute run would cost time
-    for no benefit — the branch is already fixed by then."""
+def _git(path, *args: str) -> None:
+    subprocess.run(("git", *args), cwd=path, check=True, capture_output=True)
+
+
+def _land_a_commit(checkout, name="LANDED.md") -> None:
+    """Something merged into the base branch after the worktree was cut."""
+    (checkout / name).write_text("landed since\n")
+    _git(checkout, "add", ".")
+    _git(checkout, "commit", "-m", f"add {name}")
+
+
+def test_prepare_brings_an_existing_worktree_forward(db, run, checkout, backend):
+    """The bug this replaces: only the run that *created* a worktree ever
+    fetched, so every later run on that task worked from whatever the branch
+    was cut from. Task 50's sat 27 commits behind `staging` while its agent
+    planned against an `app.py` that had moved 200 lines."""
     execute(db, run)
-    assert run.task.worktree_path is not None
+    worktree = Path(run.task.worktree_path)
+    _land_a_commit(checkout)
 
-    calls = []
-    monkeypatch.setattr(runner_module, "fetch_checkout", lambda repo: calls.append(repo))
     second = create_run(db, run.task, RunPhase.EXECUTE, backend="fake")
-
     prepare(db, second)
 
-    assert calls == []
+    assert (worktree / "LANDED.md").exists()
+    notices = [e.payload["text"] for e in events_for(db, second) if e.kind is RunEventKind.NOTICE]
+    assert any("up to date with main" in text for text in notices)
+
+
+def test_prepare_says_how_far_behind_a_worktree_it_cannot_move_is(db, run, checkout, backend):
+    """Uncommitted work is never touched — but silence about it is what let
+    the staleness hide, so the gap is stated instead."""
+    execute(db, run)
+    worktree = Path(run.task.worktree_path)
+    (worktree / "README.md").write_text("someone was mid-edit\n")
+    _land_a_commit(checkout)
+
+    second = create_run(db, run.task, RunPhase.EXECUTE, backend="fake")
+    result = prepare(db, second)
+
+    assert not isinstance(result, NotPrepared)
+    notices = [e.payload["text"] for e in events_for(db, second) if e.kind is RunEventKind.NOTICE]
+    assert any("Could not bring the worktree forward" in text for text in notices)
+    assert any("1 commit(s) behind main" in text for text in notices)
+    assert (worktree / "README.md").read_text() == "someone was mid-edit\n"
+
+
+def test_a_branch_carrying_its_own_commits_still_prepares(db, run, checkout, backend):
+    """The constraint that stops this fix breaking everything else: a branch
+    with commits of its own cannot fast-forward, and that is the ordinary
+    state of a task between its execute run and the conversation after it."""
+    execute(db, run)
+    worktree = Path(run.task.worktree_path)
+    (worktree / "work.md").write_text("what the agent committed\n")
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", "agent work")
+    _land_a_commit(checkout)
+
+    second = create_run(db, run.task, RunPhase.EXECUTE, backend="fake")
+    result = prepare(db, second)
+
+    assert not isinstance(result, NotPrepared)
+    assert (worktree / "work.md").exists()
 
 
 # --- Typing into a run while it goes ----------------------------------------
