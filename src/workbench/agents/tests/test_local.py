@@ -1027,3 +1027,14 @@ def test_an_execute_run_left_with_uncommitted_work_is_asked_to_finish(monkeypatc
 
     notices = [n["text"] for n in events(items, RunEventKind.NOTICE)]
     assert any("uncommitted changes" in n for n in notices)
+
+
+def test_a_prompt_a_few_tokens_under_the_floor_is_not_truncation():
+    """Run 75: 16,754 read against a floor of 16,756, after a wall of pytest's
+    dots — which tokenise far better than eight characters a token."""
+    window = backend_module._Window()
+    window.check([], backend_module._Assistant(prompt_tokens=16_000))
+    window.sent = 0
+    added = [{"role": "tool", "content": "." * 6_048}]  # floor: 16,000 + 756
+
+    assert window.check(added, backend_module._Assistant(prompt_tokens=16_754)) is None
