@@ -190,9 +190,10 @@ for the harness existing: one small task against a real endpoint, with every
 check reading the worktree rather than the model's own summary, because those
 two disagree more often than seems possible.
 
-`qwen3:8b` is the default for fitting rather than for winning — 13 GB of
-weights is a bet on a machine nobody has described yet, and a node with the
-memory can say so through `WORKBENCH_LOCAL_MODEL`.
+`qwen3:8b` was the default for fitting rather than for winning — 13 GB of
+weights looked like a bet on a machine nobody had described yet. Below is why
+that stopped being true, and `gpt-oss:20b` is now the default: what it fitted
+with was a context window too small to keep a run's task.
 
 **That table measured execute runs only, and it was wrong about planning.** The
 harness ran one execute task, which the loop nudges when a model stalls; plan
