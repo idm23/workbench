@@ -396,26 +396,30 @@ def declared_capabilities() -> list[str]:
 #: sets this, or (once nodes are registered) learns it from one.
 DEFAULT_INFERENCE_URL = "http://127.0.0.1:11434/v1"
 
-#: The model the local backend asks for when nothing names another. Sized to
-#: fit, with room for context, in the 8 GB of VRAM this was first built
-#: against — bigger models are a per-machine decision rather than a default
-#: that quietly falls back to CPU.
+#: The model the local backend asks for when nothing names another.
 #:
-#: Which model is not a matter of benchmarks, and this default was changed once
-#: already on evidence. `qwen2.5-coder:7b` is the better coder on paper and
+#: Which model is not a matter of benchmarks, and this default has now been
+#: changed twice on evidence. `qwen2.5-coder:7b` is the better coder on paper and
 #: cannot drive a run at all: it writes every tool call as prose, so Ollama's
-#: parser never sees one. `qwen3:8b` uses the tool-call channel properly and
-#: completes the task — measured, on the node, with
-#: `scripts/test_local_model.py`, which exists to keep that judgement
-#: reproducible rather than remembered.
+#: parser never sees one. `qwen3:8b` replaced it because it uses the tool-call
+#: channel and completes a small task — and it was kept "for fitting rather than
+#: for winning", since it fits an 8 GB card with room for context.
 #:
-#: It is the default for fitting rather than for winning. `gpt-oss:20b` did the
-#: same task in half the wall clock on the same card, because a mixture of
-#: experts activates a fraction of itself per token — but it wants 13 GB of
-#: weights against this one's 5.2, which is a bet on a machine nobody has
-#: described yet. A node with the memory should say so out loud through
-#: WORKBENCH_LOCAL_MODEL; see docs/nodes.md.
-DEFAULT_LOCAL_MODEL = "qwen3:8b"
+#: That room turned out to be the problem. The context it fitted with was the
+#: 4,096 tokens Ollama picks for a small card, which silently cost every long
+#: run its task (see `DEFAULT_INFERENCE_CONTEXT_TOKENS`). Given a window a real
+#: run needs, a dense 8B's cache no longer fits the card and it spills onto the
+#: CPU, while `gpt-oss:20b` — a mixture of experts with a small cache — barely
+#: notices. So on the 8 GB node this was built for, at 32k, measured on task 50:
+#: `gpt-oss:20b` planned correctly four times in four; `qwen3:8b`, reading the
+#: same files, was wrong or half-right both times and up to ten times slower.
+#:
+#: The cost is real and belongs in the open: 13 GB of weights, so a node needs
+#: roughly 16 GB of GPU and system memory together, and a fresh node's install
+#: pulls that much. A smaller machine should say so through
+#: WORKBENCH_LOCAL_MODEL — `qwen3:8b` still passes the harness — see
+#: docs/nodes.md.
+DEFAULT_LOCAL_MODEL = "gpt-oss:20b"
 
 #: How long one request to a local model may take. Generous compared to a
 #: hosted API on purpose: a MoE with its experts offloaded to system RAM can

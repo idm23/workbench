@@ -132,8 +132,10 @@ Two things it will not do, both on purpose:
   script should decide. If `nvidia-smi` is missing you are told to run
   `sudo ubuntu-drivers install`, and to re-run the installer afterwards.
 - **Choose the model for you** beyond a default. `WORKBENCH_LOCAL_MODEL` picks it, and
-  the default (`qwen3:8b`) is what fits in 8 GB of VRAM with room for context *and* can
-  actually drive a run — which does not follow from the first. `qwen2.5-coder:7b` is the
+  the default is `gpt-oss:20b`: 13 GB of weights, so the node wants roughly 16 GB of GPU
+  and system memory together. On an 8 GB card most of it runs from system RAM and it is
+  still the fastest model measured here, because a mixture of experts uses only a
+  fraction of itself per token. What *fits* is not what works — `qwen2.5-coder:7b` is the
   better coder on paper and fails immediately, because it writes its tool calls as prose
   instead of calling them.
 
@@ -162,13 +164,16 @@ Two things it will not do, both on purpose:
   four times in four and `qwen3:8b` was wrong or half-right both times, despite reading the
   same files.
 
-  **If your node has 16 GB of memory or more, use `gpt-oss:20b`.** It is twice as quick
-  here despite not fitting on the card, because a mixture of experts activates only a
-  fraction of itself per token:
+  **On a smaller machine, use `qwen3:8b`.** It passes the harness, and fits a small card,
+  but it planned a real task wrongly where `gpt-oss:20b` got it right:
 
   ```sh
-  WORKBENCH_LOCAL_MODEL=gpt-oss:20b ./install.sh --role=node --head <the head's URL>
+  WORKBENCH_LOCAL_MODEL=qwen3:8b ./install.sh --role=node --head <the head's URL>
   ```
+
+  A dense 8B's cache grows with the context window, so on an 8 GB card give it a smaller
+  one too — `WORKBENCH_INFERENCE_CONTEXT_TOKENS=16384` — and accept that a long run will
+  be told it is being truncated.
 
   Nothing needs saying on the head: the node registers what it pulled, and the head asks
   for that.
