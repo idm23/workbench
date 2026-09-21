@@ -14,7 +14,7 @@
 </p>
 
 <div class="run-meta">
-  <div><span>Backend</span><span class="mono">{{ run.backend }}{% if run.model %} · {{ run.model }}{% endif %}</span></div>
+  <div><span>Backend</span><span class="mono">{{ run.backend }}{% if run.model %} · {{ run.model }}{% endif %}{% if run.login %} · {{ run.login }}{% endif %}</span></div>
   <div><span>Executor</span><span class="mono">{{ run.executor }}{% if run.handle %} · {{ run.handle }}{% endif %}</span></div>
   {% if run.num_turns %}<div><span>Turns</span><span>{{ run.num_turns }}</span></div>{% endif %}
   {% if run.total_cost_usd %}

@@ -33,7 +33,10 @@ from workbench.database.models import (
 
 logger = logging.getLogger(__name__)
 
-def create_run(db: Session, task: Task, phase: RunPhase, backend: str, login: str | None = None) -> Run:
+
+def create_run(
+    db: Session, task: Task, phase: RunPhase, backend: str, login: str | None = None
+) -> Run:
     """Record the intent to run, before anything is spawned.
 
     The row exists in `queued` so that the thing which starts the process has
