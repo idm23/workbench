@@ -66,13 +66,13 @@ def test_reading_a_file_numbers_its_lines(context):
 
     assert isinstance(result, ToolResult)
     assert not result.is_error
-    assert "1\tdef main():" in result.text
+    assert "1│def main():" in result.text
 
 
 def test_reading_takes_a_window(context):
     result = call(context, "read_file", path="src/app.py", offset=2, limit=1)
 
-    assert "2\t    return 1" in result.text
+    assert "2│    return 1" in result.text
     assert "def main" not in result.text
 
 
@@ -484,7 +484,7 @@ def test_open_file_is_understood_as_read_file(context):
     )
 
     assert not result.is_error
-    assert "2\t    return 1" in result.text
+    assert "2│    return 1" in result.text
     assert "def main" not in result.text
 
 
@@ -525,3 +525,172 @@ def test_query_is_understood_as_the_search_pattern(context):
 
     assert isinstance(result, ToolResult)
     assert "src/app.py" in result.text
+
+
+# --- Edits a model can actually make ------------------------------------------
+#
+# Every case here is a call gpt-oss really made in run 66, which read the right
+# code and then spent fifteen turns failing to change it — and, when a change
+# finally went through, inserted tabs into a space-indented function and wiped
+# a 1,637-line test file.
+
+LOOP = (
+    "def approve(items):\n"
+    "    if items:\n"
+    "        for item in items:\n"
+    "            make(item)\n"
+    "        return 'made'\n"
+    "    return 'none'\n"
+)
+
+
+@pytest.fixture
+def loop_file(worktree) -> Path:
+    path = worktree / "src" / "loop.py"
+    path.write_text(LOOP, encoding="utf-8")
+    return path
+
+
+def test_a_pasted_gutter_is_removed_from_the_replacement(context, loop_file):
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        old_text="        return 'made'",
+        new_text="5\t        finish()\n6\t        return 'made'",
+    )
+
+    assert not result.is_error, result.text
+    assert "        finish()\n        return 'made'" in loop_file.read_text()
+
+
+def test_a_replacement_still_carrying_line_numbers_is_refused(context, loop_file):
+    """A number followed by spaces cannot be told apart from indentation, so
+    it is refused with a reason rather than guessed at."""
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        old_text="        return 'made'",
+        new_text="5        return 'done'",
+    )
+
+    assert result.is_error
+    assert "line number" in result.text
+    assert loop_file.read_text() == LOOP
+
+
+def test_a_quote_with_a_retyped_gutter_still_finds_its_lines(context, loop_file):
+    """Run 66's edit #3: the quote's gutter was retyped as spaces, a blank line
+    became a bare number, and the replacement was correct under a tab gutter."""
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        old_text="3        for item in items:\n4            make(item)\n5        return 'made'",
+        new_text=(
+            "3\t        for item in items:\n4\t            make(item)\n"
+            "5\t        finish()\n6\t        return 'made'"
+        ),
+    )
+
+    assert not result.is_error, result.text
+    assert (
+        "            make(item)\n        finish()\n        return 'made'" in loop_file.read_text()
+    )
+
+
+def test_a_misindented_replacement_is_refused_not_moved(context, loop_file):
+    """Run 66's edit #7, and the regression that shaped this design: a quote at
+    one indentation and a replacement at another. Re-indenting to match put
+    `return` inside the loop — valid Python, and wrong. It must be refused."""
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        old_text="            return 'made'",
+        new_text="                finish()\n                return 'made'",
+    )
+
+    assert result.is_error
+    assert "would no longer compile" in result.text
+    assert loop_file.read_text() == LOOP
+
+
+def test_tabs_into_a_file_indented_with_spaces_are_refused(context, loop_file):
+    """Run 66's edit #8, which the old tool accepted."""
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        old_text="        return 'made'",
+        new_text="\tfinish()\n\treturn 'made'",
+    )
+
+    assert result.is_error
+    assert loop_file.read_text() == LOOP
+
+
+def test_lines_can_be_replaced_by_number(context, loop_file):
+    """How gpt-oss edits: it sent a line range in every edit of run 66."""
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        line_start=5,
+        line_end=5,
+        new_text="        finish()\n        return 'made'",
+    )
+
+    assert not result.is_error, result.text
+    assert loop_file.read_text().count("\n") == LOOP.count("\n") + 1
+    assert "5│        finish()" in result.text  # shows the model what it did
+
+
+def test_a_line_past_the_end_appends(context, loop_file):
+    result = call(
+        context, "edit_file", path="src/loop.py", line_start=7, new_text="\n\ndef more():\n    pass"
+    )
+
+    assert not result.is_error, result.text
+    assert loop_file.read_text().endswith("def more():\n    pass\n")
+
+
+def test_a_range_outside_the_file_says_how_to_append(context, loop_file):
+    result = call(context, "edit_file", path="src/loop.py", line_start=40, new_text="x = 1")
+
+    assert result.is_error
+    assert "line_start=7" in result.text
+
+
+def test_a_file_already_broken_can_still_be_repaired(context, worktree):
+    """Held to compiling only if it compiled before — or one bad edit would
+    lock the model out of fixing it."""
+    broken = worktree / "src" / "broken.py"
+    broken.write_text("def f(:\n    return 1\n", encoding="utf-8")
+
+    result = call(
+        context, "edit_file", path="src/broken.py", old_text="def f(:", new_text="def f():"
+    )
+
+    assert not result.is_error, result.text
+
+
+def test_write_file_will_not_shrink_a_long_file_to_a_fragment(context, worktree):
+    """Run 66's edit #9: one new test written as the whole of a 1,637-line file."""
+    long = worktree / "tests_long.py"
+    long.write_text("".join(f"x_{i} = {i}\n" for i in range(100)), encoding="utf-8")
+
+    result = call(
+        context, "write_file", path="tests_long.py", content="def test_new():\n    pass\n"
+    )
+
+    assert result.is_error
+    assert "line_start=101" in result.text
+    assert long.read_text().count("\n") == 100
+
+
+def test_write_file_still_creates_and_rewrites_small_files(context, worktree):
+    assert not call(context, "write_file", path="new.py", content="x = 1\n").is_error
+    assert not call(context, "write_file", path="new.py", content="y = 2\n").is_error
+    assert (worktree / "new.py").read_text() == "y = 2\n"

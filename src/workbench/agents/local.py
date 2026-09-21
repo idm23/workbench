@@ -56,6 +56,7 @@ from workbench.agents.tools import (
     nothing_happened,
     tool_names_for,
     tools_for,
+    uncommitted_work,
 )
 from workbench.config import (
     inference_base_url,
@@ -90,6 +91,13 @@ _NUDGE = (
     "You have not changed anything yet, so the task is not done. Do not describe "
     "what you will do — do it now, with one tool call, starting from what the "
     "last result actually said."
+)
+
+#: What an execute run is told when it stops with work uncommitted.
+_FINISH_NUDGE = (
+    "You have changes in the worktree that are not committed, and you have not "
+    "called report_outcome. Check your work (run the tests if there are any), "
+    "commit it with run_command, then call report_outcome."
 )
 
 #: A plan run that stops with neither a tool call nor any text has not
@@ -940,6 +948,29 @@ class LocalBackend:
                             },
                         )
                         messages.append({"role": "user", "content": _NUDGE})
+                        _save_transcript(token, messages)
+                        continue
+                    if (
+                        phase is RunPhase.EXECUTE
+                        and nudges < MAX_NUDGES
+                        and context.used.isdisjoint(OUTCOME_TOOLS)
+                        and uncommitted_work(context)
+                    ):
+                        # The other way to stop early: the work is done, or half
+                        # done, and left lying in the worktree. Run 66 ended
+                        # like this — edits made, nothing committed, no outcome
+                        # — so nothing was published and nobody was told.
+                        nudges += 1
+                        yield AgentEvent(
+                            RunEventKind.NOTICE,
+                            {
+                                "text": (
+                                    "The model stopped with uncommitted changes and no "
+                                    f"outcome; asking it to finish ({nudges}/{MAX_NUDGES})."
+                                )
+                            },
+                        )
+                        messages.append({"role": "user", "content": _FINISH_NUDGE})
                         _save_transcript(token, messages)
                         continue
                     if (

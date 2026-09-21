@@ -1007,3 +1007,23 @@ def test_any_other_server_error_mid_run_still_fails_it(monkeypatch, tmp_path):
 
     assert isinstance(outcome, AgentFailed)
     assert "failed mid-run" in outcome.message
+
+
+def test_an_execute_run_left_with_uncommitted_work_is_asked_to_finish(monkeypatch, tmp_path):
+    """Run 66 ended with edits made, nothing committed, and no outcome — so
+    nothing was published and nobody was told."""
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(tool_call("read_file", {"path": "app.py"})),
+            sse(tool_call("write_file", {"path": "new.py", "content": "x = 2\n"}, "c2")),
+            sse(chunk(content="I have made the change.")),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(worktree=worktree)))
+
+    notices = [n["text"] for n in events(items, RunEventKind.NOTICE)]
+    assert any("uncommitted changes" in n for n in notices)
