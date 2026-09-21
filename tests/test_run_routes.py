@@ -277,6 +277,64 @@ def test_the_origin_is_not_re_asked_once_a_worktree_exists(client, session, exec
     assert task.origin_ref == "staging"
 
 
+# --- Choosing the agent ------------------------------------------------------
+
+
+def test_choosing_an_agent_is_recorded(client, session, executor):
+    task = a_task(session)
+
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "plan", "agent": "local"})
+
+    run = session.query(Run).one()
+    assert run.backend == "local"
+    assert run.login is None
+
+
+def test_choosing_a_named_claude_login_is_recorded(client, session, executor):
+    task = a_task(session)
+
+    client.post(
+        f"/tasks/{task.id}/runs",
+        data={"phase": "plan", "agent": "claude:ian@example.com"},
+    )
+
+    run = session.query(Run).one()
+    assert run.backend == "claude"
+    assert run.login == "ian@example.com"
+
+
+def test_an_unknown_agent_backend_is_refused_readably(client, session, executor):
+    task = a_task(session)
+
+    response = client.post(f"/tasks/{task.id}/runs", data={"phase": "plan", "agent": "gpt"})
+
+    assert "no+agent+backend+called" in response.headers["location"]
+    assert session.query(Run).count() == 0
+
+
+def test_an_agent_this_project_does_not_allow_is_refused(client, session, executor):
+    task = a_task(session)
+    task.project.allowed_agents = ["claude"]
+    session.commit()
+
+    response = client.post(f"/tasks/{task.id}/runs", data={"phase": "plan", "agent": "local"})
+
+    assert "does+not+allow+local" in response.headers["location"]
+    assert session.query(Run).filter_by(status=RunStatus.QUEUED).count() == 0
+
+
+def test_an_agent_this_project_allows_is_accepted(client, session, executor):
+    task = a_task(session)
+    task.project.allowed_agents = ["local"]
+    session.commit()
+
+    response = client.post(f"/tasks/{task.id}/runs", data={"phase": "plan", "agent": "local"})
+
+    assert response.status_code == 303
+    run = session.query(Run).one()
+    assert run.backend == "local"
+
+
 # --- Retrying a failed run ---------------------------------------------------
 
 
@@ -297,6 +355,33 @@ def test_retrying_starts_a_new_run_of_the_same_phase(client, session, executor):
     new_run = session.query(Run).filter_by(status=RunStatus.QUEUED).one()
     assert new_run.phase is RunPhase.EXECUTE
     assert executor.started == [new_run.id]
+
+
+def test_retrying_reuses_the_last_runs_agent(client, session, executor):
+    """The Retry form posts no `agent` at all — it is not a fresh choice, it
+    is resuming a task already underway, and the only account its resume
+    token or its worktree's Claude session actually exists for is the one the
+    failed attempt used."""
+    task = a_task(session)
+    task.worktree_path = "/somewhere"
+    session.commit()
+    session.add(
+        Run(
+            task_id=task.id,
+            phase=RunPhase.EXECUTE,
+            backend="local",
+            login="ian@example.com",
+            status=RunStatus.FAILED,
+        )
+    )
+    session.commit()
+
+    response = client.post(f"/tasks/{task.id}/runs", data={"phase": "execute"})
+
+    assert response.status_code == 303
+    new_run = session.query(Run).filter_by(status=RunStatus.QUEUED).one()
+    assert new_run.backend == "local"
+    assert new_run.login == "ian@example.com"
 
 
 def test_cancelling_asks_the_executor_to_stop(client, session, executor):
@@ -326,11 +411,11 @@ def test_cancelling_a_run_that_does_not_exist_is_a_404(client, session):
 # --- Approving a plan --------------------------------------------------------
 
 
-def _plan_awaiting_review(session, task=None, proposed_subtasks=None):
+def _plan_awaiting_review(session, task=None, proposed_subtasks=None, backend="claude", login=None):
     from workbench.database.models import RunPhase
     from workbench.runs.store import create_run, finish_run
 
-    run = create_run(session, task or a_task(session), RunPhase.PLAN, backend="claude")
+    run = create_run(session, task or a_task(session), RunPhase.PLAN, backend=backend, login=login)
     finish_run(
         session,
         run,
@@ -354,6 +439,21 @@ def test_approving_a_plan_with_no_subtasks_starts_execute(client, session, execu
     new_run = session.get(Run, executor.started[0])
     assert new_run.phase is RunPhase.EXECUTE
     assert new_run.task_id == run.task_id
+
+
+def test_approving_a_plan_carries_its_own_backend_and_login(client, session, executor):
+    """Not the project's current default — approving a plan starts execution
+    in the same worktree the plan ran in, under the same login, since a
+    restricted project may not even allow the default and a Claude session
+    opened under a named login exists nowhere else."""
+    run = _plan_awaiting_review(session, backend="local", login="ian@example.com")
+
+    response = client.post(f"/runs/{run.id}/approve")
+
+    assert response.status_code == 303
+    new_run = session.get(Run, executor.started[0])
+    assert new_run.backend == "local"
+    assert new_run.login == "ian@example.com"
 
 
 def test_approving_a_decomposed_plan_creates_its_subtasks_instead(client, session, executor):
@@ -688,6 +788,58 @@ def test_a_task_with_an_existing_worktree_is_not_offered_a_picker(client, sessio
     page = client.get(f"/projects/{task.project_id}").text
 
     assert page.count('name="origin"') == 1
+
+
+def test_a_runnable_task_offers_an_agent_picker(client, session, cloned):
+    """Every backend this machine knows about, with no allowed list to
+    narrow it — the real registry, not a fake one, since this is what a
+    freshly installed machine actually offers."""
+    page = client.get(f"/projects/{a_task(session).project_id}").text
+
+    assert 'select name="agent"' in page
+    assert "Claude (default login)" in page
+    assert ">local<" in page
+
+
+def test_a_restricted_project_sends_its_one_choice_as_a_hidden_field(client, session, cloned):
+    """Omitting `agent` would fall back to the project's default login, which
+    a project allowed only one named login refuses outright — so even a
+    single choice must still be sent, not left for the button to imply."""
+    task = a_task(session)
+    task.project.allowed_agents = ["claude:ian@example.com"]
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert 'select name="agent"' not in page
+    assert '<input type="hidden" name="agent" value="claude:ian@example.com">' in page
+
+
+def test_the_agent_picker_preselects_the_projects_backend(client, session, cloned):
+    task = a_task(session)
+    task.project.agent_backend = "local"
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert 'value="local" selected' in page
+
+
+def test_the_ready_to_execute_panel_also_offers_an_agent_picker(client, session, cloned):
+    """The Ready-to-execute summary's Execute form is a second place a fresh
+    run starts, distinct from the row further down — both need the choice,
+    not just the one in the tree.
+
+    The project's other seeded task has its own tree row too, with no worktree
+    of its own — that is the third occurrence, not a sign this task got two.
+    """
+    task = a_task(session)
+    task.entry_phase = RunPhase.EXECUTE
+    session.commit()
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert page.count('select name="agent"') == 3
 
 
 def test_a_running_task_offers_to_stop_instead(client, session, cloned, executor):
