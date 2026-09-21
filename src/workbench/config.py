@@ -741,6 +741,7 @@ def agent_home() -> Path:
     """
     return Path("/home") / service_account()
 
+
 def claude_logins_dir() -> Path:
     """Where named Claude logins live: one CLI config directory per login."""
     return agent_home() / ".claude-logins"
@@ -760,6 +761,7 @@ def claude_login_dir(name: str) -> Path | None:
         return None
     path = claude_logins_dir() / name
     return path if path.is_dir() else None
+
 
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""

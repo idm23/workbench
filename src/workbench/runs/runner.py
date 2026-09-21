@@ -433,6 +433,7 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
             resume_token=resume_token_for(db, task, run.backend),
             model=_model_for(run, node),
             endpoint=node.url if node else None,
+            login=run.login,
             run_id=run.id,
             task_id=task.id,
         ),

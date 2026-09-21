@@ -1,9 +1,9 @@
 # Tests for named Claude logins functionality.
 
-import pytest
-from pathlib import Path
 
-from workbench.config import claude_login_names, claude_login_dir
+import pytest
+
+from workbench.config import claude_login_dir, claude_login_names
 
 
 @pytest.fixture
