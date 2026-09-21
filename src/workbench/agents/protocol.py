@@ -73,6 +73,8 @@ class AgentRequest:
     #: between nodes is a database question. The runner asks; the backend is
     #: told.
     endpoint: str | None = None
+    # which named login to run as; None means the backend's default
+    login: str | None = None
 
     #: Plain identifiers, not a vendor shape — a backend that can call back
     #: into Workbench's own API (the live outcome report, a subtask spun off

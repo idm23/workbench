@@ -762,3 +762,7 @@ def test_a_run_may_open_enough_files_to_run_a_test_suite():
     """At systemd's default 1,024 this project's own suite cannot finish:
     part 1 of task 64 crashed at pytest teardown with "Too many open files"."""
     assert "LimitNOFILE=65536" in render_unit("workbench-run@.service.template")
+
+
+def test_a_named_logins_token_can_be_refreshed():
+    assert ".claude-logins" in render_unit("workbench-run@.service.template")
