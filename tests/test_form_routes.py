@@ -399,3 +399,45 @@ def test_cloning_a_missing_project_is_a_404(client, session):
     response = client.post("/projects/9999/clone")
 
     assert response.status_code == 404
+
+
+def test_a_setup_command_can_be_set_from_the_page(client, session):
+    """It existed in the schema and nothing could set it — so on this project an
+    agent could never run the tests it was asked to run."""
+    project = a_project(session)
+
+    response = client.post(
+        f"/projects/{project.id}/setup", data={"setup_command": "  uv sync --frozen  "}
+    )
+
+    assert response.status_code == 303
+    session.refresh(project)
+    assert project.setup_command == "uv sync --frozen"
+
+
+def test_clearing_the_setup_command_stores_none(client, session):
+    project = a_project(session)
+    project.setup_command = "make deps"
+    session.commit()
+
+    client.post(f"/projects/{project.id}/setup", data={"setup_command": "   "})
+
+    session.refresh(project)
+    assert project.setup_command is None
+
+
+def test_the_page_shows_the_setup_command(client, session, monkeypatch, tmp_path):
+    # The agent panel only renders for a project cloned on this machine.
+    monkeypatch.setattr("workbench.app.local_checkout", lambda *_: tmp_path)
+    project = a_project(session)
+    project.setup_command = "uv sync --frozen"
+    session.commit()
+
+    page = client.get(f"/projects/{project.id}").text
+
+    assert f"/projects/{project.id}/setup" in page
+    assert 'value="uv sync --frozen"' in page
+
+
+def test_setting_up_a_missing_project_is_a_404(client, session):
+    assert client.post("/projects/999/setup", data={"setup_command": "x"}).status_code == 404
