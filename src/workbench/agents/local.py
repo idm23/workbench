@@ -497,6 +497,13 @@ class _Buffer:
 #: which matters more here than catching every case.
 _CHARS_PER_TOKEN_CEILING = 8
 
+#: How far short of that floor the server's count must fall before it is
+#: called truncation. Truncation drops whole messages — the one this watcher
+#: caught for real was 1,200 tokens short — while the floor itself can be a few
+#: tokens high on text that tokenises unusually well: a wall of pytest's dots
+#: set it off at 16,754 against 16,756, with the window half empty.
+_TRUNCATION_MARGIN_TOKENS = 256
+
 
 def _chars(message: dict[str, Any]) -> int:
     calls = message.get("tool_calls") or []
@@ -542,7 +549,7 @@ class _Window:
         ):
             return None
         floor = sum(_chars(m) for m in added) // _CHARS_PER_TOKEN_CEILING
-        if reply.prompt_tokens >= previous + floor:
+        if reply.prompt_tokens >= previous + floor - _TRUNCATION_MARGIN_TOKENS:
             return None
         self.reported = True
         return (
