@@ -756,3 +756,9 @@ def test_the_switch_does_not_conflict_with_ollama(monkeypatch):
     service = render_unit("workbench-gaming.service.template")
 
     assert "Conflicts=" not in _directives(service)
+
+
+def test_a_run_may_open_enough_files_to_run_a_test_suite():
+    """At systemd's default 1,024 this project's own suite cannot finish:
+    part 1 of task 64 crashed at pytest teardown with "Too many open files"."""
+    assert "LimitNOFILE=65536" in render_unit("workbench-run@.service.template")
