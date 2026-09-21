@@ -108,6 +108,31 @@
               style="margin-bottom: .5rem;">{{ (project.allowed_agents or []) | join("\n") }}</textarea>
     <button class="slim" type="submit">Save allowed agents</button>
   </form>
+  {# Who carries out approved plans, and who rechecks finished work before a
+     pull request opens. The first option in each list is off, and off is how
+     every project behaved before these existed. #}
+  <form method="post" action="/projects/{{ project.id }}/handoff" style="margin-top: .75rem;
+        display: flex; gap: .5rem; align-items: flex-end; flex-wrap: wrap;">
+    <div>
+      <label for="execute_agent">Execute approved plans with</label>
+      <select name="execute_agent" id="execute_agent" style="width: auto; margin-bottom: 0;">
+        <option value="" {{ 'selected' if not project.execute_agent }}>whoever planned it</option>
+        {% for value, label in agent_options %}
+          <option value="{{ value }}" {{ 'selected' if value == project.execute_agent }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="review_agent">Recheck finished work with</label>
+      <select name="review_agent" id="review_agent" style="width: auto; margin-bottom: 0;">
+        <option value="" {{ 'selected' if not project.review_agent }}>nobody — publish straight away</option>
+        {% for value, label in reviewer_options %}
+          <option value="{{ value }}" {{ 'selected' if value == project.review_agent }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="slim" type="submit">Save</button>
+  </form>
 </details>
 
 <form method="post" action="/projects/{{ project.id }}/conversation" style="border: none; padding: 0; margin-bottom: 1.75rem;">
@@ -210,7 +235,7 @@
                   {% if agent_options|length > 1 %}
                     <select name="agent" style="width: auto; margin-bottom: 0;" aria-label="Agent">
                       {% for value, label in agent_options %}
-                        <option value="{{ value }}" {{ 'selected' if value == agent_default }}>{{ label }}</option>
+                        <option value="{{ value }}" {{ 'selected' if value == (execute_default or agent_default) }}>{{ label }}</option>
                       {% endfor %}
                     </select>
                   {% elif agent_options %}
@@ -310,6 +335,17 @@
                 <form method="post" action="/runs/{{ busy.run_id }}/cancel">
                   <button class="slim secondary" type="submit">Discard</button>
                 </form>
+              {% elif busy and busy.needs_attention and busy.phase == 'review' %}
+                {# A review asked for changes, or reached no verdict, and nothing
+                   was published. The findings are on the run's page; the two
+                   ways forward are here. #}
+                <a class="slim" href="/runs/{{ busy.run_id }}">Read the review</a>
+                <form method="post" action="/runs/{{ busy.run_id }}/send-back">
+                  <button class="slim" type="submit">Send back</button>
+                </form>
+                <form method="post" action="/runs/{{ busy.run_id }}/publish">
+                  <button class="slim secondary" type="submit">Publish anyway</button>
+                </form>
               {% elif busy and busy.needs_attention and busy.phase == 'plan' %}
                 {# A plan a person has not yet acted on. What approving does
                    depends on what the plan decided: decompose, or carry out
@@ -375,7 +411,7 @@
                   {% if agent_options|length > 1 %}
                     <select name="agent" style="width: auto; margin-bottom: 0;" aria-label="Agent">
                       {% for value, label in agent_options %}
-                        <option value="{{ value }}" {{ 'selected' if value == agent_default }}>{{ label }}</option>
+                        <option value="{{ value }}" {{ 'selected' if value == ((execute_default if node.task.entry_phase == 'execute' else none) or agent_default) }}>{{ label }}</option>
                       {% endfor %}
                     </select>
                   {% elif agent_options %}

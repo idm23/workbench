@@ -35,15 +35,31 @@ logger = logging.getLogger(__name__)
 
 
 def create_run(
-    db: Session, task: Task, phase: RunPhase, backend: str, login: str | None = None
+    db: Session,
+    task: Task,
+    phase: RunPhase,
+    backend: str,
+    login: str | None = None,
+    seed_message: str | None = None,
 ) -> Run:
     """Record the intent to run, before anything is spawned.
 
     The row exists in `queued` so that the thing which starts the process has
     an id to hand it, and so a run that never starts is still visible rather
     than lost.
+
+    `seed_message` is what an execute run is handed beyond its task: an
+    approved plan written by a different agent, or a review's findings when
+    work is sent back. See `runner.prepare`.
     """
-    run = Run(task_id=task.id, phase=phase, backend=backend, status=RunStatus.QUEUED, login=login)
+    run = Run(
+        task_id=task.id,
+        phase=phase,
+        backend=backend,
+        status=RunStatus.QUEUED,
+        login=login,
+        seed_message=seed_message,
+    )
     db.add(run)
     db.commit()
     return run

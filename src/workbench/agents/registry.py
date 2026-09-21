@@ -65,8 +65,24 @@ _FACTORIES: dict[str, Callable[[], Backend]] = {
 }
 
 
+#: Backends that can review finished work. A table beside the factories
+#: rather than a property on each backend, because the web process offers
+#: reviewers on every project page and must not construct a backend — or
+#: import its SDK — to ask.
+#:
+#: `local` is deliberately absent. A review ends in a structured verdict on
+#: someone else's work, and the local model's own record here is the reason
+#: reviews exist: it claimed tests passed four times when they had not run.
+_REVIEWERS = frozenset({"claude"})
+
+
 def available_backends() -> tuple[str, ...]:
     return tuple(sorted(_FACTORIES))
+
+
+def can_review(name: str) -> bool:
+    """Whether this backend can be asked to recheck finished work."""
+    return name in _REVIEWERS and name in _FACTORIES
 
 
 def get_backend(name: str | None = None) -> Backend | UnknownBackend:

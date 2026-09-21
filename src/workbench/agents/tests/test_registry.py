@@ -49,3 +49,11 @@ def test_available_backends_is_sorted():
 def test_the_protocol_is_implementable_by_something_that_is_not_claude():
     """The claim the seam makes, asserted rather than assumed."""
     assert isinstance(FakeBackend(), Backend)
+
+
+def test_only_backends_that_can_review_are_offered_as_reviewers():
+    from workbench.agents.registry import can_review
+
+    assert can_review("claude")
+    assert not can_review("local")
+    assert not can_review("nonsense")

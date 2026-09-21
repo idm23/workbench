@@ -321,6 +321,26 @@ modules lazily inside the factory for the same reason the test exists: the web p
 resolves backend names constantly and must never pull an SDK into its import graph to do
 it.
 
+**Planning, doing and checking can be three different agents, and each is off by default.**
+Two project settings in the Agent panel: *execute approved plans with* and *recheck finished
+work with*. The first hands an approved plan to another agent — "plan with Claude, execute
+with local" — and because that agent cannot resume the planner's session, the approved plan
+travels in its prompt. The second starts a read-only `review` run when an execute run
+finishes with commits, and **nothing is published until it approves**: an approving review
+opens the pull request with itself in the body; one that asks for changes, or reaches no
+verdict, leaves the work on its branch with *Send back* (a new execute run, seeded with the
+findings, on top of the work so far) and *Publish anyway* (which says so in the pull request).
+A missing verdict is never read as approval. A review that cannot start — the concurrency cap
+— publishes with a notice rather than stranding finished work.
+
+Why it exists is measured, not assumed: on #64 the local model got about seventy per cent of
+each subtask right and claimed tests passed four times when they had not run, while every
+fix a person made on review was of the same few kinds — the call site the task called most
+important, left out; an existing test's assertion deleted; formatting. The review prompt names
+exactly those. Only backends that can deliver a structured verdict are offered as reviewers
+(`registry.can_review`), which today means Claude; the local backend refuses the phase outright.
+Turning either off is choosing the first option in its list again.
+
 **And now the choice is made per run, not only per project.** `projects.allowed_agents`
 restricts which `backend` or `backend:login` pairs may run a project at all —
 `lifecycle.agent_allowed` enforces the exact pair, so a bare `claude` entry never also

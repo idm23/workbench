@@ -343,6 +343,19 @@ def has_commits(worktree: Path, base_branch: str) -> bool | GitFailed:
     return result.stdout.strip() not in ("", "0")
 
 
+def branch_diff(worktree: Path, base_branch: str) -> str:
+    """The branch's committed change against where it will merge, in full.
+
+    What a reviewer reads. Three dots, so it is the change this branch makes
+    and not everything the base has gained since the branch was cut. Empty
+    when it cannot be read — the review then says there is nothing to judge
+    rather than judging something else.
+    """
+    ref = _resolve_ref(worktree, base_branch)
+    result = _run_git(["diff", f"{ref}...HEAD"], cwd=worktree)
+    return result.stdout if isinstance(result, GitOk) else ""
+
+
 def diffstat(worktree: Path, base_branch: str) -> str:
     """A summary of what changed, relative to the base branch.
 

@@ -111,6 +111,22 @@ _PLAN_OUTPUT_FORMAT = {
     },
 }
 
+#: The shape of a review's answer. Structured output for the same reason a
+#: plan's is: plan mode, which a review runs in, allows no tool that could
+#: report it any other way.
+_REVIEW_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["approve", "changes"]},
+            "summary": {"type": "string"},
+            "findings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["verdict", "summary", "findings"],
+    },
+}
+
 #: Longest string kept in an event payload. A single Write tool call can carry
 #: an entire file, and every event is a row that is kept forever — truncating
 #: at the point of translation is the cheapest place to bound the table. The
@@ -144,11 +160,13 @@ def _permission_mode(phase: RunPhase) -> PermissionMode:
     is the *product* there, not a restriction on it, so enforcement and
     intention agree.
     """
-    return "plan" if phase is RunPhase.PLAN else "bypassPermissions"
+    # A review is held to plan mode too: it judges work, and a reviewer that
+    # could edit what it is judging would be reviewing its own changes.
+    return "plan" if phase in (RunPhase.PLAN, RunPhase.REVIEW) else "bypassPermissions"
 
 
 def _max_turns(phase: RunPhase) -> int:
-    if phase is RunPhase.PLAN:
+    if phase in (RunPhase.PLAN, RunPhase.REVIEW):
         return MAX_TURNS_PLAN
     if phase is RunPhase.CONVERSATION:
         return MAX_TURNS_CONVERSATION
@@ -374,6 +392,8 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
         # Structured output, not a tool call — the one decomposition
         # mechanism that works under real plan mode. See _PLAN_OUTPUT_FORMAT.
         options["output_format"] = _PLAN_OUTPUT_FORMAT
+    elif request.phase is RunPhase.REVIEW:
+        options["output_format"] = _REVIEW_OUTPUT_FORMAT
     elif request.phase is RunPhase.CONVERSATION:
         # Task management, not outcome reporting — a conversation has no
         # single task to call finished or failed.
@@ -425,6 +445,24 @@ def _plan_text(result: ResultMessage) -> str:
     if isinstance(structured, dict) and isinstance(structured.get("plan"), str):
         return structured["plan"]
     return result.result or ""
+
+
+def _review(result: ResultMessage) -> tuple[str, str | None]:
+    """A review's readable text and its verdict, from structured output.
+
+    No verdict at all — a model that answered in prose instead — comes back as
+    None, which the runner treats as "a person should look", never approval.
+    """
+    structured = result.structured_output
+    if not isinstance(structured, dict):
+        return result.result or "", None
+    verdict = structured.get("verdict")
+    summary = str(structured.get("summary") or "").strip()
+    findings = [str(f).strip() for f in structured.get("findings") or [] if str(f).strip()]
+    text = summary
+    if findings:
+        text = f"{summary}\n\n" + "\n".join(f"- {finding}" for finding in findings)
+    return text.strip(), verdict if verdict in ("approve", "changes") else None
 
 
 def _proposed_subtasks(result: ResultMessage) -> list[SubtaskProposal] | None:
@@ -843,8 +881,16 @@ class ClaudeBackend:
             return
 
         is_plan = request.phase is RunPhase.PLAN
+        verdict: str | None = None
+        if request.phase is RunPhase.REVIEW:
+            text, verdict = _review(last_result)
+        elif is_plan:
+            text = _plan_text(last_result)
+        else:
+            text = last_result.result or ""
         finished = AgentFinished(
-            text=_plan_text(last_result) if is_plan else (last_result.result or ""),
+            text=text,
+            verdict=verdict,
             resume_token=last_result.session_id,
             model=model,
             total_cost_usd=last_result.total_cost_usd,
