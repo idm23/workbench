@@ -60,6 +60,7 @@ from workbench.agents.tools import (
 )
 from workbench.config import (
     inference_base_url,
+    inference_context_tokens,
     inference_timeout_seconds,
     local_model,
     port,
@@ -142,6 +143,44 @@ def _tell(messages: list[dict[str, Any]], note: str) -> None:
 #: and it is deliberately worth nothing, so losing it to truncation loses
 #: nothing.
 _BEGIN = "Begin the task described in your instructions."
+
+
+#: How much of the model's window a resumed conversation may already fill.
+#: Past this there is no room left to work: run 73 resumed a session that was
+#: at the 32k limit on its first turn, and floundered until it gave up.
+RESUME_BUDGET_FRACTION = 0.5
+
+#: Said to a model starting fresh where an earlier attempt left off, because
+#: the worktree is not fresh even though the conversation is.
+_AFTER_A_LONG_ATTEMPT = (
+    "An earlier attempt at this task ran in this worktree, and its conversation was "
+    "too long to continue. Before changing anything, run `git status` and "
+    "`git log --oneline -5` to see what it left, and build on that rather than "
+    "starting over."
+)
+
+
+def _estimated_tokens(messages: list[dict[str, Any]]) -> int:
+    """A rough size for a stored conversation: about four characters a token.
+
+    Rough on purpose. The question is only whether a transcript leaves room to
+    work, and the answer for the ones that caused trouble was not close.
+    """
+    chars = 0
+    for message in messages:
+        chars += len(message.get("content") or "") + len(message.get("reasoning") or "")
+        chars += sum(len(json.dumps(call)) for call in message.get("tool_calls") or [])
+    return chars // 4
+
+
+def _resume_budget() -> int:
+    """How big a stored conversation may be and still be continued.
+
+    Read from the same setting that sizes the node's window
+    (`WORKBENCH_INFERENCE_CONTEXT_TOKENS`); a head whose node uses a different
+    window should set it to match.
+    """
+    return int(inference_context_tokens() * RESUME_BUDGET_FRACTION)
 
 
 def _pinned(system: str, task: str) -> str:
@@ -771,8 +810,25 @@ class LocalBackend:
         )
 
         messages = _load_transcript(request.resume_token)
+        begin = _BEGIN
+        restarted = False
+        if messages is not None and (size := _estimated_tokens(messages)) > _resume_budget():
+            yield AgentEvent(
+                RunEventKind.NOTICE,
+                {
+                    "text": (
+                        f"The earlier conversation is about {size:,} tokens — too long to "
+                        "continue in this model's context window. Starting a fresh session "
+                        "in the same worktree."
+                    )
+                },
+            )
+            messages = None
+            token = uuid.uuid4().hex
+            begin = f"{_BEGIN}\n\n{_AFTER_A_LONG_ATTEMPT}"
+            restarted = True
         if messages is None:
-            if request.resume_token:
+            if request.resume_token and not restarted:
                 yield AgentEvent(
                     RunEventKind.NOTICE,
                     {"text": "The earlier conversation could not be found; starting fresh."},
@@ -783,7 +839,7 @@ class LocalBackend:
             messages = [
                 {"role": "system", "content": _pinned(system_prompt(phase), request.prompt)}
             ]
-            messages.append({"role": "user", "content": _BEGIN})
+            messages.append({"role": "user", "content": begin})
         else:
             messages.append({"role": "user", "content": request.prompt})
 
