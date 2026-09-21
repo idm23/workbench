@@ -749,3 +749,96 @@ def test_an_edit_that_removes_nothing_says_nothing_about_it(context, loop_file):
     )
 
     assert "no longer in the file" not in result.text
+
+
+# --- Run 74 -----------------------------------------------------------------
+
+REPEATED = (
+    "def one(\n    *,\n    executor: str | None = None,\n):\n    pass\n\n\n"
+    "def two(\n    *,\n    executor: str | None = None,\n):\n    pass\n"
+)
+
+
+def test_line_start_says_which_repeated_quote_was_meant(context, worktree):
+    """It quoted a line that appears twice and named the line it meant. That is
+    not ambiguous, and it was refused four times as though it were."""
+    path = worktree / "src" / "repeated.py"
+    path.write_text(REPEATED, encoding="utf-8")
+
+    result = call(
+        context,
+        "edit_file",
+        path="src/repeated.py",
+        line_start=10,
+        old_text="    executor: str | None = None,\n",
+        new_text="    executor: str | None = None,\n    login: str | None = None,\n",
+    )
+
+    assert not result.is_error, result.text
+    text = path.read_text()
+    assert text.count("login") == 1
+    assert text.index("login") > text.index("def two")
+
+
+def test_a_repeated_quote_without_a_line_does_not_suggest_replace_all(context, worktree):
+    """Told "or pass replace_all", it did, and changed three functions."""
+    path = worktree / "src" / "repeated.py"
+    path.write_text(REPEATED, encoding="utf-8")
+
+    result = call(
+        context,
+        "edit_file",
+        path="src/repeated.py",
+        old_text="    executor: str | None = None,\n",
+        new_text="    x = 1\n",
+    )
+
+    assert result.is_error
+    assert "replace_all" not in result.text
+    assert "lines 3, 10" in result.text
+
+
+def test_new_code_written_as_a_diff_loses_its_plus_signs(context, loop_file):
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        line_start=7,
+        new_text="+\n+\n+def more():\n+    return 1",
+    )
+
+    assert not result.is_error, result.text
+    assert loop_file.read_text().endswith("def more():\n    return 1\n")
+
+
+def test_commands_use_the_worktrees_own_virtualenv(context, worktree):
+    """`pytest` and `python` should mean what they would in an activated shell."""
+    bin_dir = worktree / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    fake = bin_dir / "python"
+    fake.write_text("#!/bin/sh\necho from-the-worktree-venv\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    result = call(context, "run_command", command="python")
+
+    assert "from-the-worktree-venv" in result.text
+
+
+def test_a_line_that_does_not_point_at_the_quote_is_refused(context, worktree):
+    """Nearest-occurrence alone reached a different function's signature,
+    thirty lines away, when run 74's retries were replayed."""
+    path = worktree / "src" / "repeated.py"
+    path.write_text(REPEATED + "\n" * 30 + "def three():\n    pass\n", encoding="utf-8")
+
+    result = call(
+        context,
+        "edit_file",
+        path="src/repeated.py",
+        line_start=40,
+        old_text="    executor: str | None = None,\n",
+        new_text="    x = 1\n",
+    )
+
+    assert result.is_error
+    assert "not at line 40" in result.text
+    assert "x = 1" not in path.read_text()
