@@ -239,6 +239,7 @@ journalctl -u ollama -f
 | A node is missing from `/services` | It was installed without `--head`, or could not reach it — `journalctl -u workbench-deploy -n 50` on the node says which |
 | A node's `last seen` is hours old | Its deploy timer has stopped; the node re-registers on every tick, so a stale time means the timer, not the model server |
 | Runs fail asking for a model the node hasn't got | `WORKBENCH_LOCAL_MODEL` is set on the head and overrides what the node reports — unset it, or pull that model on the node |
+| A plan is fluent and about the wrong thing, a run replies with nothing, or the model asks whether there has been a user query yet | The model lost its task to a too-small context window. The run's log says so ("dropping the oldest messages to fit"). Raise `WORKBENCH_INFERENCE_CONTEXT_TOKENS` in `/etc/workbench/env` on the node; the next deploy tick rewrites the drop-in and restarts Ollama. `ollama ps` on the node shows the window actually in use |
 
 ## The security note worth reading once
 

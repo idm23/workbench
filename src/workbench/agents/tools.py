@@ -173,6 +173,12 @@ def _list_files(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
         dirnames[:] = sorted(d for d in dirnames if d not in SKIPPED_DIRS)
         here = Path(current)
         if len(here.relative_to(target).parts) >= depth:
+            # Named, not silently dropped. Listing only files meant a directory
+            # holding nothing but directories vanished outright: `src/` holds
+            # only `workbench/`, so at depth 1 a model was never told `src`
+            # existed, and qwen3 spent a planning run guessing `app` and `runs`
+            # at the top level. A trailing slash says "there is more in here".
+            lines.extend(f"{(here / name).relative_to(root)}/" for name in dirnames)
             dirnames.clear()
         # Filtered out of the files too, not only the directories: inside a
         # worktree `.git` is a *file* holding a pointer to the real gitdir, so
@@ -199,8 +205,12 @@ def _read_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
         return ToolResult(f"Could not read {target}: {exc}", is_error=True)
 
     lines = content.splitlines()
-    offset = max(1, int(args.get("offset") or 1))
-    limit = max(1, min(int(args.get("limit") or 400), 2000))
+    offset = max(1, int(args.get("offset") or args.get("line_start") or 1))
+    requested = args.get("limit")
+    if requested is None and args.get("line_end") is not None:
+        # gpt-oss's own spelling is an inclusive range — see `_ALIASES`.
+        requested = int(args["line_end"]) - offset + 1
+    limit = max(1, min(int(requested or 400), 2000))
     window = lines[offset - 1 : offset - 1 + limit]
     # Numbered, because `edit_file` matches on text and a model that can cite
     # a line number is one that can quote the right text back.
@@ -213,9 +223,14 @@ def _read_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
 
 
 def _search(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
-    pattern = str(args.get("pattern") or "").strip()
+    # `query` is gpt-oss's spelling, from the search tool it was trained with;
+    # under a tight window it reached for it four times running and was told
+    # only that a pattern was required. Same bargain as `_ALIASES`.
+    pattern = str(args.get("pattern") or args.get("query") or "").strip()
     if not pattern:
-        return ToolResult("A pattern is required.", is_error=True)
+        return ToolResult(
+            "search needs `pattern`: the text or regular expression to find.", is_error=True
+        )
     target = _resolve(context, str(args.get("path") or "."))
     if isinstance(target, ToolResult):
         return target
@@ -235,7 +250,14 @@ def _search(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
         return ToolResult(f"Search timed out after {SEARCH_TIMEOUT_SECONDS}s.", is_error=True)
 
     if found.returncode == 1:
-        return ToolResult("No matches.")
+        # The hint is for one specific mistake, made eleven times in one run:
+        # `approve_plan.*?app\.py`, a symbol and a filename in one regex, as if
+        # the pattern matched paths. It matches lines of text.
+        return ToolResult(
+            f"No matches for {pattern!r}. The pattern is matched against each line "
+            "of file contents, not against file names — to look inside one file or "
+            "directory, pass it as `path` and search for the text alone."
+        )
     if found.returncode > 1:
         return ToolResult(clip(found.stderr or "Search failed."), is_error=True)
     root = context.worktree.resolve()
@@ -512,7 +534,10 @@ TOOLS: dict[str, Tool] = {
     for tool in (
         Tool(
             name="list_files",
-            description="List files under a directory in the worktree.",
+            description=(
+                "List files under a directory in the worktree. Directories beyond "
+                "the depth are shown with a trailing slash; list them to see inside."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -538,11 +563,18 @@ TOOLS: dict[str, Tool] = {
         ),
         Tool(
             name="search",
-            description="Search the worktree for a regular expression, like grep -rn.",
+            description=(
+                "Search file contents for a regular expression, like grep -rn. The "
+                "pattern matches lines of text, never file names; use `path` to "
+                "search inside one file or directory."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "A grep regular expression."},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Text or a grep regular expression to find in lines.",
+                    },
                     "path": _PATH_PROPERTY,
                 },
                 "required": ["pattern"],
@@ -710,6 +742,22 @@ def tools_for(phase: RunPhase) -> list[dict[str, Any]]:
     return [TOOLS[name].schema() for name in tool_names_for(phase)]
 
 
+#: Names a model reaches for that mean a tool this loop already has.
+#:
+#: gpt-oss asks for `open_file(path, line_start, line_end)` — its own trained
+#: spelling of reading a file — and asked for it 14 times across two planning
+#: runs on one task, plus `view_file` once, against a list that offers
+#: `read_file`. Every one was refused with the list of real names, and it kept
+#: asking: up to eight of forty turns spent on a tool that did not exist.
+#: Understanding the spelling is the same bargain `_apply_delta` makes with
+#: three names for reasoning, and cheaper than teaching one model another.
+#:
+#: Aliases point only at read-only tools, and that is checked structurally
+#: (`test_every_alias_is_read_only`): the phase gate runs on the *resolved*
+#: name, so no spelling can reach a tool the phase was not offered.
+_ALIASES = {"open_file": "read_file", "view_file": "read_file"}
+
+
 def dispatch(phase: RunPhase, name: str, args: dict[str, Any], context: ToolContext) -> ToolOutcome:
     """Run one tool call, or explain why it did not happen.
 
@@ -718,6 +766,7 @@ def dispatch(phase: RunPhase, name: str, args: dict[str, Any], context: ToolCont
     not get a shell because the dispatcher was more permissive than the
     schema it was handed.
     """
+    name = _ALIASES.get(name, name)
     if name not in tool_names_for(phase):
         available = ", ".join(tool_names_for(phase))
         known = " It is not available in this phase." if name in TOOLS else ""
