@@ -73,11 +73,15 @@ class TaskActivity:
         if self.status is RunStatus.QUEUED:
             return "queued"
         if self.status is RunStatus.AWAITING_REVIEW:
-            return "review"
+            # A review waiting on a person asked for changes; a plan waiting on
+            # one wants approving. Same status, different thing to do.
+            return "changes asked" if self.phase is RunPhase.REVIEW else "review"
         if self.status is RunStatus.AWAITING_ANSWER:
             return "question"
         if self.status is RunStatus.FAILED:
             return "failed"
+        if self.phase is RunPhase.REVIEW:
+            return "reviewing"
         return "planning" if self.phase is RunPhase.PLAN else "working"
 
     @property

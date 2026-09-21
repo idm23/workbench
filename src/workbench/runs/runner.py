@@ -33,7 +33,9 @@ from sqlalchemy.orm import Session
 from workbench.agents.prompts import (
     continuation_prompt,
     conversation_prompt,
+    execute_prompt,
     prompt_for,
+    review_prompt,
     seeded_continuation_prompt,
 )
 from workbench.agents.protocol import (
@@ -69,6 +71,7 @@ from workbench.git.worktrees import (
     GitFailed,
     Synced,
     SyncRefused,
+    branch_diff,
     commits_behind,
     diffstat,
     ensure_worktree,
@@ -81,6 +84,7 @@ from workbench.git.worktrees import (
     uncommitted_diffstat,
 )
 from workbench.nodes import Endpoint, inference_endpoint, known_nodes
+from workbench.runs.lifecycle import agent_choice, agent_label, parse_agent_choice, start_run
 from workbench.runs.store import append_event, fetch_new_inputs, finish_run, mark_running
 from workbench.tasks.origin import InvalidOrigin, origin_branch_for, resolve_origin
 
@@ -143,7 +147,21 @@ def resume_token_for(db: Session, task: Task, backend: str) -> str | None:
             Run.task_id == task.id,
             Run.backend == backend,
             Run.resume_token.is_not(None),
+            # A review is a separate look, not a turn in the work's own
+            # conversation: an execute run sent back after one must continue
+            # the executor's session, not the reviewer's.
+            Run.phase != RunPhase.REVIEW,
         )
+        .order_by(Run.id.desc())
+        .limit(1)
+    )
+
+
+def _latest_execute_run(db: Session, task: Task) -> Run | None:
+    """The newest execute run of a task — the work a review is looking at."""
+    return db.scalar(
+        select(Run)
+        .where(Run.task_id == task.id, Run.phase == RunPhase.EXECUTE)
         .order_by(Run.id.desc())
         .limit(1)
     )
@@ -424,13 +442,31 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     # Asking unconditionally is what handed a Claude run a worker node's Ollama
     # URL and its model name, and killed it on `model_not_found`.
     node = _endpoint(db, run) if backend.wants_endpoint else None
+    resume = resume_token_for(db, task, run.backend)
+    if run.phase is RunPhase.REVIEW:
+        # A fresh look, never a resumed one, with the change in front of it:
+        # a read-only reviewer may not be able to run git itself.
+        work = _latest_execute_run(db, task)
+        prompt = review_prompt(
+            task.title,
+            task.body,
+            branch_diff(worktree.path, origin_branch_for(task)),
+            work.summary if work else None,
+        )
+        resume = None
+    elif run.phase is RunPhase.EXECUTE and run.seed_message:
+        # What a resumed session would otherwise have carried: an approved plan
+        # from a different agent, or what a review asked for.
+        prompt = execute_prompt(task.title, task.body, context=run.seed_message)
+    else:
+        prompt = prompt_for(run.phase, task.title, task.body)
     return Prepared(
         backend=backend,
         request=AgentRequest(
             worktree=worktree.path,
             phase=run.phase,
-            prompt=prompt_for(run.phase, task.title, task.body),
-            resume_token=resume_token_for(db, task, run.backend),
+            prompt=prompt,
+            resume_token=resume,
             model=_model_for(run, node),
             endpoint=node.url if node else None,
             login=run.login,
@@ -729,6 +765,141 @@ def _record_conversation(db: Session, run: Run, ending: Ending) -> Run:
             )
 
 
+def _hand_to_reviewer(
+    db: Session,
+    run: Run,
+    task: Task,
+    reviewer: str,
+    worktree: Path,
+    base_branch: str,
+    summary: str,
+) -> None:
+    """Start the review of finished work, or publish without one and say so.
+
+    Publishing unreviewed when the review cannot start — the concurrency cap,
+    usually — is the lesser failure. The alternative strands finished work on
+    a branch with nothing on the page offering to move it, which is how work
+    got lost here before pull requests were opened automatically at all.
+    """
+    backend, login = parse_agent_choice(reviewer)
+    started = start_run(db, task, RunPhase.REVIEW, backend=backend, login=login)
+    if isinstance(started, Run):
+        _notice(
+            db,
+            run,
+            f"Handed to {agent_label(reviewer)} for review (run {started.id}). Nothing is "
+            "published until it approves.",
+        )
+        return
+    _notice(
+        db,
+        run,
+        f"The review could not start ({started.message}), so the work was published without one.",
+    )
+    task.status = TaskStatus.DONE
+    url = _publish(db, run, task, worktree, base_branch, summary)
+    if url:
+        run.pr_url = url
+        db.commit()
+
+
+def _reviewed_summary(work: Run | None, review: Run, text: str, *, overridden: bool) -> str:
+    """The pull request's body: what the work says it did, then the review."""
+    said = work.summary.strip() if work and work.summary else ""
+    heading = (
+        "Review — published by a person despite it asking for changes" if overridden else "Review"
+    )
+    return (
+        f"{said or 'The agent recorded no summary for this run.'}\n\n"
+        f"## {heading} ({agent_label(agent_choice(review.backend, review.login))})\n\n"
+        f"{text.strip() or 'The reviewer recorded no findings.'}"
+    )
+
+
+def _record_review(
+    db: Session,
+    run: Run,
+    task: Task,
+    worktree: Path | None,
+    base_branch: str,
+    ending: AgentFinished,
+) -> Run:
+    """Act on a review's verdict: publish on approval, otherwise wait for a person.
+
+    Only an explicit "approve" publishes. A review that asked for changes, or
+    reached no verdict, or was cut short, leaves the work on its branch and the
+    task blocked, with Send back and Publish anyway offered on the tree — a
+    missing verdict is treated as "somebody should look", never as consent.
+    """
+    if ending.verdict == "approve" and not ending.stopped_early:
+        work = _latest_execute_run(db, task)
+        published = _publish(
+            db,
+            run,
+            task,
+            worktree,
+            base_branch,
+            _reviewed_summary(work, run, ending.text, overridden=False),
+        )
+        task.status = TaskStatus.DONE
+        return finish_run(
+            db,
+            run,
+            RunStatus.SUCCEEDED,
+            summary=ending.text,
+            pr_url=published,
+            model=ending.model,
+            total_cost_usd=ending.total_cost_usd,
+            num_turns=ending.num_turns,
+        )
+    if ending.verdict == "changes":
+        _notice(db, run, "The review asked for changes, so nothing was published.")
+    else:
+        _notice(
+            db,
+            run,
+            "The review reached no clear verdict, so nothing was published — "
+            "treated as needing a person rather than as approval.",
+        )
+    task.status = TaskStatus.BLOCKED
+    return finish_run(
+        db,
+        run,
+        RunStatus.AWAITING_REVIEW,
+        summary=ending.text,
+        model=ending.model,
+        total_cost_usd=ending.total_cost_usd,
+        num_turns=ending.num_turns,
+    )
+
+
+def publish_despite_review(db: Session, review: Run) -> str | None:
+    """Publish work its review did not approve, because a person decided to.
+
+    Public because the web process calls it, from the review's Publish anyway
+    button. The pull request says in its body that it went out over the
+    review's objections, so nobody reading it later mistakes it for approved.
+    """
+    task = review.task
+    if task is None:
+        return None
+    worktree = Path(task.worktree_path) if task.worktree_path else None
+    base_branch = origin_branch_for(task)
+    work = _latest_execute_run(db, task)
+    url = _publish(
+        db,
+        review,
+        task,
+        worktree,
+        base_branch,
+        _reviewed_summary(work, review, review.summary or "", overridden=True),
+    )
+    if url:
+        task.status = TaskStatus.DONE
+    finish_run(db, review, RunStatus.SUCCEEDED, pr_url=url)
+    return url
+
+
 def record(db: Session, run: Run, ending: Ending) -> Run:
     """Translate how the agent ended into how the run ended.
 
@@ -777,6 +948,9 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
                 num_turns=ending.num_turns,
                 proposed_subtasks=_serialize_subtasks(ending.proposed_subtasks),
             )
+
+        case AgentFinished() if run.phase is RunPhase.REVIEW:
+            return _record_review(db, run, task, worktree, base_branch, ending)
 
         case AgentFinished() if run.agent_outcome is RunOutcome.NEEDS_REPLANNING:
             task.status = TaskStatus.BLOCKED
@@ -834,6 +1008,31 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
             # — so DONE requires an explicit report, and a stopped-early
             # report is distrusted even when it says "finished".
             published: str | None = None
+            reviewer = task.project.review_agent
+            if (
+                run.agent_outcome is RunOutcome.FINISHED
+                and not ending.stopped_early
+                and reviewer
+                and run.phase is RunPhase.EXECUTE
+                and worktree is not None
+                and has_commits(worktree, base_branch) is True
+            ):
+                # Finished, and the project wants it rechecked before anything
+                # is published — so this run ends without a pull request, and
+                # the reviewer's verdict decides whether one opens.
+                finished = finish_run(
+                    db,
+                    run,
+                    RunStatus.SUCCEEDED,
+                    summary=ending.text,
+                    diffstat=_worktree_diffstat(worktree, base_branch),
+                    resume_token=ending.resume_token,
+                    model=ending.model,
+                    total_cost_usd=ending.total_cost_usd,
+                    num_turns=ending.num_turns,
+                )
+                _hand_to_reviewer(db, finished, task, reviewer, worktree, base_branch, ending.text)
+                return finished
             if run.agent_outcome is RunOutcome.FINISHED and not ending.stopped_early:
                 task.status = TaskStatus.DONE
                 # Only here. The same standard that is trusted enough to close

@@ -1799,3 +1799,127 @@ def test_a_run_with_no_session_offers_no_discuss_buttons(client, session):
 
     assert "discuss-dialog" not in page
     assert ">Split<" not in page
+
+
+# --- Plan with one agent, execute with another, review with a third ----------
+
+
+def _review_awaiting(session, task, summary="- missing the task run's login"):
+    from workbench.runs.store import create_run, finish_run
+
+    work = create_run(session, task, RunPhase.EXECUTE, backend="local")
+    finish_run(session, work, RunStatus.SUCCEEDED, summary="Did the work.")
+    review = create_run(session, task, RunPhase.REVIEW, backend="claude")
+    finish_run(session, review, RunStatus.AWAITING_REVIEW, summary=summary)
+    return review
+
+
+def test_handoff_settings_are_stored_and_cleared(client, session):
+    project = a_task(session).project
+
+    client.post(
+        f"/projects/{project.id}/handoff", data={"execute_agent": "local", "review_agent": "claude"}
+    )
+    session.refresh(project)
+    assert (project.execute_agent, project.review_agent) == ("local", "claude")
+
+    client.post(f"/projects/{project.id}/handoff", data={"execute_agent": "", "review_agent": ""})
+    session.refresh(project)
+    assert (project.execute_agent, project.review_agent) == (None, None)
+
+
+def test_a_backend_that_cannot_review_is_refused_as_reviewer(client, session):
+    project = a_task(session).project
+
+    response = client.post(f"/projects/{project.id}/handoff", data={"review_agent": "local"})
+
+    assert "cannot+review" in response.headers["location"]
+    session.refresh(project)
+    assert project.review_agent is None
+
+
+def test_a_handoff_the_project_does_not_allow_is_refused(client, session):
+    project = a_task(session).project
+    project.allowed_agents = ["claude"]
+    session.commit()
+
+    response = client.post(f"/projects/{project.id}/handoff", data={"execute_agent": "local"})
+
+    assert "does+not+allow" in response.headers["location"]
+
+
+def test_an_approved_plan_is_executed_by_the_projects_executor_with_the_plan(
+    client, session, executor
+):
+    task = a_task(session)
+    task.project.execute_agent = "local"
+    session.commit()
+    plan = _plan_awaiting_review(session, task=task, backend="claude")
+
+    client.post(f"/runs/{plan.id}/approve")
+
+    work = session.query(Run).filter_by(task_id=task.id, phase=RunPhase.EXECUTE).one()
+    assert work.backend == "local"
+    assert "Here is the plan." in (work.seed_message or "")
+
+
+def test_without_an_executor_the_planner_carries_out_its_own_plan(client, session, executor):
+    task = a_task(session)
+    plan = _plan_awaiting_review(session, task=task, backend="claude")
+
+    client.post(f"/runs/{plan.id}/approve")
+
+    work = session.query(Run).filter_by(task_id=task.id, phase=RunPhase.EXECUTE).one()
+    assert work.backend == "claude"
+    assert work.seed_message is None
+
+
+def test_sending_back_hands_the_findings_to_the_executor(client, session, executor):
+    task = a_task(session)
+    review = _review_awaiting(session, task)
+
+    response = client.post(f"/runs/{review.id}/send-back")
+
+    assert "Sent+back" in response.headers["location"]
+    again = (
+        session.query(Run)
+        .filter_by(task_id=task.id, phase=RunPhase.EXECUTE)
+        .order_by(Run.id.desc())
+        .first()
+    )
+    assert again.backend == "local"  # whoever did the work, with no executor set
+    assert "missing the task run's login" in again.seed_message
+    session.refresh(review)
+    assert review.status is RunStatus.SUCCEEDED  # the buttons go with it
+
+
+def test_publishing_over_a_review_says_so(client, session, monkeypatch):
+    task = a_task(session)
+    review = _review_awaiting(session, task)
+    monkeypatch.setattr(
+        "workbench.runs.runner.publish_despite_review", lambda db, run: "https://gh/pr/9"
+    )
+
+    response = client.post(f"/runs/{review.id}/publish")
+
+    from urllib.parse import unquote_plus
+
+    location = unquote_plus(response.headers["location"])
+    assert "Published over the review: https://gh/pr/9" in location
+
+
+def test_only_a_review_waiting_on_a_person_can_be_sent_back(client, session):
+    plan = _plan_awaiting_review(session, task=a_task(session))
+
+    assert client.post(f"/runs/{plan.id}/send-back").status_code == 409
+
+
+def test_the_page_offers_the_handoff_settings_and_the_review_buttons(client, session, cloned):
+    task = a_task(session)
+    review = _review_awaiting(session, task)
+
+    page = client.get(f"/projects/{task.project_id}").text
+
+    assert f"/projects/{task.project_id}/handoff" in page
+    assert f"/runs/{review.id}/send-back" in page
+    assert f"/runs/{review.id}/publish" in page

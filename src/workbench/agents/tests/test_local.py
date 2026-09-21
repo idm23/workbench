@@ -1089,3 +1089,10 @@ def test_a_transcript_that_fits_is_still_resumed(monkeypatch):
 
     assert captured["payloads"][0]["messages"][-1]["content"] == "And now"
     assert items[-1].resume_token == "small-session"
+
+
+def test_the_local_backend_refuses_to_review(monkeypatch):
+    items = drain(LocalBackend().run(a_request(phase=RunPhase.REVIEW)))
+
+    assert isinstance(items[-1], AgentUnavailable)
+    assert "does not review" in items[-1].message

@@ -1315,3 +1315,149 @@ def test_with_no_node_and_no_setting_the_backend_decides(monkeypatch):
     run = Run(phase=RunPhase.EXECUTE, backend="local")
 
     assert _model_for(run, None) is None
+
+
+# --- Handing off to a reviewer ----------------------------------------------
+#
+# Off unless a project names a reviewer — `projects.review_agent` — and then
+# nothing is published until the reviewer approves.
+
+
+def _reviewer_starts(db, run, monkeypatch, *, refuses: str | None = None):
+    from workbench.runs import lifecycle
+    from workbench.runs.tests.test_lifecycle import FakeExecutor
+
+    run.task.project.review_agent = "claude"
+    db.commit()
+    fake = FakeExecutor(refuses=refuses)
+    monkeypatch.setattr(lifecycle, "get_executor", lambda _name=None: fake)
+    return fake
+
+
+def _reviewing(monkeypatch, verdict: str | None, text: str = "Findings."):
+    fake = FakeBackend(outcome=AgentFinished(text=text, verdict=verdict, resume_token="rev"))
+    monkeypatch.setattr(runner_module, "get_backend", lambda _name: fake)
+    return fake
+
+
+def test_finished_work_on_a_reviewed_project_goes_to_review_not_a_pull_request(
+    db, run, checkout, backend, monkeypatch
+):
+    calls = _publishes(monkeypatch)
+    started = _reviewer_starts(db, run, monkeypatch)
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert "pushed" not in calls
+    assert run.pr_url is None
+    assert run.status is RunStatus.SUCCEEDED
+    assert run.task.status is not TaskStatus.DONE
+    review = db.query(Run).filter_by(task_id=run.task_id, phase=RunPhase.REVIEW).one()
+    assert review.backend == "claude"
+    assert started.started == [review.id]
+    assert _notices(db, run, "Nothing is published until it approves")
+
+
+def test_with_no_reviewer_finished_work_is_published_as_before(
+    db, run, checkout, backend, monkeypatch
+):
+    calls = _publishes(monkeypatch)
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert calls["pushed"] == run.task.branch
+    assert db.query(Run).filter_by(phase=RunPhase.REVIEW).count() == 0
+
+
+def test_a_review_that_cannot_start_publishes_rather_than_stranding_the_work(
+    db, run, checkout, backend, monkeypatch
+):
+    calls = _publishes(monkeypatch)
+    _reviewer_starts(db, run, monkeypatch, refuses="no slot")
+    _finished(db, run)
+
+    execute(db, run)
+
+    assert calls["pushed"] == run.task.branch
+    assert run.pr_url == "https://gh/pr/1"
+    assert _notices(db, run, "published without one")
+
+
+def test_an_approving_review_publishes_and_the_pull_request_carries_it(
+    db, task, checkout, monkeypatch
+):
+    calls = _publishes(monkeypatch)
+    _reviewing(monkeypatch, "approve", "Correct and complete.")
+    review = create_run(db, task, RunPhase.REVIEW, backend="claude")
+
+    execute(db, review)
+
+    assert calls["pushed"] == task.branch
+    assert "## Review (Claude (default login))" in calls["pr"]["body"]
+    assert "Correct and complete." in calls["pr"]["body"]
+    assert review.status is RunStatus.SUCCEEDED
+    assert review.pr_url == "https://gh/pr/1"
+    assert task.status is TaskStatus.DONE
+
+
+def test_a_review_asking_for_changes_publishes_nothing(db, task, checkout, monkeypatch):
+    calls = _publishes(monkeypatch)
+    _reviewing(monkeypatch, "changes", "- lifecycle.py: the task run gets no login")
+    review = create_run(db, task, RunPhase.REVIEW, backend="claude")
+
+    execute(db, review)
+
+    assert "pushed" not in calls
+    assert review.status is RunStatus.AWAITING_REVIEW
+    assert review.summary == "- lifecycle.py: the task run gets no login"
+    assert task.status is TaskStatus.BLOCKED
+
+
+def test_a_review_with_no_verdict_is_never_taken_as_approval(db, task, checkout, monkeypatch):
+    calls = _publishes(monkeypatch)
+    _reviewing(monkeypatch, None, "I looked at it.")
+    review = create_run(db, task, RunPhase.REVIEW, backend="claude")
+
+    execute(db, review)
+
+    assert "pushed" not in calls
+    assert review.status is RunStatus.AWAITING_REVIEW
+    assert _notices(db, review, "no clear verdict")
+
+
+def test_a_review_sees_the_diff_and_resumes_nobody(db, task, checkout, backend):
+    earlier = create_run(db, task, RunPhase.EXECUTE, backend="fake")
+    earlier.resume_token = "the-executors-session"
+    earlier.summary = "Added the login to every AgentRequest."
+    db.commit()
+    review = create_run(db, task, RunPhase.REVIEW, backend="fake")
+
+    prepared = prepare(db, review)
+
+    assert not isinstance(prepared, NotPrepared)
+    assert prepared.request.resume_token is None
+    assert "```diff" in prepared.request.prompt
+    assert "Added the login to every AgentRequest." in prepared.request.prompt
+
+
+def test_an_execute_run_is_handed_its_seed(db, task, checkout, backend):
+    run = create_run(
+        db, task, RunPhase.EXECUTE, backend="fake", seed_message="The approved plan: do X."
+    )
+
+    prepared = prepare(db, run)
+
+    assert not isinstance(prepared, NotPrepared)
+    assert "The approved plan: do X." in prepared.request.prompt
+
+
+def test_work_sent_back_resumes_the_executor_not_the_reviewer(db, task):
+    work = create_run(db, task, RunPhase.EXECUTE, backend="claude")
+    work.resume_token = "executor"
+    review = create_run(db, task, RunPhase.REVIEW, backend="claude")
+    review.resume_token = "reviewer"
+    db.commit()
+
+    assert resume_token_for(db, task, "claude") == "executor"

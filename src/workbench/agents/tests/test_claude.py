@@ -1398,3 +1398,30 @@ def test_no_login_leaves_the_default_config_dir(tmp_path):
     request = backend_module.AgentRequest(worktree=tmp_path, phase=RunPhase.EXECUTE, prompt="x")
 
     assert "CLAUDE_CONFIG_DIR" not in backend_module._env_for(request)
+
+
+def test_a_review_verdict_and_findings_come_from_structured_output():
+    text, verdict = backend_module._review(
+        a_result(
+            structured_output={
+                "verdict": "changes",
+                "summary": "One call site is missing.",
+                "findings": ["runner.py: the task run gets no login"],
+            }
+        )
+    )
+
+    assert verdict == "changes"
+    assert text == "One call site is missing.\n\n- runner.py: the task run gets no login"
+
+
+def test_a_review_in_prose_has_no_verdict():
+    """Never read as approval — see `runner._record_review`."""
+    text, verdict = backend_module._review(a_result(result="Looks fine to me."))
+
+    assert verdict is None
+    assert text == "Looks fine to me."
+
+
+def test_a_review_runs_read_only():
+    assert backend_module._permission_mode(backend_module.RunPhase.REVIEW) == "plan"

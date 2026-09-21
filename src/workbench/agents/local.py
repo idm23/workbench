@@ -794,6 +794,15 @@ class LocalBackend:
         stopping.
         """
         phase = request.phase
+        if phase is RunPhase.REVIEW:
+            # Not offered as a reviewer (see `registry.can_review`); refused here
+            # too, so a review that reaches this backend anyway fails with a
+            # reason rather than running as a plan with no way to deliver.
+            yield AgentUnavailable(
+                "The local backend does not review work. Choose a reviewer that can, "
+                "such as claude, in the project's Agent panel."
+            )
+            return
         model = request.model or local_model()
         # What the runner picked, else this machine's own configuration. The
         # fallback is what keeps a single-machine install working with no nodes

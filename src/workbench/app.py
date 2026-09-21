@@ -28,7 +28,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from workbench.agents import available_backends
-from workbench.agents.prompts import CHECK_CI_SHORTCUT, SPLIT_SHORTCUT
+from workbench.agents.prompts import (
+    APPROVED_PLAN_HEADER,
+    CHECK_CI_SHORTCUT,
+    REVIEW_FEEDBACK_HEADER,
+    SPLIT_SHORTCUT,
+)
+from workbench.agents.registry import can_review
 from workbench.api import router as api_router
 from workbench.config import (
     default_agent_backend,
@@ -81,11 +87,13 @@ from workbench.runs.lifecycle import (
     NotCancellable,
     active_run_for_project,
     active_run_for_task,
+    agent_allowed,
     agent_choice,
     agent_choices,
     agent_label,
     cancel_run,
     continue_run,
+    parse_agent_choice,
     start_conversation,
     start_run,
 )
@@ -512,6 +520,14 @@ def show_project(
             # What a fresh run on this project may be started as — see above.
             "agent_options": agent_options,
             "agent_default": agent_default,
+            # Who carries out approved plans, and who rechecks finished work:
+            # both empty by default, which is how every project behaved before.
+            "reviewer_options": [
+                (value, label)
+                for value, label in agent_options
+                if can_review(parse_agent_choice(value)[0])
+            ],
+            "execute_default": project.execute_agent if project.execute_agent in choices else None,
             "activity_version": activity_version,
             # Tasks one click away from starting or continuing execution —
             # promoted above the tree so the thing most worth doing on the
@@ -654,6 +670,113 @@ def set_project_agents(
         else "Any agent may now work this project."
     )
     return _redirect(f"/projects/{project.id}", notice=notice)
+
+
+@app.post("/projects/{project_id}/handoff")
+def set_project_handoff(
+    db: DbSession,
+    project_id: int,
+    execute_agent: Annotated[str, Form()] = "",
+    review_agent: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """Choose who carries out approved plans, and who rechecks finished work.
+
+    Both default to empty, and empty is the off switch: the planner executes
+    its own plan and nothing is reviewed, exactly as before this existed. So
+    turning either off is choosing the first option in its list again.
+
+    Checked against the project's allowed agents here, not only when a run
+    starts, so a setting that could never be used is refused when it is made
+    rather than discovered as a failed run later.
+    """
+    project = _get_project_or_404(db, project_id)
+    target = f"/projects/{project.id}"
+    executor, reviewer = execute_agent.strip(), review_agent.strip()
+    for choice in (executor, reviewer):
+        if not choice:
+            continue
+        backend, login = parse_agent_choice(choice)
+        if backend not in available_backends():
+            return _redirect(target, error=f"There is no agent backend called {backend!r}.")
+        if not agent_allowed(project, backend, login):
+            return _redirect(target, error=f"This project does not allow {choice}.")
+    if reviewer and not can_review(parse_agent_choice(reviewer)[0]):
+        return _redirect(target, error=f"{reviewer} cannot review work.")
+
+    project.execute_agent = executor or None
+    project.review_agent = reviewer or None
+    db.commit()
+    said = [
+        f"approved plans run on {agent_label(executor)}"
+        if executor
+        else "approved plans run on whoever planned them",
+        f"finished work is rechecked by {agent_label(reviewer)} before it is published"
+        if reviewer
+        else "finished work is published without a review",
+    ]
+    return _redirect(target, notice=f"{said[0].capitalize()}; {said[1]}.")
+
+
+def _review_awaiting_a_person(db: Session, run_id: int) -> tuple[Run, Task] | str:
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No run with id {run_id}.")
+    if (
+        run.task is None
+        or run.phase is not RunPhase.REVIEW
+        or run.status is not RunStatus.AWAITING_REVIEW
+    ):
+        return f"Run {run_id} is not a review waiting on a decision."
+    return run, run.task
+
+
+@app.post("/runs/{run_id}/send-back")
+def send_back_after_review(db: DbSession, run_id: int) -> RedirectResponse:
+    """Hand a review's findings to an executor, on top of the work so far.
+
+    The executor is the project's `execute_agent` when it has one, otherwise
+    whoever did the work being reviewed. Its prompt carries the findings,
+    because nothing else would: the reviewer's session is not the executor's.
+    The review is marked done once its findings are handed on, so the buttons
+    go with it — the lesson of #50.
+    """
+    found = _review_awaiting_a_person(db, run_id)
+    if isinstance(found, str):
+        raise HTTPException(status.HTTP_409_CONFLICT, found)
+    review, task = found
+    target = f"/projects/{task.project_id}"
+    if task.project.execute_agent:
+        backend, login = parse_agent_choice(task.project.execute_agent)
+    else:
+        work = next((r for r in reversed(task.runs) if r.phase is RunPhase.EXECUTE), None)
+        backend, login = (work.backend, work.login) if work else (None, None)
+    seed = f"{REVIEW_FEEDBACK_HEADER}\n\n{review.summary or ''}".strip()
+    finish_run(db, review, RunStatus.SUCCEEDED)
+    result = start_run(db, task, RunPhase.EXECUTE, backend=backend, login=login, seed_message=seed)
+    if isinstance(result, Run):
+        return _redirect(target, notice=f"Sent back: run {result.id} is addressing the review.")
+    return _redirect(target, error=result.message)
+
+
+@app.post("/runs/{run_id}/publish")
+def publish_over_review(db: DbSession, run_id: int) -> RedirectResponse:
+    """Publish work its review did not approve, because a person decided to.
+
+    The pull request says so in its body. Runs in the request, like Sync does:
+    a push and one API call, and the person pressing it is waiting to see the
+    link.
+    """
+    from workbench.runs.runner import publish_despite_review
+
+    found = _review_awaiting_a_person(db, run_id)
+    if isinstance(found, str):
+        raise HTTPException(status.HTTP_409_CONFLICT, found)
+    review, task = found
+    target = f"/projects/{task.project_id}"
+    url = publish_despite_review(db, review)
+    if url:
+        return _redirect(target, notice=f"Published over the review: {url}")
+    return _redirect(target, error="Nothing was published — the review run's log says why.")
 
 
 @app.post("/projects/{project_id}/conversation")
@@ -850,8 +973,16 @@ def approve_plan(db: DbSession, run_id: int) -> RedirectResponse:
 
     # The plan's own backend and login, not the project's current default:
     # approving it starts execution in the same worktree the plan ran in, and
-    # on a restricted project the default may not even be one it allows.
-    result = start_run(db, task, RunPhase.EXECUTE, backend=run.backend, login=run.login)
+    # on a restricted project the default may not even be one it allows —
+    # unless the project hands execution to someone else ("plan with Claude,
+    # execute with local"). That agent cannot resume the planner's session, so
+    # the approved plan travels in its prompt instead.
+    if task.project.execute_agent:
+        backend, login = parse_agent_choice(task.project.execute_agent)
+        seed = f"{APPROVED_PLAN_HEADER}\n\n{run.plan}" if run.plan else None
+    else:
+        backend, login, seed = run.backend, run.login, None
+    result = start_run(db, task, RunPhase.EXECUTE, backend=backend, login=login, seed_message=seed)
     if isinstance(result, Run):
         return _redirect(target, notice=f"Run {result.id} started (execute).")
     return _redirect(target, error=result.message)
