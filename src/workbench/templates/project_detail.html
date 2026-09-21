@@ -100,6 +100,14 @@
            placeholder="e.g. uv sync --frozen" style="margin-bottom: .5rem;">
     <button class="slim" type="submit">Save setup</button>
   </form>
+  {# Which backend/login pairs may run this project at all. Enforced by
+     `start_run` — see `agent_allowed` in lifecycle.py. Empty means any. #}
+  <form method="post" action="/projects/{{ project.id }}/agents" style="margin-top: .75rem;">
+    <label for="allowed_agents">Agents allowed on this project (one per line; empty means any)</label>
+    <textarea name="allowed_agents" id="allowed_agents" rows="3" class="mono"
+              style="margin-bottom: .5rem;">{{ (project.allowed_agents or []) | join("\n") }}</textarea>
+    <button class="slim" type="submit">Save allowed agents</button>
+  </form>
 </details>
 
 <form method="post" action="/projects/{{ project.id }}/conversation" style="border: none; padding: 0; margin-bottom: 1.75rem;">
