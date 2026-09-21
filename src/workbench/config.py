@@ -741,6 +741,25 @@ def agent_home() -> Path:
     """
     return Path("/home") / service_account()
 
+def claude_logins_dir() -> Path:
+    """Where named Claude logins live: one CLI config directory per login."""
+    return agent_home() / ".claude-logins"
+
+
+def claude_login_names() -> list[str]:
+    """The named logins on this machine, sorted. Empty when there are none."""
+    try:
+        return sorted(entry.name for entry in claude_logins_dir().iterdir() if entry.is_dir())
+    except OSError:
+        return []
+
+
+def claude_login_dir(name: str) -> Path | None:
+    """The directory for a named login, or None if there is no such login."""
+    if not name or "/" in name or name in (".", ".."):
+        return None
+    path = claude_logins_dir() / name
+    return path if path.is_dir() else None
 
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""
