@@ -433,6 +433,8 @@ class Run(Base):
     # What that backend was actually pointed at. Null when the backend does not
     # name its model, or does not have one.
     model: Mapped[str | None] = mapped_column(String(100), default=None)
+    # Which login ran this. Null means the backend's default login.
+    login: Mapped[str | None] = mapped_column(String(200), default=None)
 
     # An opaque handle for continuing this conversation, so the execute phase
     # resumes the plan rather than starting cold.
