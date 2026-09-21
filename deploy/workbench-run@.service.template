@@ -85,3 +85,7 @@ ReadWritePaths=-__HOME__/.claude.json
 # agent that eventually pushes. Without this the first push fails on a
 # read-only home rather than on anything to do with the key.
 ReadWritePaths=-__HOME__/.ssh
+
+# Named Claude logins. The CLI refreshes each login's token inside its own
+# directory, so these must be writable exactly as ~/.claude is.
+ReadWritePaths=-__HOME__/.claude-logins

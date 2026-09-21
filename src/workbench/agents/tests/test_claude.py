@@ -1377,3 +1377,24 @@ def test_there_is_no_login_command_when_there_is_no_cli():
     status = read_credential(SIGNED_OUT)
 
     assert status.login_command == ()
+
+
+def test_a_named_login_points_the_cli_at_its_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr("workbench.config.agent_home", lambda: tmp_path)
+    (tmp_path / ".claude-logins" / "ian@example.com").mkdir(parents=True)
+    request = backend_module.AgentRequest(
+        worktree=tmp_path,
+        phase=RunPhase.EXECUTE,
+        prompt="x",
+        login="ian@example.com",
+    )
+
+    env = backend_module._env_for(request)
+
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-logins" / "ian@example.com")
+
+
+def test_no_login_leaves_the_default_config_dir(tmp_path):
+    request = backend_module.AgentRequest(worktree=tmp_path, phase=RunPhase.EXECUTE, prompt="x")
+
+    assert "CLAUDE_CONFIG_DIR" not in backend_module._env_for(request)

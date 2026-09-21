@@ -58,7 +58,7 @@ from workbench.agents.protocol import (
     CredentialStatus,
     SubtaskProposal,
 )
-from workbench.config import agent_environment, bills_subscription, port
+from workbench.config import agent_environment, bills_subscription, claude_login_dir, port
 from workbench.database.models import RunEventKind, RunPhase
 
 logger = logging.getLogger(__name__)
@@ -325,12 +325,17 @@ def _env_for(request: AgentRequest) -> dict[str, str]:
     read-only and cannot call anything — but harmless to hand over either
     way.
     """
-    return {
+    env: dict[str, str] = {
         "WORKBENCH_RUN_ID": str(request.run_id),
         "WORKBENCH_TASK_ID": str(request.task_id),
         "WORKBENCH_PROJECT_ID": str(request.project_id),
         "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
     }
+    if request.login:
+        directory = claude_login_dir(request.login)
+        if directory is not None:
+            env["CLAUDE_CONFIG_DIR"] = str(directory)
+    return env
 
 
 def prompt_for(request: AgentRequest) -> str:
@@ -742,6 +747,11 @@ class ClaudeBackend:
         `receive_response()` per turn on the same session for as long as
         `request.inputs` keeps producing them.
         """
+        if request.login and claude_login_dir(request.login) is None:
+            yield AgentUnavailable(
+                f"There is no Claude login named {request.login!r} on this machine."
+            )
+            return
         model: str | None = None
         last_result: ResultMessage | None = None
 
