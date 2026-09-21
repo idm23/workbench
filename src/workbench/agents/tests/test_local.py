@@ -1038,3 +1038,54 @@ def test_a_prompt_a_few_tokens_under_the_floor_is_not_truncation():
     added = [{"role": "tool", "content": "." * 6_048}]  # floor: 16,000 + 756
 
     assert window.check(added, backend_module._Assistant(prompt_tokens=16_754)) is None
+
+
+# --- #82: a retry that would inherit a transcript too long to work in -----------
+
+
+def _store_transcript(token: str, messages: list[dict[str, Any]]) -> None:
+    path = backend_module._session_path(token)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(messages), encoding="utf-8")
+
+
+def test_an_oversized_transcript_is_not_resumed(monkeypatch):
+    """Run 73 resumed a session already at the window's limit, and could do
+    nothing in it. A fresh start in the same worktree is worth more."""
+    monkeypatch.setenv("WORKBENCH_INFERENCE_CONTEXT_TOKENS", "1000")
+    _store_transcript(
+        "old-session",
+        [
+            {"role": "system", "content": "s"},
+            {"role": "tool", "content": "x" * 10_000, "tool_call_id": "c"},
+        ],
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module, "_client", stub(sse(chunk(content="Done.")), captured=captured)
+    )
+
+    items = drain(LocalBackend().run(a_request(prompt="Do the thing", resume_token="old-session")))
+
+    sent = captured["payloads"][0]["messages"]
+    assert all("x" * 100 not in (m.get("content") or "") for m in sent)
+    assert "Do the thing" in sent[0]["content"]
+    assert "git status" in sent[1]["content"]
+    notices = [n["text"] for n in events(items, RunEventKind.NOTICE)]
+    assert any("too long to continue" in n for n in notices)
+    assert isinstance(items[-1], AgentFinished)
+    assert items[-1].resume_token != "old-session"
+
+
+def test_a_transcript_that_fits_is_still_resumed(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_INFERENCE_CONTEXT_TOKENS", "32768")
+    _store_transcript("small-session", [{"role": "system", "content": "s"}])
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module, "_client", stub(sse(chunk(content="Done.")), captured=captured)
+    )
+
+    items = drain(LocalBackend().run(a_request(prompt="And now", resume_token="small-session")))
+
+    assert captured["payloads"][0]["messages"][-1]["content"] == "And now"
+    assert items[-1].resume_token == "small-session"
