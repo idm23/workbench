@@ -144,6 +144,30 @@ def clip(text: str) -> str:
     return f"{text[:MAX_OUTPUT_CHARS]}\n… truncated, {dropped} more characters"
 
 
+#: How much of a long command's output survives, and from which end. Most of
+#: it from the end, because that is where a command says how it went.
+_COMMAND_HEAD_CHARS = 1_500
+_COMMAND_TAIL_CHARS = MAX_OUTPUT_CHARS - _COMMAND_HEAD_CHARS
+
+
+def clip_output(text: str) -> str:
+    """Bound a command's output, keeping its beginning *and* its end.
+
+    `clip` keeps the start, which is right for a file and wrong for a command:
+    pytest prints its verdict last. Run 69 ran the suite three times and saw
+    the opening of a traceback each time, then "… truncated, 124287 more
+    characters" — never the one line saying which test failed and why. Shown
+    the last forty-five lines instead, it diagnosed its own bug in one turn.
+    """
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    dropped = len(text) - _COMMAND_HEAD_CHARS - _COMMAND_TAIL_CHARS
+    return (
+        f"{text[:_COMMAND_HEAD_CHARS]}\n… {dropped} characters from the middle omitted …\n"
+        f"{text[-_COMMAND_TAIL_CHARS:]}"
+    )
+
+
 def _resolve(context: ToolContext, raw: str) -> Path | ToolResult:
     """A path inside the worktree, or the refusal to use one outside it.
 
@@ -301,7 +325,7 @@ def _run_command(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     # A non-zero exit is information, not a tool failure: the model asked what
     # happens and this is what happened. Marking it an error invites a retry
     # loop over a test that is legitimately red.
-    return ToolResult(clip(report))
+    return ToolResult(clip_output(report))
 
 
 #: What separates a line number from the line in `read_file`'s output.
@@ -432,6 +456,30 @@ def _around(content: str, first: int, last: int) -> str:
     return "\n".join(f"{i + 1}{GUTTER}{lines[i]}" for i in range(lo, hi))
 
 
+def _removed(before: str, after: str) -> list[str]:
+    """Lines of real content that were in the file and no longer are.
+
+    Compared as multisets of stripped, non-blank lines, so moving a line or
+    re-indenting it does not count — only content that has gone. Run 69
+    replaced seventeen lines with five and deleted a column definition that
+    way: still valid Python, so nothing refused it, and nothing said so.
+    """
+    remaining: dict[str, int] = {}
+    for line in after.split("\n"):
+        if line.strip():
+            remaining[line.strip()] = remaining.get(line.strip(), 0) + 1
+    gone = []
+    for line in before.split("\n"):
+        key = line.strip()
+        if not key:
+            continue
+        if remaining.get(key):
+            remaining[key] -= 1
+        else:
+            gone.append(key)
+    return gone
+
+
 def _replace_lines(content: str, first: int, end: int, new: str) -> str:
     """Lines [first, end) replaced by `new`, keeping the file's final newline."""
     trailing = content.endswith("\n")
@@ -525,7 +573,14 @@ def _edit_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
         return ToolResult(f"Could not write {target}: {exc}", is_error=True)
     where = target.relative_to(context.worktree.resolve())
     last = first + new.count("\n") + 1
-    return ToolResult(f"Edited {where}.\n{_around(updated, first, last)}")
+    report = f"Edited {where}.\n{_around(updated, first, last)}"
+    if gone := _removed(content, updated):
+        shown = "\n".join(f"  {line}" for line in gone[:8])
+        more = f"\n  … and {len(gone) - 8} more" if len(gone) > 8 else ""
+        report += (
+            f"\n\nThese lines are no longer in the file — make sure that was meant:\n{shown}{more}"
+        )
+    return ToolResult(report)
 
 
 def _git(context: ToolContext, *args: str) -> str | None:

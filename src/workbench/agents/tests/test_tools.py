@@ -24,6 +24,7 @@ from workbench.agents.tools import (
     PlanSubmitted,
     ToolContext,
     ToolResult,
+    clip_output,
     dispatch,
     tool_names_for,
     tools_for,
@@ -694,3 +695,57 @@ def test_write_file_still_creates_and_rewrites_small_files(context, worktree):
     assert not call(context, "write_file", path="new.py", content="x = 1\n").is_error
     assert not call(context, "write_file", path="new.py", content="y = 2\n").is_error
     assert (worktree / "new.py").read_text() == "y = 2\n"
+
+
+# --- Seeing what happened -----------------------------------------------------
+
+
+def test_long_command_output_keeps_its_verdict():
+    """pytest prints which test failed last. Run 69 never saw it."""
+    output = "." * 50_000 + "\nFAILED tests/test_x.py::test_y - TypeError: 'model'\n1 failed"
+
+    shown = clip_output(output)
+
+    assert shown.endswith("1 failed")
+    assert "TypeError: 'model'" in shown
+    assert "omitted" in shown
+    assert len(shown) < 7_000
+
+
+def test_short_command_output_is_untouched():
+    assert clip_output("ok\n") == "ok\n"
+
+
+def test_an_edit_says_which_lines_it_removed(context, worktree):
+    """Run 69 replaced seventeen lines with five and deleted a column, silently."""
+    model = worktree / "src" / "model.py"
+    model.write_text(
+        "class Run:\n    backend = 1\n    model = 2\n    resume_token = 3\n", encoding="utf-8"
+    )
+
+    result = call(
+        context,
+        "edit_file",
+        path="src/model.py",
+        line_start=2,
+        line_end=4,
+        new_text="    backend = 1\n    login = 4",
+    )
+
+    assert not result.is_error, result.text
+    assert "no longer in the file" in result.text
+    assert "model = 2" in result.text
+    assert "resume_token = 3" in result.text
+    assert "backend = 1\n" not in result.text.split("no longer in the file")[1]
+
+
+def test_an_edit_that_removes_nothing_says_nothing_about_it(context, loop_file):
+    result = call(
+        context,
+        "edit_file",
+        path="src/loop.py",
+        old_text="        return 'made'",
+        new_text="        finish()\n        return 'made'",
+    )
+
+    assert "no longer in the file" not in result.text
