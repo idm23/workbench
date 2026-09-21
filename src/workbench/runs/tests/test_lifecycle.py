@@ -91,6 +91,14 @@ def test_starting_a_run_records_how_it_was_started(db, task, executor):
     assert executor.started == [run.id]
 
 
+def test_starting_a_run_with_login(db, task, executor):
+    run = start_run(db, task, RunPhase.EXECUTE, login="ian@example.com")
+
+    assert isinstance(run, Run)
+    assert run.login == "ian@example.com"
+    assert executor.started == [run.id]
+
+
 def test_the_handle_is_recorded_before_the_job_is_asked_to_run(db, task, monkeypatch):
     """Otherwise a crash in between leaves something running and unreachable.
 
