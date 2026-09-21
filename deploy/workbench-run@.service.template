@@ -49,6 +49,15 @@ RuntimeMaxSec=__RUN_TIMEOUT__
 # says the intent out loud.
 TimeoutStopSec=30
 
+# systemd's default is a soft limit of 1,024 open files, and an agent's job is
+# running other people's builds and test suites. This project's own suite needs
+# more than that — it leaks SQLite connections until the garbage collector
+# catches up — so no agent run could ever complete it: part 1 of task 64 crashed
+# at pytest's teardown with "Too many open files" twice, and reported, correctly,
+# that it could not tell which tests had failed. An interactive shell here has a
+# limit of over a million, which is why it never showed anywhere else.
+LimitNOFILE=65536
+
 # Not restarted. A failed run is a row with an error on it and a person's
 # decision about whether to try again, not something to retry blindly against a
 # rate limit.
