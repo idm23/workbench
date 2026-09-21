@@ -58,7 +58,7 @@ from workbench.agents.protocol import (
     CredentialStatus,
     SubtaskProposal,
 )
-from workbench.config import agent_environment, bills_subscription, port, claude_login_dir
+from workbench.config import agent_environment, bills_subscription, claude_login_dir, port
 from workbench.database.models import RunEventKind, RunPhase
 
 logger = logging.getLogger(__name__)
