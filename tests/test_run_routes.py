@@ -382,6 +382,24 @@ def test_approving_a_decomposed_plan_creates_its_subtasks_instead(client, sessio
     assert children[1].entry_phase is None
 
 
+def test_approving_a_decomposed_plan_again_does_not_create_subtasks(client, session, executor):
+    task = a_task(session)
+    run = _plan_awaiting_review(
+        session,
+        task=task,
+        proposed_subtasks={"subtasks": [{"title": "A"}, {"title": "B"}]},
+    )
+    client.post(f"/runs/{run.id}/approve")
+    client.post(f"/runs/{run.id}/approve")
+    children = session.query(Task).filter_by(parent_id=task.id).order_by(Task.id).all()
+    assert [c.title for c in children] == ["A", "B"]
+    # The route committed through its own session; re-read rather than trust
+    # this session's cached copy, which still says awaiting_review.
+    session.refresh(run)
+    assert run.status is RunStatus.SUCCEEDED
+    assert executor.started == []
+
+
 def test_a_decomposed_subtask_defaults_its_origin_to_staging(client, session, executor):
     """Not the parent's own branch: the usual reason to decompose is a
     handful of independent pieces that should each land in staging on their
