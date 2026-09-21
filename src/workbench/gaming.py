@@ -1,6 +1,6 @@
 """Hand this node's GPU to the screen downstairs, and take it back afterwards.
 
-A node with 8 GB of VRAM cannot hold `qwen3:8b` and a game at the same time, so
+A node with 8 GB of VRAM cannot hold its model and a game at the same time, so
 inference and gaming are mutually exclusive on one card. This module is the
 switch, driven by `workbench-gaming.service` and, in practice, by Sunshine's
 `global_prep_cmd` on either side of a stream.
