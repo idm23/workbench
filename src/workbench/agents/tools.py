@@ -303,6 +303,15 @@ def _run_command(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
         ),
     )
 
+    # A worktree's own `.venv` comes first, as it would in an activated shell.
+    # Run 74 was told to use `.venv/bin/python -m pytest` and typed `pytest`
+    # and `python -m pytest` instead, reaching the system Python, which has no
+    # pytest. Prepended inside the command rather than through the
+    # environment, because a login shell's profile is free to rewrite PATH.
+    venv = context.worktree / ".venv"
+    if (venv / "bin").is_dir():
+        command = f'export VIRTUAL_ENV="{venv}" PATH="{venv}/bin:$PATH"\n{command}'
+
     try:
         completed = subprocess.run(
             ["bash", "-lc", command],
@@ -343,6 +352,16 @@ _LOOSE_GUTTER = re.compile(r"^\s*\d+(?:│|\t|: |\| | +|$)")
 _EXACT_GUTTER = re.compile(r"^\s*\d+(?:│|\t|$)")
 _STILL_NUMBERED = re.compile(r"^\s*\d+\s")
 
+#: A leading `+` on every line: new code written as the added half of a diff.
+#: gpt-oss did it for every new test it wrote in run 74.
+_DIFF_ADDITION = re.compile(r"^\+")
+
+#: How far from the line a model names its quoted text may actually be, and
+#: still count as the text it meant. Enough for a line number that drifted
+#: after an earlier edit; not enough to reach a different function — which is
+#: where "nearest occurrence" alone went when run 74's edit was replayed.
+_LINE_SLACK = 3
+
 #: Below this many lines a whole-file rewrite is ordinary, not a warning sign.
 _REWRITE_GRACE_LINES = 20
 
@@ -381,10 +400,12 @@ def _locate(content: str, old: str, near: int | None) -> tuple[int, int] | str:
             "or pass line_start and line_end instead."
         )
     if len(hits) > 1:
+        places = ", ".join(str(i + 1) for i in hits[:5])
         if near is None:
-            places = ", ".join(str(i + 1) for i in hits[:5])
             return f"That text appears at lines {places}. Pass line_start to say which."
         hits.sort(key=lambda i: abs(i - near))
+        if abs(hits[0] - near) > _LINE_SLACK:
+            return f"That text is not at line {near + 1}; it appears at lines {places}."
     return hits[0], hits[0] + len(wanted)
 
 
@@ -510,7 +531,7 @@ def _edit_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     except OSError as exc:
         return ToolResult(f"Could not read {target}: {exc}", is_error=True)
 
-    new = _ungutter(new, _EXACT_GUTTER)
+    new = _ungutter(_ungutter(new, _DIFF_ADDITION), _EXACT_GUTTER)
     body = [line for line in new.split("\n") if line.strip()]
     if body and all(_STILL_NUMBERED.match(line) for line in body):
         return ToolResult(
@@ -528,15 +549,35 @@ def _edit_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     old = args.get("old_text")
     if isinstance(old, str) and old.strip():
         count = content.count(old)
-        if count > 1 and not bool(args.get("replace_all")):
-            return ToolResult(
-                f"That text appears {count} times. Include more surrounding lines to "
-                "make it unique, or pass replace_all.",
-                is_error=True,
-            )
-        if count:
+        replace_all = bool(args.get("replace_all"))
+        if count > 1 and not replace_all:
+            starts = [i for i in range(len(content)) if content.startswith(old, i)]
+            if near is None:
+                lines = ", ".join(str(content.count("\n", 0, i) + 1) for i in starts[:6])
+                # replace_all is deliberately not offered as the way out. Run 74
+                # was told "or pass replace_all", took it, and changed three
+                # functions' signatures when it meant one.
+                return ToolResult(
+                    f"That text appears {count} times, at lines {lines}. Pass line_start "
+                    "to say which one, or quote more of the surrounding lines.",
+                    is_error=True,
+                )
+            # Which occurrence was meant is exactly what line_start says. Run 74
+            # quoted a repeated parameter line *and* named its line, and was
+            # refused four times for being ambiguous.
+            index = min(starts, key=lambda i: abs(content.count("\n", 0, i) - near))
+            first = content.count("\n", 0, index)
+            if abs(first - near) > _LINE_SLACK:
+                lines = ", ".join(str(content.count("\n", 0, i) + 1) for i in starts[:6])
+                return ToolResult(
+                    f"That text is not at line {near + 1}; it appears at lines {lines}. "
+                    "Read the file again and name the line it is on.",
+                    is_error=True,
+                )
+            updated = content[:index] + new + content[index + len(old) :]
+        elif count:
             index = content.index(old)
-            updated = content.replace(old, new) if count > 1 else content.replace(old, new, 1)
+            updated = content.replace(old, new) if replace_all else content.replace(old, new, 1)
             first = content.count("\n", 0, index)
         else:
             found = _locate(content, _ungutter(old, _LOOSE_GUTTER), near)
