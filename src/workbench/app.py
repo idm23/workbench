@@ -582,6 +582,37 @@ def set_project_backend(
     )
 
 
+@app.post("/projects/{project_id}/setup")
+def set_project_setup(
+    db: DbSession,
+    project_id: int,
+    setup_command: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """Set what runs in a task's worktree before an agent starts on it.
+
+    `projects.setup_command` has existed since the schema did, and nothing
+    could set it — so on this project an agent could never run the test suite.
+    The deployed virtualenv has no test dependencies, a worktree has no
+    virtualenv at all, and run 67 reported "All tests pass" over the exit
+    status of a pytest that was not installed.
+
+    Stored as typed, and run with the worktree as its working directory. Write
+    it relative to that — `../../` is this instance's `data/` — rather than as
+    an absolute path: staging restores production's rows on every deploy, and
+    an absolute path would arrive there pointing at production.
+    """
+    project = _get_project_or_404(db, project_id)
+    command = setup_command.strip()
+    project.setup_command = command or None
+    db.commit()
+    notice = (
+        "Every run on this project now starts by running its setup command."
+        if command
+        else "Runs on this project no longer run a setup command."
+    )
+    return _redirect(f"/projects/{project.id}", notice=notice)
+
+
 @app.post("/projects/{project_id}/conversation")
 def start_project_conversation(db: DbSession, project_id: int) -> RedirectResponse:
     """Talk directly to a project, not any one task within it.
