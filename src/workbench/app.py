@@ -81,6 +81,9 @@ from workbench.runs.lifecycle import (
     NotCancellable,
     active_run_for_project,
     active_run_for_task,
+    agent_choice,
+    agent_choices,
+    agent_label,
     cancel_run,
     continue_run,
     start_conversation,
@@ -478,6 +481,16 @@ def show_project(
     # arrive pointing at the other machine's disk.
     checkout = local_checkout(project.owner, project.repo)
 
+    # What a fresh Plan/Execute may be started as, and the label each choice
+    # reads as in the picker — computed once here rather than in the template,
+    # so the same list a run is actually checked against (`agent_allowed`) is
+    # what the page offers, and a project restricted to one login never shows
+    # a choice nothing but that login would satisfy.
+    choices = agent_choices(project)
+    agent_options = [(choice, agent_label(choice)) for choice in choices]
+    preferred_agent = agent_choice(project.agent_backend or default_agent_backend(), None)
+    agent_default = preferred_agent if preferred_agent in choices else None
+
     return templates.TemplateResponse(
         request,
         "project_detail.html",
@@ -496,6 +509,9 @@ def show_project(
             # dropdown that offers a run which cannot start.
             "backends": available_backends(),
             "backend_default": default_agent_backend(),
+            # What a fresh run on this project may be started as — see above.
+            "agent_options": agent_options,
+            "agent_default": agent_default,
             "activity_version": activity_version,
             # Tasks one click away from starting or continuing execution —
             # promoted above the tree so the thing most worth doing on the
@@ -729,6 +745,7 @@ def start_task_run(
     task_id: int,
     phase: Annotated[str, Form()] = "plan",
     origin: Annotated[str, Form()] = "",
+    agent: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
     """Hand a task to an agent.
 
@@ -736,6 +753,15 @@ def start_task_run(
     executor that would not start — come back as messages rather than errors,
     because every one of them is an ordinary answer to a button press and the
     person reading it is on a phone.
+
+    `agent` is `backend` or `backend:login`, as offered by `agent_options` on
+    the project page — sent as a fresh choice, not the project's own default,
+    which is why an unknown backend is refused here rather than silently
+    falling back to it. The Retry and re-plan buttons carry no `agent` at
+    all, because they are resuming a task already underway: they get the
+    backend and login of its most recent run instead, since that is the only
+    account a resume token or a Claude session under a named login actually
+    exists for.
     """
     task = _get_task_or_404(db, task_id)
     target = f"/projects/{task.project_id}"
@@ -759,7 +785,23 @@ def start_task_run(
         task.origin_ref = origin or None
         db.commit()
 
-    result = start_run(db, task, chosen)
+    backend: str | None
+    login: str | None
+    if agent:
+        backend, _, login = agent.partition(":")
+        if backend not in available_backends():
+            return _redirect(target, error=f"There is no agent backend called {backend!r}.")
+        login = login or None
+    elif task.runs:
+        # No fresh choice was offered — Retry and re-plan post no `agent` —
+        # so pick up wherever the task's last attempt left off rather than
+        # silently reverting to the project's default.
+        last = task.runs[-1]
+        backend, login = last.backend, last.login
+    else:
+        backend, login = None, None
+
+    result = start_run(db, task, chosen, backend=backend, login=login)
     if isinstance(result, Run):
         return _redirect(target, notice=f"Run {result.id} started ({chosen.value}).")
     return _redirect(target, error=result.message)
@@ -806,7 +848,10 @@ def approve_plan(db: DbSession, run_id: int) -> RedirectResponse:
         finish_run(db, run, RunStatus.SUCCEEDED)
         return _redirect(target, notice=f"Created {len(proposed)} subtask(s) from the plan.")
 
-    result = start_run(db, task, RunPhase.EXECUTE)
+    # The plan's own backend and login, not the project's current default:
+    # approving it starts execution in the same worktree the plan ran in, and
+    # on a restricted project the default may not even be one it allows.
+    result = start_run(db, task, RunPhase.EXECUTE, backend=run.backend, login=run.login)
     if isinstance(result, Run):
         return _redirect(target, notice=f"Run {result.id} started (execute).")
     return _redirect(target, error=result.message)

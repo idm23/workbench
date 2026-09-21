@@ -17,8 +17,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from workbench.agents.registry import UnknownBackend, get_backend
-from workbench.config import default_agent_backend, max_concurrent_runs
+from workbench.agents.registry import UnknownBackend, available_backends, get_backend
+from workbench.config import claude_login_names, default_agent_backend, max_concurrent_runs
 from workbench.database.models import Project, Run, RunEventKind, RunPhase, RunStatus, Task
 from workbench.runs.executors import Started, UnknownExecutor, get_executor
 from workbench.runs.rate_limits import exhausted_windows
@@ -183,6 +183,35 @@ def agent_allowed(project: Project, backend: str, login: str | None) -> bool:
     return agent_choice(backend, login) in project.allowed_agents
 
 
+def agent_choices(project: Project) -> list[str]:
+    """What may be picked to start a fresh run on this project, in order.
+
+    A restricted project offers exactly what `allowed_agents` lists — nothing
+    more, since that is what `agent_allowed` will check the pick against
+    anyway. An unrestricted one offers every backend this machine knows about
+    at its default login, plus a named Claude login for each one signed in
+    here: the same universe a run may already land on when nothing is chosen.
+    """
+    if project.allowed_agents:
+        return list(project.allowed_agents)
+    return list(available_backends()) + [
+        agent_choice("claude", name) for name in claude_login_names()
+    ]
+
+
+def agent_label(choice: str) -> str:
+    """How a choice reads in a picker.
+
+    `Claude (default login)` and `Claude [name]` for the one backend with more
+    than one login on this machine; anything else shows as its own name, since
+    it has no second identity to distinguish it from.
+    """
+    backend, _, login = choice.partition(":")
+    if backend != "claude":
+        return backend
+    return f"Claude [{login}]" if login else "Claude (default login)"
+
+
 def choose_backend(db: Session, project: Project) -> Chosen:
     """The project's backend, or its fallback if the first has run out.
 
@@ -318,9 +347,13 @@ def continue_run(
     if limit > 0 and len(running) >= limit:
         return TooManyRuns(len(running), limit)
 
-    # The source run's backend, never the project's current default: the token
-    # is opaque and means nothing to any backend but the one that issued it.
-    run = create_task_conversation(db, task, backend=source.backend, seed_message=message)
+    # The source run's backend and login, never the project's current default:
+    # the token is opaque and means nothing to any backend but the one that
+    # issued it, running as whichever login that was — a Claude session opened
+    # under one named login does not exist under another.
+    run = create_task_conversation(
+        db, task, backend=source.backend, login=source.login, seed_message=message
+    )
     return _launch(db, run, executor)
 
 

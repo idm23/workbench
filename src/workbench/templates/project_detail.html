@@ -203,6 +203,19 @@
                       {% endfor %}
                     </select>
                   {% endif %}
+                  {#- Only a choice when there is more than one to make; with
+                      exactly one, it still has to be sent, or the run falls
+                      back to the project's own default rather than the one
+                      option this project actually allows. -#}
+                  {% if agent_options|length > 1 %}
+                    <select name="agent" style="width: auto; margin-bottom: 0;" aria-label="Agent">
+                      {% for value, label in agent_options %}
+                        <option value="{{ value }}" {{ 'selected' if value == agent_default }}>{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  {% elif agent_options %}
+                    <input type="hidden" name="agent" value="{{ agent_options[0][0] }}">
+                  {% endif %}
                   <button class="slim" type="submit">Execute</button>
                 </form>
               {% endif %}
@@ -354,6 +367,19 @@
                         >{{ label }}</option>
                       {% endfor %}
                     </select>
+                  {% endif %}
+                  {#- Only a choice when there is more than one to make; with
+                      exactly one, it still has to be sent, or the run falls
+                      back to the project's own default rather than the one
+                      option this project actually allows. -#}
+                  {% if agent_options|length > 1 %}
+                    <select name="agent" style="width: auto; margin-bottom: 0;" aria-label="Agent">
+                      {% for value, label in agent_options %}
+                        <option value="{{ value }}" {{ 'selected' if value == agent_default }}>{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  {% elif agent_options %}
+                    <input type="hidden" name="agent" value="{{ agent_options[0][0] }}">
                   {% endif %}
                   <button class="slim" type="submit">{{ 'Execute' if node.task.entry_phase == 'execute' else 'Plan' }}</button>
                 </form>

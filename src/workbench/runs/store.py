@@ -62,7 +62,11 @@ def create_conversation(db: Session, project: Project, backend: str) -> Run:
 
 
 def create_task_conversation(
-    db: Session, task: Task, backend: str, seed_message: str | None = None
+    db: Session,
+    task: Task,
+    backend: str,
+    login: str | None = None,
+    seed_message: str | None = None,
 ) -> Run:
     """Talk to the agent that just worked a task, in the worktree it worked in.
 
@@ -70,6 +74,12 @@ def create_task_conversation(
     than a project, because that is what makes resuming possible at all: a
     backend's session token is keyed to the directory it ran in, so
     continuing a plan means running in that plan's worktree.
+
+    `login` matters for the same reason: a Claude session opened under one
+    named login lives in that login's own config directory, so resuming it
+    under a different one — including the default — would find no session at
+    all. Callers pass the source run's own login rather than letting this
+    default to none.
 
     Deliberately leaves `project_id` unset even though the project is
     reachable through the task. `active_run_for_project` selects on that
@@ -85,6 +95,7 @@ def create_task_conversation(
         task_id=task.id,
         phase=RunPhase.CONVERSATION,
         backend=backend,
+        login=login,
         status=RunStatus.QUEUED,
         seed_message=seed_message,
     )

@@ -27,6 +27,8 @@ from workbench.runs.lifecycle import (
     NotCancellable,
     NotStarted,
     TooManyRuns,
+    agent_choices,
+    agent_label,
     cancel_run,
     continue_run,
     reap,
@@ -171,6 +173,55 @@ def test_the_queue_transition_is_in_the_log(db, task, executor):
     assert isinstance(run, Run)
     events = db.query(RunEvent).filter_by(run_id=run.id).all()
     assert events[0].payload["executor"] == "fake"
+
+
+# --- Choosing an agent ------------------------------------------------------
+
+
+def test_agent_choices_are_every_backend_plus_named_claude_logins(monkeypatch, task):
+    """With no allowed list, the universe is everything `agent_allowed` would
+    accept: every backend at its default login, plus a named Claude login for
+    each one signed in on this machine."""
+    from workbench.runs import lifecycle
+
+    monkeypatch.setattr(lifecycle, "available_backends", lambda: ("claude", "local"))
+    monkeypatch.setattr(lifecycle, "claude_login_names", lambda: ["ian@example.com"])
+
+    assert agent_choices(task.project) == ["claude", "local", "claude:ian@example.com"]
+
+
+def test_agent_choices_with_no_named_logins(monkeypatch, task):
+    from workbench.runs import lifecycle
+
+    monkeypatch.setattr(lifecycle, "available_backends", lambda: ("claude", "local"))
+    monkeypatch.setattr(lifecycle, "claude_login_names", lambda: [])
+
+    assert agent_choices(task.project) == ["claude", "local"]
+
+
+def test_agent_choices_are_the_allowed_list_when_one_exists(monkeypatch, task):
+    """The allowed list wins outright — a project restricted to one named
+    login must never also offer every other backend and login on the
+    machine, which is why this does not merge with the default universe."""
+    from workbench.runs import lifecycle
+
+    monkeypatch.setattr(lifecycle, "available_backends", lambda: ("claude", "local"))
+    monkeypatch.setattr(lifecycle, "claude_login_names", lambda: ["someone-else@example.com"])
+    task.project.allowed_agents = ["claude:ian@example.com"]
+
+    assert agent_choices(task.project) == ["claude:ian@example.com"]
+
+
+def test_agent_label_for_the_default_claude_login():
+    assert agent_label("claude") == "Claude (default login)"
+
+
+def test_agent_label_for_a_named_claude_login():
+    assert agent_label("claude:ian@example.com") == "Claude [ian@example.com]"
+
+
+def test_agent_label_for_any_other_backend_is_its_own_name():
+    assert agent_label("local") == "local"
 
 
 # --- Starting a conversation -------------------------------------------------
@@ -456,6 +507,22 @@ def test_continuing_with_no_message_leaves_the_seed_unset(db, run, executor):
 
     assert isinstance(result, Run)
     assert result.seed_message is None
+
+
+def test_continuing_carries_the_sources_login(db, run, executor):
+    """A Claude session opened under a named login lives in that login's own
+    config directory, so a continuation running as anything else — including
+    the default — would find no session at all."""
+    run.status = RunStatus.SUCCEEDED
+    run.resume_token = "session-abc"
+    run.login = "ian@example.com"
+    db.commit()
+
+    result = continue_run(db, run)
+
+    assert isinstance(result, Run)
+    assert result.login == "ian@example.com"
+    assert result.backend == run.backend
 
 
 def test_a_plan_awaiting_review_can_be_discussed(db, run, executor):

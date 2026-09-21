@@ -321,6 +321,28 @@ modules lazily inside the factory for the same reason the test exists: the web p
 resolves backend names constantly and must never pull an SDK into its import graph to do
 it.
 
+**And now the choice is made per run, not only per project.** `projects.allowed_agents`
+restricts which `backend` or `backend:login` pairs may run a project at all —
+`lifecycle.agent_allowed` enforces the exact pair, so a bare `claude` entry never also
+covers a named login — and `lifecycle.agent_choices` turns that same list, or (with no
+list) every backend on the machine plus a named Claude login for each one signed in here,
+into what a person is actually offered. The Plan/Execute forms on the project page show it
+as a `<select>` when there is more than one option — labelled `Claude (default login)`,
+`Claude [name]`, or a backend's own name — and as a hidden field carrying the one choice
+when there is only one, because omitting it would fall back to the project's own default
+login, which a project restricted to a single named login refuses outright. Retry and
+re-plan send no fresh choice at all: they carry on with whatever backend and login the
+task's most recent run used, since that is the only account its resume token or its
+worktree's Claude session exists for. Approving a plan follows the same rule for the same
+reason — it starts execution as the plan's own backend and login, not the project's
+current default. A named login is signed in exactly like the default one, just pointed at
+its own config directory first, as the service account:
+`sudo -iu workbench env CLAUDE_CONFIG_DIR=/home/workbench/.claude-logins/<email>
+<venv>/bin/python -m workbench.doctor --login` — `doctor --login` hands off to the CLI's
+own `auth login` with `os.execv`, which inherits the environment it was called with rather
+than replacing it, so the `CLAUDE_CONFIG_DIR` set on the command line rides along into the
+login and the credential lands in that login's own directory rather than the default one.
+
 **Runs bill a subscription, not the metered API.** Chosen deliberately, and the
 default in `config.py` rather than a convention someone has to remember.
 
