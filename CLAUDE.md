@@ -244,7 +244,9 @@ Five fixes, each for a failure seen on the node rather than reasoned about:
 After them, on the same task: `gpt-oss:20b` at 32k produced a correct plan four
 times out of four in 21–33 turns and 160–302s — `finish_run(db, run,
 RunStatus.SUCCEEDED)`, and the observation, beyond what the task said, that the
-existing status guard then refuses a second POST by itself. A deliberate stress
+existing status guard then refuses a second POST by itself. Through the harness
+at 32k both models now pass: `gpt-oss:20b` planned in 65s and executed in 48s,
+`qwen3:8b` in 103s and 197s. A deliberate stress
 run at the old 4,096 window still fails — nothing here makes a window that small
 workable — but it now says why in its own log, naming the setting, instead of
 producing a confident plan about something else. `qwen3:8b` now uses its
