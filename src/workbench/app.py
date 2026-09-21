@@ -613,6 +613,33 @@ def set_project_setup(
     return _redirect(f"/projects/{project.id}", notice=notice)
 
 
+@app.post("/projects/{project_id}/agents")
+def set_project_agents(
+    db: DbSession,
+    project_id: int,
+    allowed_agents: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    """Restrict which agents may work this project, one per line.
+
+    An entry is `backend`, meaning that backend's default login, or
+    `backend:login`, a specific named one. A run is allowed only if its exact
+    pair is in the list — `claude` alone does not also allow a named Claude
+    login. Empty means any agent may run it, which is how every project
+    behaved before this existed.
+    """
+    project = _get_project_or_404(db, project_id)
+    entries = [line.strip() for line in allowed_agents.splitlines()]
+    entries = [entry for entry in entries if entry]
+    project.allowed_agents = entries or None
+    db.commit()
+    notice = (
+        f"Only these agents may now work this project: {', '.join(entries)}."
+        if entries
+        else "Any agent may now work this project."
+    )
+    return _redirect(f"/projects/{project.id}", notice=notice)
+
+
 @app.post("/projects/{project_id}/conversation")
 def start_project_conversation(db: DbSession, project_id: int) -> RedirectResponse:
     """Talk directly to a project, not any one task within it.

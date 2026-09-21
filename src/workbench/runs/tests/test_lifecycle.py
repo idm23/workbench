@@ -99,6 +99,38 @@ def test_starting_a_run_with_login(db, task, executor):
     assert executor.started == [run.id]
 
 
+def test_no_allowed_list_means_any_agent(db, task, executor):
+    run = start_run(db, task, RunPhase.EXECUTE, backend="fake")
+
+    assert isinstance(run, Run)
+
+
+def test_a_disallowed_agent_is_refused_and_says_who_is_allowed(db, task, executor):
+    task.project.allowed_agents = ["claude:ian@example.com"]
+    db.commit()
+
+    result = start_run(db, task, RunPhase.EXECUTE, backend="fake")
+
+    assert isinstance(result, NotStarted)
+    assert "claude:ian@example.com" in result.message
+
+
+def test_a_named_login_must_be_named_in_the_list(db, task, executor):
+    task.project.allowed_agents = ["fake:x"]
+    db.commit()
+
+    allowed = start_run(db, task, RunPhase.EXECUTE, backend="fake", login="x")
+    assert isinstance(allowed, Run)
+
+
+def test_the_default_login_is_not_covered_by_a_bare_backend_entry(db, task, executor):
+    task.project.allowed_agents = ["fake"]
+    db.commit()
+
+    refused = start_run(db, task, RunPhase.EXECUTE, backend="fake", login="x")
+    assert isinstance(refused, NotStarted)
+
+
 def test_the_handle_is_recorded_before_the_job_is_asked_to_run(db, task, monkeypatch):
     """Otherwise a crash in between leaves something running and unreachable.
 

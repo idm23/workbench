@@ -441,3 +441,31 @@ def test_the_page_shows_the_setup_command(client, session, monkeypatch, tmp_path
 
 def test_setting_up_a_missing_project_is_a_404(client, session):
     assert client.post("/projects/999/setup", data={"setup_command": "x"}).status_code == 404
+
+
+def test_allowed_agents_can_be_set_from_the_page(client, session):
+    project = a_project(session)
+
+    response = client.post(
+        f"/projects/{project.id}/agents",
+        data={"allowed_agents": "claude:ian@example.com\n\nlocal\n"},
+    )
+
+    assert response.status_code == 303
+    session.refresh(project)
+    assert project.allowed_agents == ["claude:ian@example.com", "local"]
+
+
+def test_clearing_allowed_agents_stores_none(client, session):
+    project = a_project(session)
+    project.allowed_agents = ["claude"]
+    session.commit()
+
+    client.post(f"/projects/{project.id}/agents", data={"allowed_agents": "   "})
+
+    session.refresh(project)
+    assert project.allowed_agents is None
+
+
+def test_setting_allowed_agents_on_a_missing_project_is_a_404(client, session):
+    assert client.post("/projects/999/agents", data={"allowed_agents": "x"}).status_code == 404

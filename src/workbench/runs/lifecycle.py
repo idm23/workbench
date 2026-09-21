@@ -167,6 +167,22 @@ class Chosen:
     reason: str | None = None
 
 
+def agent_choice(backend: str, login: str | None) -> str:
+    """How a backend and login are written in a project's allowed list."""
+    return f"{backend}:{login}" if login else backend
+
+
+def agent_allowed(project: Project, backend: str, login: str | None) -> bool:
+    """Whether this project lets a run use this backend as this login.
+
+    No list means anything is allowed. Otherwise the exact pair must be listed:
+    `claude` alone is the default login only, and a named login must be named.
+    """
+    if not project.allowed_agents:
+        return True
+    return agent_choice(backend, login) in project.allowed_agents
+
+
 def choose_backend(db: Session, project: Project) -> Chosen:
     """The project's backend, or its fallback if the first has run out.
 
@@ -196,6 +212,11 @@ def choose_backend(db: Session, project: Project) -> Chosen:
 
     window = exhausted[0]
     resets = f", back in {window.resets_in}" if window.resets_in else ""
+
+    # Only fail over to a fallback the project actually allows — otherwise a
+    # window running out would move work somewhere nobody agreed to.
+    if not agent_allowed(project, fallback, None):
+        return Chosen(preferred)
     return Chosen(
         fallback,
         f"{preferred} has reached its {window.label} limit{resets}. Running on {fallback}.",
@@ -231,6 +252,14 @@ def start_run(
     # An explicit choice is a choice: never second-guessed by failover.
     picked = Chosen(backend) if backend else choose_backend(db, task.project)
     run = create_run(db, task, phase, backend=picked.backend, login=login)
+    if not agent_allowed(task.project, picked.backend, login):
+        allowed = ", ".join(task.project.allowed_agents or [])
+        message = (
+            f"This project does not allow {agent_choice(picked.backend, login)}. "
+            f"Allowed: {allowed}."
+        )
+        finish_run(db, run, RunStatus.FAILED, error=message)
+        return NotStarted(run.id, message)
     if picked.reason:
         append_event(db, run.id, RunEventKind.NOTICE, {"text": picked.reason})
     return _launch(db, run, executor)
