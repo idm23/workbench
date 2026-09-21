@@ -141,6 +141,7 @@ def test_reporting_an_outcome_with_no_detail_leaves_it_unset(db, run):
     report_outcome(db, run, RunOutcome.FINISHED)
 
     assert run.agent_outcome is RunOutcome.FINISHED
+    assert run.outcome_detail is None
 
 
 def test_create_run_with_login(db, task):
