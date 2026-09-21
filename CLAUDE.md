@@ -260,6 +260,22 @@ window: on an 8 GB card 16k spills a gigabyte onto the CPU, and that run took
 737s for six turns. Its tool literacy was the harness's to fix; its judgement
 was not.
 
+**Then execute found the same thing one layer down: the model could plan a
+change and not make it.** Run 66 read the right code and spent fifteen turns
+failing to edit it. `read_file` numbered lines with a tab, so gpt-oss pasted
+`738\t` gutters back into the text it quoted, and read the tab as indentation —
+its one "successful" edit put tab-indented lines into a space-indented function.
+It edits by line range, which `edit_file` did not accept. And meaning to add one
+test, it `write_file`d that test over a 1,637-line file. So `edit_file` takes a
+line range, the gutter is `│`, a pasted gutter is stripped, a Python edit that
+stops a file compiling is refused, and `write_file` will not shrink a long file
+to a fragment. One design rule came out of a mistake worth recording: quoted text
+may be matched loosely, because it only *locates*, but the replacement is used
+exactly as sent. A version that re-indented it to match turned run 66's seventh
+edit into a `return` inside a loop — valid Python that would have created one
+subtask and stopped. Replaying run 66's own recorded calls through the new tools
+applies the correct change and refuses every harmful one.
+
 One consequence reached back into the vendor-neutral half. `prompts.execute_prompt` used
 to tell the agent to use the `workbench-outcome` skill, which is one backend's mechanism
 sitting in the module that exists to have none. It now states the *obligation* — report

@@ -22,6 +22,7 @@ the stronger of the two guarantees rather than the improvised one.
 
 import logging
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -212,9 +213,11 @@ def _read_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
         requested = int(args["line_end"]) - offset + 1
     limit = max(1, min(int(requested or 400), 2000))
     window = lines[offset - 1 : offset - 1 + limit]
-    # Numbered, because `edit_file` matches on text and a model that can cite
-    # a line number is one that can quote the right text back.
-    numbered = "\n".join(f"{offset + i}\t{line}" for i, line in enumerate(window))
+    # Numbered, because a model that can cite a line number can edit by it. The
+    # gutter is `│`, not a tab: with a tab, gpt-oss read the separator as part
+    # of the indentation and wrote tab-indented code into a file indented with
+    # spaces. Whatever it copies back is stripped again — see `_ungutter`.
+    numbered = "\n".join(f"{offset + i}{GUTTER}{line}" for i, line in enumerate(window))
     tail = ""
     if offset - 1 + limit < len(lines):
         remaining = len(lines) - (offset - 1 + limit)
@@ -301,6 +304,89 @@ def _run_command(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolResult(clip(report))
 
 
+#: What separates a line number from the line in `read_file`'s output.
+GUTTER = "│"
+
+#: Line-number gutters a model copies back from `read_file`. Two strengths,
+#: because the two halves of an edit are different kinds of text.
+#:
+#: Quoted text only has to *find* something, so any retyping is accepted —
+#: including a bare number followed by spaces, which is what a tab gutter
+#: became when gpt-oss typed it back. Replacement text is *content*, so only a
+#: gutter that cannot be mistaken for indentation is removed: this tool's `│`,
+#: or a tab. A bare number alone is how a blank line looks in either.
+_LOOSE_GUTTER = re.compile(r"^\s*\d+(?:│|\t|: |\| | +|$)")
+_EXACT_GUTTER = re.compile(r"^\s*\d+(?:│|\t|$)")
+_STILL_NUMBERED = re.compile(r"^\s*\d+\s")
+
+#: Below this many lines a whole-file rewrite is ordinary, not a warning sign.
+_REWRITE_GRACE_LINES = 20
+
+
+def _ungutter(text: str, pattern: re.Pattern[str]) -> str:
+    """Remove a pasted line-number gutter — only when *every* line carries one.
+
+    The all-lines rule is what keeps real code that starts with a number from
+    being mangled. gpt-oss pasted `738\t    if proposed:` back five times in one
+    run; each of those edits failed on the gutter, not on the code.
+    """
+    lines = text.split("\n")
+    body = [line for line in lines if line.strip()]
+    if not body or not all(pattern.match(line) for line in body):
+        return text
+    return "\n".join(pattern.sub("", line, count=1) for line in lines)
+
+
+def _locate(content: str, old: str, near: int | None) -> tuple[int, int] | str:
+    """Find quoted lines ignoring indentation: (first, end) line indexes, or why not.
+
+    Locating only — the replacement is then used exactly as sent. An earlier
+    version re-indented it to match, and turned an inconsistently indented
+    quote into `return` *inside* a loop: code that compiled, and would have
+    created one subtask and stopped. A refusal is better than that.
+    """
+    wanted = [line.strip() for line in old.strip("\n").split("\n")]
+    lines = content.split("\n")
+    stripped = [line.strip() for line in lines]
+    hits = [
+        i for i in range(len(lines) - len(wanted) + 1) if stripped[i : i + len(wanted)] == wanted
+    ]
+    if not hits:
+        return (
+            "That text is not in the file. Read it again and quote it exactly, "
+            "or pass line_start and line_end instead."
+        )
+    if len(hits) > 1:
+        if near is None:
+            places = ", ".join(str(i + 1) for i in hits[:5])
+            return f"That text appears at lines {places}. Pass line_start to say which."
+        hits.sort(key=lambda i: abs(i - near))
+    return hits[0], hits[0] + len(wanted)
+
+
+def _broken_python(target: Path, before: str | None, after: str) -> str | None:
+    """A syntax error this change would introduce into a Python file, if any.
+
+    Refused before it is written, because the alternative is what happened: an
+    edit that "succeeded" by inserting tab-indented lines into a space-indented
+    function, left for tests the run never reached to find. A file that did not
+    compile *before* is not held to it, or one bad edit would lock the model out
+    of repairing its own mistake.
+    """
+    if target.suffix != ".py":
+        return None
+    if before is not None:
+        try:
+            compile(before, str(target), "exec")
+        except SyntaxError:
+            return None
+    try:
+        compile(after, str(target), "exec")
+    except SyntaxError as exc:
+        return f"line {exc.lineno}: {exc.msg}"
+    return None
+
+
 def _write_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     target = _resolve(context, str(args.get("path") or ""))
     if isinstance(target, ToolResult):
@@ -308,6 +394,27 @@ def _write_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     content = args.get("content")
     if not isinstance(content, str):
         return ToolResult("`content` must be a string.", is_error=True)
+
+    before: str | None = None
+    if target.is_file():
+        try:
+            before = target.read_text(encoding="utf-8")
+        except OSError:
+            before = None
+    if before is not None:
+        had, would = len(before.splitlines()), len(content.splitlines())
+        # gpt-oss meant to add one test to a 1,637-line file and wrote the test
+        # as the whole file. Nobody wants that rewrite.
+        if had > _REWRITE_GRACE_LINES and would < had // 2:
+            return ToolResult(
+                f"Refused: {target.relative_to(context.worktree.resolve())} has {had} lines "
+                f"and this would replace all of them with {would}. write_file replaces the "
+                f"whole file. To add to it, use edit_file with line_start={had + 1} and your "
+                "new lines as new_text; to change part of it, use edit_file.",
+                is_error=True,
+            )
+    if (broken := _broken_python(target, before, content)) is not None:
+        return ToolResult(f"Not written — it would not compile: {broken}.", is_error=True)
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -318,42 +425,107 @@ def _write_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     return ToolResult(f"Wrote {target.relative_to(context.worktree.resolve())} ({lines} lines).")
 
 
+def _around(content: str, first: int, last: int) -> str:
+    """The edited lines with a little context, numbered, so the model can check."""
+    lines = content.split("\n")
+    lo, hi = max(0, first - 2), min(len(lines), last + 2)
+    return "\n".join(f"{i + 1}{GUTTER}{lines[i]}" for i in range(lo, hi))
+
+
+def _replace_lines(content: str, first: int, end: int, new: str) -> str:
+    """Lines [first, end) replaced by `new`, keeping the file's final newline."""
+    trailing = content.endswith("\n")
+    lines = (content[:-1] if trailing else content).split("\n")
+    replacement = (new[:-1] if new.endswith("\n") else new).split("\n")
+    lines[first : min(end, len(lines))] = replacement
+    return "\n".join(lines) + ("\n" if trailing else "")
+
+
 def _edit_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    """Change part of a file, by quoting it or by naming its lines.
+
+    Two ways in, because two models edit two ways. Quoting (`old_text`) stays
+    the default. Naming lines (`line_start`, `line_end`) is how gpt-oss edits —
+    it sent a line range in all eight edits of one run, and refusing it cost
+    that run most of its turns.
+    """
     target = _resolve(context, str(args.get("path") or ""))
     if isinstance(target, ToolResult):
         return target
-    old = args.get("old_text")
-    new = args.get("new_text")
-    if not isinstance(old, str) or not isinstance(new, str):
-        return ToolResult("`old_text` and `new_text` must both be strings.", is_error=True)
+    new = args.get("new_text", args.get("content"))
+    if not isinstance(new, str):
+        return ToolResult("`new_text` must be a string.", is_error=True)
     if not target.is_file():
         return ToolResult(f"{target} is not a file.", is_error=True)
-
     try:
         content = target.read_text(encoding="utf-8")
     except OSError as exc:
         return ToolResult(f"Could not read {target}: {exc}", is_error=True)
 
-    count = content.count(old)
-    if count == 0:
+    new = _ungutter(new, _EXACT_GUTTER)
+    body = [line for line in new.split("\n") if line.strip()]
+    if body and all(_STILL_NUMBERED.match(line) for line in body):
         return ToolResult(
-            "That text is not in the file. Read it again and quote it exactly, "
-            "including indentation.",
-            is_error=True,
-        )
-    if count > 1 and not bool(args.get("replace_all")):
-        return ToolResult(
-            f"That text appears {count} times. Include more surrounding lines to "
-            "make it unique, or pass replace_all.",
+            "new_text starts every line with a line number. Send only the code, "
+            "without the numbers read_file shows.",
             is_error=True,
         )
 
     try:
-        target.write_text(content.replace(old, new), encoding="utf-8")
+        near = int(args["line_start"]) - 1 if args.get("line_start") is not None else None
+        end_line = int(args.get("line_end") or args["line_start"]) if near is not None else 0
+    except TypeError, ValueError:
+        return ToolResult("line_start and line_end must be line numbers.", is_error=True)
+
+    old = args.get("old_text")
+    if isinstance(old, str) and old.strip():
+        count = content.count(old)
+        if count > 1 and not bool(args.get("replace_all")):
+            return ToolResult(
+                f"That text appears {count} times. Include more surrounding lines to "
+                "make it unique, or pass replace_all.",
+                is_error=True,
+            )
+        if count:
+            index = content.index(old)
+            updated = content.replace(old, new) if count > 1 else content.replace(old, new, 1)
+            first = content.count("\n", 0, index)
+        else:
+            found = _locate(content, _ungutter(old, _LOOSE_GUTTER), near)
+            if isinstance(found, str):
+                return ToolResult(found, is_error=True)
+            first, end = found
+            updated = _replace_lines(content, first, end, new)
+    elif near is not None:
+        total = len(content.splitlines())
+        if near < 0 or near > total or end_line < near:
+            return ToolResult(
+                f"Lines {near + 1} to {end_line} are outside the file, which has {total} "
+                f"lines. Use line_start={total + 1} to add to the end.",
+                is_error=True,
+            )
+        first = near
+        updated = _replace_lines(content, near, end_line, new)
+    else:
+        return ToolResult(
+            "Say what to change: old_text to quote it, or line_start and line_end to "
+            "name its lines.",
+            is_error=True,
+        )
+
+    if (broken := _broken_python(target, content, updated)) is not None:
+        return ToolResult(
+            f"Not applied — the file would no longer compile: {broken}. Check the "
+            "indentation matches the lines around it.",
+            is_error=True,
+        )
+    try:
+        target.write_text(updated, encoding="utf-8")
     except OSError as exc:
         return ToolResult(f"Could not write {target}: {exc}", is_error=True)
     where = target.relative_to(context.worktree.resolve())
-    return ToolResult(f"Edited {where} ({count} replacement{'s' if count > 1 else ''}).")
+    last = first + new.count("\n") + 1
+    return ToolResult(f"Edited {where}.\n{_around(updated, first, last)}")
 
 
 def _git(context: ToolContext, *args: str) -> str | None:
@@ -389,6 +561,16 @@ def nothing_happened(context: ToolContext) -> bool:
     if head is None or head != context.head_at_start:
         return False
     return _git(context, "status", "--porcelain") == ""
+
+
+def uncommitted_work(context: ToolContext) -> bool:
+    """Whether the worktree holds changes nobody has committed yet.
+
+    False when it cannot tell, for the same reason as `nothing_happened`: a
+    probe that failed must not be what keeps a run from ending.
+    """
+    status = _git(context, "status", "--porcelain")
+    return bool(status)
 
 
 def _nothing_looked_at(context: ToolContext, tool: str) -> ToolResult | None:
@@ -599,7 +781,10 @@ TOOLS: dict[str, Tool] = {
         ),
         Tool(
             name="write_file",
-            description="Create a file, or replace one entirely. Prefer edit_file for changes.",
+            description=(
+                "Create a new file, or replace one entirely. To add to or change an "
+                "existing file, use edit_file."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -613,18 +798,22 @@ TOOLS: dict[str, Tool] = {
         Tool(
             name="edit_file",
             description=(
-                "Replace an exact piece of text in a file. The old text must appear "
-                "exactly once unless replace_all is set."
+                "Change part of a file. Either quote the text to replace in old_text "
+                "(it must appear once, unless replace_all), or give line_start and "
+                "line_end to replace those lines. line_start one past the last line "
+                "adds to the end. Line numbers are the ones read_file shows."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "path": _PATH_PROPERTY,
                     "old_text": {"type": "string", "description": "Text to replace, verbatim."},
+                    "line_start": {"type": "integer", "description": "First line to replace."},
+                    "line_end": {"type": "integer", "description": "Last line to replace."},
                     "new_text": {"type": "string", "description": "What to put in its place."},
                     "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
                 },
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path", "new_text"],
             },
             handler=_edit_file,
         ),
