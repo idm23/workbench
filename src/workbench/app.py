@@ -87,7 +87,7 @@ from workbench.runs.lifecycle import (
     start_run,
 )
 from workbench.runs.rate_limits import latest_readings
-from workbench.runs.store import append_event, append_input
+from workbench.runs.store import append_event, append_input, finish_run
 from workbench.runs.stream import fetch_events, parse_last_event_id, stream
 from workbench.services import active_shells, running_services
 from workbench.tasks import (
@@ -745,6 +745,7 @@ def approve_plan(db: DbSession, run_id: int) -> RedirectResponse:
                 body=subtask.get("body"),
                 ready_to_execute=bool(subtask.get("ready_to_execute")),
             )
+        finish_run(db, run, RunStatus.SUCCEEDED)
         return _redirect(target, notice=f"Created {len(proposed)} subtask(s) from the plan.")
 
     result = start_run(db, task, RunPhase.EXECUTE)
