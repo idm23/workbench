@@ -256,6 +256,10 @@ class Project(Base):
     # they are not equally good.
     fallback_backend: Mapped[str | None] = mapped_column(String(50), default=None)
 
+    # Which agents may work on this project: entries are "backend" (its default
+    # login) or "backend:login". Null or empty means any. Enforced by start_run.
+    allowed_agents: Mapped[list[str] | None] = mapped_column(JSON, default=None)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     user: Mapped[User] = relationship(back_populates="projects")
