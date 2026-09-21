@@ -18,7 +18,9 @@ import httpx
 import pytest
 
 from workbench.agents.tools import (
+    _ALIASES,
     MAX_OUTPUT_CHARS,
+    READ_ONLY_TOOLS,
     PlanSubmitted,
     ToolContext,
     ToolResult,
@@ -121,7 +123,8 @@ def test_search_finds_matches_and_reports_none(context):
     missing = call(context, "search", pattern="def nonexistent_thing")
 
     assert "src/app.py" in found.text
-    assert missing.text == "No matches."
+    assert missing.text.startswith("No matches for 'def nonexistent_thing'.")
+    assert not missing.is_error  # finding nothing is an answer, not a failure
 
 
 def test_a_command_reports_its_exit_code(context):
@@ -469,3 +472,56 @@ def test_a_plan_run_cannot_ask(context):
     assert isinstance(result, ToolResult)
     assert result.is_error
     assert "not available in this phase" in result.text
+
+
+# --- Names a model reaches for ------------------------------------------------
+
+
+def test_open_file_is_understood_as_read_file(context):
+    """gpt-oss's own spelling, asked for fourteen times in two planning runs."""
+    result = call(
+        context, "open_file", phase=RunPhase.PLAN, path="src/app.py", line_start=2, line_end=2
+    )
+
+    assert not result.is_error
+    assert "2\t    return 1" in result.text
+    assert "def main" not in result.text
+
+
+def test_view_file_is_understood_too(context):
+    assert not call(context, "view_file", phase=RunPhase.PLAN, path="src/app.py").is_error
+
+
+def test_every_alias_is_read_only():
+    """The gate runs on the resolved name, so this is what keeps a spelling
+    from ever reaching a tool that writes."""
+    assert set(_ALIASES.values()) <= set(READ_ONLY_TOOLS)
+
+
+def test_a_directory_beyond_the_depth_is_named_not_dropped(context, worktree):
+    """`src/` holds only `workbench/`, and listing files alone made it vanish:
+    a model at depth 1 was never told the code existed."""
+    (worktree / "src" / "pkg" / "deep").mkdir(parents=True)
+    (worktree / "src" / "pkg" / "deep" / "mod.py").write_text("x = 1\n")
+
+    listing = call(context, "list_files", path=".", depth=1).text.splitlines()
+
+    assert "src/app.py" in listing
+    assert "src/pkg/" in listing
+
+
+def test_no_matches_says_what_a_pattern_matches(context):
+    """A symbol and a filename in one regex returns nothing, forever, unless
+    something says the pattern is matched against lines of text."""
+    result = call(context, "search", pattern=r"main.*?app\.py")
+
+    assert "not against file names" in result.text
+    assert "path" in result.text
+
+
+def test_query_is_understood_as_the_search_pattern(context):
+    """gpt-oss's own spelling, sent four times in a row under pressure."""
+    result = dispatch(RunPhase.PLAN, "search", {"query": "def main"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert "src/app.py" in result.text

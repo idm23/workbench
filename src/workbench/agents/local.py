@@ -92,6 +92,103 @@ _NUDGE = (
     "last result actually said."
 )
 
+#: A plan run that stops with neither a tool call nor any text has not
+#: finished, it has stalled — there is nothing to call a plan. Before this
+#: existed, one such turn failed the run outright, and a plan run was the only
+#: phase with no nudge at all.
+_PLAN_NUDGE = (
+    "You have not submitted a plan yet. Continue with a tool call, or call "
+    "submit_plan now if you have read enough to decide."
+)
+
+#: When a run is told how many turns it has left, as a fraction of its cap.
+#:
+#: Nothing told a model its budget, and a capable one does not stop reading on
+#: its own. gpt-oss, given its whole task and its own reasoning back, read the
+#: right files — `app.py`, `activity.py`, `lifecycle.py`, the template, the
+#: route tests — and then kept going until the cap ended the run with no plan,
+#: twice in a row. A person told "twenty left" wraps up; so, it turns out, does
+#: the model.
+BUDGET_NOTICE_FRACTION = 0.5
+
+
+def _tell(messages: list[dict[str, Any]], note: str) -> None:
+    """Put a note from the loop in front of the model without ending its chain.
+
+    Appended to the latest tool result when there is one, rather than sent as
+    a user message, and that is the whole point of this function. Chat
+    templates drop reasoning from before the most recent user message — the
+    same rule that makes carrying reasoning forward work at all — so a note
+    delivered as a user turn mid-run would silently wipe everything the model
+    had thought so far, in exchange for telling it the time.
+    """
+    last = messages[-1] if messages else {}
+    if last.get("role") == "tool":
+        last["content"] = f"{last.get('content') or ''}\n\n[Workbench] {note}"
+    else:
+        messages.append({"role": "user", "content": note})
+
+
+#: The first user turn of a fresh session, once the task lives in the system
+#: message. Something has to be there — chat templates expect a user turn —
+#: and it is deliberately worth nothing, so losing it to truncation loses
+#: nothing.
+_BEGIN = "Begin the task described in your instructions."
+
+
+def _pinned(system: str, task: str) -> str:
+    """The system message with the task inside it, where truncation cannot reach.
+
+    A model server whose window is too small does not refuse: Ollama drops the
+    oldest messages until the rest fit, and it keeps the system messages while
+    doing it. The first user message is the oldest thing it is allowed to drop
+    — and that is where the task used to be. So the one message guaranteed to
+    survive held the rules, and the one guaranteed to go first held the job:
+    run 63 read the right files for nine turns and then asked whether there
+    had been a user query yet.
+
+    With the task here, a run that outgrows its window loses the oldest tool
+    output instead of its instructions, which is a degradation rather than a
+    different task. It does not replace a window big enough for the run — see
+    `install_node._drop_in` — or the notice when truncation happens anyway.
+    """
+    return f"{system}\n\n---\n\n{task}"
+
+
+def _budget_note(phase: RunPhase, remaining: int) -> str | None:
+    if phase is RunPhase.PLAN:
+        return (
+            f"{remaining} turns remain in this planning run. Read only what you "
+            "still need, then call submit_plan."
+        )
+    if phase is RunPhase.EXECUTE:
+        return (
+            f"{remaining} turns remain in this run. Make sure your work is "
+            "committed and call report_outcome before they run out."
+        )
+    # A conversation is paced by a person, and its cap is a backstop rather
+    # than a budget anyone should be working to.
+    return None
+
+
+#: The last turn of a plan run offers exactly one tool. A model given a single
+#: option with an instruction to use it does, where "you should submit soon"
+#: among eight tools is a suggestion — and a plan written from forty turns of
+#: reading is worth far more than the "produced no plan" that replaced it.
+_FINAL_PLAN_TURN = (
+    "This is the last turn of the planning run. Call submit_plan now, with the "
+    "best plan you can make from what you have already read."
+)
+
+
+#: How Ollama words the 500 it returns for a tool call it could not parse.
+_UNPARSED_TOOL_CALL = "error parsing tool call"
+
+_RESEND_TOOL_CALL = (
+    "Your last tool call was cut off or was not valid JSON, so it did not run. "
+    "Send it again, complete, with arguments as a JSON object."
+)
+
 #: How many malformed tool calls in a row before this is not going to work.
 #: Small models emit unparseable arguments; they usually recover when told,
 #: and when they do not they do it forever.
@@ -286,9 +383,33 @@ class _Assistant:
     reasoning: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     model: str | None = None
+    #: How many tokens the server says it actually read, when it says. What
+    #: `_Window` compares against what was sent.
+    prompt_tokens: int | None = None
 
     def as_message(self) -> dict[str, Any]:
+        """The reply as it goes back into the conversation — reasoning included.
+
+        Leaving the reasoning out was the quieter of the two things that made
+        a reasoning model lose its own task. A model that thinks, calls a tool,
+        and is then shown the result *without* the thought that asked for it
+        has to reconstruct its intent from tool output alone, every turn.
+
+        `reasoning` is the spelling that matters, and that was measured rather
+        than guessed. With a fact placed only in the prior turn's reasoning,
+        inside a tool-call chain, both `gpt-oss:20b` and `qwen3:8b` on Ollama's
+        `/v1` recalled it under `reasoning` and neither did under
+        `reasoning_content` or `thinking`. Reading accepts all three spellings
+        (`_apply_delta`); writing needs only the one a server will read back.
+
+        Sent whenever there is any, and the server decides what to keep. The
+        chat templates drop reasoning from before the latest user message and
+        keep it within a tool-call chain — which is exactly gpt-oss's own rule,
+        and why the same probe placed *before* a user message recalled nothing.
+        """
         message: dict[str, Any] = {"role": "assistant", "content": self.text}
+        if self.reasoning:
+            message["reasoning"] = self.reasoning
         if self.tool_calls:
             message["tool_calls"] = self.tool_calls
         return message
@@ -363,6 +484,67 @@ class _Buffer:
         return AgentEvent(self._kind, {"text": clip(text)})
 
 
+#: Characters per token, as a floor on how much a message *must* cost. Real
+#: text runs three to five; eight is loose enough that nothing honest trips it,
+#: which matters more here than catching every case.
+_CHARS_PER_TOKEN_CEILING = 8
+
+
+def _chars(message: dict[str, Any]) -> int:
+    calls = message.get("tool_calls") or []
+    return (
+        len(message.get("content") or "")
+        + len(message.get("reasoning") or "")
+        + sum(len(json.dumps(call.get("function") or {})) for call in calls)
+    )
+
+
+@dataclass
+class _Window:
+    """Notices when the model server has started dropping the conversation.
+
+    Truncation is silent by design on the server's side, and that silence is
+    what made it cost three runs before anyone looked. The server does say how
+    many tokens it read, though, and within one chain of tool calls the prompt
+    only ever grows — so if it grew by less than the text just added could
+    possibly cost, something was dropped.
+
+    Only compared across turns with no user message between them, and that is
+    not a nicety. Templates drop earlier reasoning at every new user turn, so a
+    nudge or a reply shrinks the prompt legitimately, and comparing across one
+    would cry wolf at exactly the moments a person is reading the run.
+
+    It is a floor, not a meter: a drop small enough to hide inside the slack is
+    missed. What it catches is a window that is simply too small for the run,
+    which is the case worth telling someone about.
+    """
+
+    last_tokens: int | None = None
+    sent: int = 0
+    reported: bool = False
+
+    def check(self, messages: list[dict[str, Any]], reply: _Assistant) -> str | None:
+        added = messages[self.sent :]
+        previous, self.last_tokens = self.last_tokens, reply.prompt_tokens
+        if (
+            self.reported
+            or previous is None
+            or reply.prompt_tokens is None
+            or any(m.get("role") == "user" for m in added)
+        ):
+            return None
+        floor = sum(_chars(m) for m in added) // _CHARS_PER_TOKEN_CEILING
+        if reply.prompt_tokens >= previous + floor:
+            return None
+        self.reported = True
+        return (
+            f"The model server read {reply.prompt_tokens} tokens of a conversation that "
+            f"was at least {previous + floor}: it is dropping the oldest messages to fit "
+            "its context window. The task is kept, but earlier tool output is gone. "
+            "Raise WORKBENCH_INFERENCE_CONTEXT_TOKENS on the node if runs need more."
+        )
+
+
 async def _turn(
     client: httpx.AsyncClient, payload: dict[str, Any]
 ) -> AsyncIterator[AgentEvent | _Assistant]:
@@ -400,6 +582,9 @@ async def _turn(
                 continue
 
             reply.model = chunk.get("model") or reply.model
+            usage = chunk.get("usage") or {}
+            if isinstance(usage.get("prompt_tokens"), int):
+                reply.prompt_tokens = usage["prompt_tokens"]
             for choice in chunk.get("choices") or []:
                 # `delta` when streaming, `message` when a server answered in
                 # one piece despite being asked to stream. Both appear in the
@@ -578,8 +763,14 @@ class LocalBackend:
                     {"text": "The earlier conversation could not be found; starting fresh."},
                 )
                 token = uuid.uuid4().hex
-            messages = [{"role": "system", "content": system_prompt(phase)}]
-        messages.append({"role": "user", "content": request.prompt})
+            # The task goes in the system message, not the first user turn —
+            # see `_pinned`. A continuation keeps the one its session began with.
+            messages = [
+                {"role": "system", "content": _pinned(system_prompt(phase), request.prompt)}
+            ]
+            messages.append({"role": "user", "content": _BEGIN})
+        else:
+            messages.append({"role": "user", "content": request.prompt})
 
         tools = tools_for(phase)
         turns = 0
@@ -596,15 +787,31 @@ class LocalBackend:
         #: distinction `stopped_early` exists to make, since the runner
         #: distrusts a self-reported outcome without it.
         ended_cleanly = False
+        window = _Window()
 
         async with _client(base_url) as client:
-            while turns < _max_turns(phase):
+            cap = _max_turns(phase)
+            notice_at = max(1, int(cap * BUDGET_NOTICE_FRACTION))
+            while turns < cap:
                 turns += 1
+                offered = tools
+                if turns == notice_at and (note := _budget_note(phase, cap - turns + 1)):
+                    _tell(messages, note)
+                    yield AgentEvent(RunEventKind.NOTICE, {"text": f"Told the model: {note}"})
+                if phase is RunPhase.PLAN and turns == cap and cap > 1:
+                    _tell(messages, _FINAL_PLAN_TURN)
+                    offered = [t for t in tools if t["function"]["name"] == "submit_plan"]
+                    yield AgentEvent(
+                        RunEventKind.NOTICE,
+                        {"text": "Last planning turn: offering only submit_plan."},
+                    )
                 payload = {
                     "model": model,
                     "messages": messages,
-                    "tools": tools,
+                    "tools": offered,
                     "stream": True,
+                    # So the last chunk says how much the server actually read.
+                    "stream_options": {"include_usage": True},
                 }
 
                 reply = _Assistant()
@@ -628,6 +835,41 @@ class LocalBackend:
                         num_turns=turns,
                     )
                     return
+                except httpx.HTTPStatusError as exc:
+                    # A tool call the *server* could not parse, reported as its
+                    # own 500. Ollama does this when a model's call is cut off
+                    # or malformed — seen when a 4k window ran out mid-call —
+                    # and it is the same mistake as arguments that will not
+                    # parse here, so it gets the same treatment: say so, count
+                    # it, try again, rather than ending a run over one turn.
+                    if started and _UNPARSED_TOOL_CALL in str(exc):
+                        failures += 1
+                        if failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
+                            yield AgentFailed(
+                                "The model could not form a tool call the server could "
+                                f"parse: {failures} attempts in a row.",
+                                resume_token=token,
+                                model=model,
+                                num_turns=turns,
+                            )
+                            return
+                        yield AgentEvent(
+                            RunEventKind.NOTICE,
+                            {"text": "The server could not parse the model's tool call; retrying."},
+                        )
+                        messages.append({"role": "user", "content": _RESEND_TOOL_CALL})
+                        _save_transcript(token, messages)
+                        continue
+                    if not started:
+                        yield AgentUnavailable(f"The model server refused the request: {exc}")
+                        return
+                    yield AgentFailed(
+                        f"The model server failed mid-run: {exc}",
+                        resume_token=token,
+                        model=model,
+                        num_turns=turns,
+                    )
+                    return
                 except httpx.HTTPError as exc:
                     if not started:
                         yield AgentUnavailable(f"The model server refused the request: {exc}")
@@ -642,6 +884,9 @@ class LocalBackend:
 
                 started = True
                 model = reply.model or model
+                if dropped := window.check(messages, reply):
+                    yield AgentEvent(RunEventKind.NOTICE, {"text": dropped})
+                window.sent = len(messages)
 
                 if not reply.tool_calls:
                     # Before believing "no tool calls" means "done", check
@@ -695,6 +940,26 @@ class LocalBackend:
                             },
                         )
                         messages.append({"role": "user", "content": _NUDGE})
+                        _save_transcript(token, messages)
+                        continue
+                    if (
+                        phase is RunPhase.PLAN
+                        and not answered
+                        and plan is None
+                        and nudges < MAX_NUDGES
+                        and turns < cap
+                    ):
+                        nudges += 1
+                        yield AgentEvent(
+                            RunEventKind.NOTICE,
+                            {
+                                "text": (
+                                    "The model stopped with no plan and nothing to say; "
+                                    f"asking it to continue ({nudges}/{MAX_NUDGES})."
+                                )
+                            },
+                        )
+                        messages.append({"role": "user", "content": _PLAN_NUDGE})
                         _save_transcript(token, messages)
                         continue
                     if phase is not RunPhase.CONVERSATION:

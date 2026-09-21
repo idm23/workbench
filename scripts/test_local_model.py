@@ -15,6 +15,15 @@ So this gives one small, unambiguous task to a real endpoint and reports what
 came back: did it use its tools, did it change the file, did it commit, did it
 say what it had done. Everything is temporary — its own database, its own git
 repository, its own worktree — and nothing touches an existing install.
+
+It plans first, and that half exists because this script once said a model
+could drive a run when it could not. It measured only execute runs, which
+nudge a stalled model; plan runs did not, so `gpt-oss:20b` passed here in 53
+seconds and then failed every real planning run it was given. The planning
+task also makes the model read a long file first, deliberately: a model server
+with a small context window drops the *start* of a conversation to fit, which
+is where the task is, and the only way to see that is a transcript long enough
+to overflow one — then check the plan is still about the task.
 """
 
 import argparse
@@ -47,6 +56,31 @@ TASK_BODY = (
 
 SEED_APP = '"""The demo application."""\n\n\ndef main() -> None:\n    print("hello")\n'
 
+#: The planning task. Same change, but it must read `conventions.py` first —
+#: long enough (~6,000 tokens) that the conversation outgrows a 4,096-token
+#: window, which is the default Ollama picks on a small card. A plan that no
+#: longer mentions `greet` afterwards was written by a model that lost its task.
+PLAN_TITLE = "Plan adding a greet function"
+PLAN_BODY = (
+    "Before planning, read conventions.py in full: it shows the style this "
+    "project's functions follow. Then plan how to add a function `greet(name)` "
+    "to app.py that returns 'Hello, <name>!', called from main()."
+)
+
+
+def conventions_module() -> str:
+    """A long, dull, deterministic module — only its length matters."""
+    parts = ['"""House style: every helper documents what it returns and why."""\n']
+    for i in range(120):
+        parts.append(
+            f"\n\ndef helper_{i:03}(value: int) -> int:\n"
+            f'    """Return value plus {i}, because offset {i} is what caller {i} expects.\n'
+            f"\n    Kept separate rather than parameterised so each call site reads as\n"
+            f'    one name, which is the convention this module exists to show.\n    """\n'
+            f"    return value + {i}\n"
+        )
+    return "".join(parts)
+
 
 def step(message: str) -> None:
     logger.info("\n%s", paint(BOLD, f"==> {message}"))
@@ -75,6 +109,7 @@ def seed_repository(work: Path) -> None:
     git(seed, "config", "user.name", "Seed")
     (seed / "README.md").write_text("# Demo project\n\nA project used to try one model.\n")
     (seed / "app.py").write_text(SEED_APP)
+    (seed / "conventions.py").write_text(conventions_module())
     git(seed, "add", "-A")
     git(seed, "commit", "-qm", "Initial commit")
     git(seed, "remote", "add", "origin", str(origin))
@@ -87,7 +122,7 @@ def seed_repository(work: Path) -> None:
     git(clone, "config", "user.name", "Workbench")
 
 
-def seed_rows() -> int:
+def seed_rows() -> tuple[int, int]:
     from workbench.database.db import session_scope
     from workbench.database.models import Project, Run, RunPhase, RunStatus, Task, User
 
@@ -103,9 +138,15 @@ def seed_rows() -> int:
         )
         task = Task(project=project, title=TASK_TITLE, body=TASK_BODY)
         run = Run(task=task, phase=RunPhase.EXECUTE, status=RunStatus.QUEUED, backend="local")
-        db.add_all([user, project, task, run])
+        # Its own task, so the execute numbers stay comparable with the ones
+        # recorded before planning was measured at all.
+        plan_task = Task(project=project, title=PLAN_TITLE, body=PLAN_BODY)
+        plan_run = Run(
+            task=plan_task, phase=RunPhase.PLAN, status=RunStatus.QUEUED, backend="local"
+        )
+        db.add_all([user, project, task, run, plan_task, plan_run])
         db.commit()
-        return run.id
+        return plan_run.id, run.id
 
 
 def start_app(env: dict[str, str]) -> subprocess.Popen:
@@ -143,6 +184,47 @@ def start_app(env: dict[str, str]) -> subprocess.Popen:
         except httpx.HTTPError:
             time.sleep(0.5)
     return app
+
+
+def report_plan(run_id: int, seconds: float) -> bool:
+    """Whether the planning run produced a plan, and a plan about the task."""
+    from workbench.database.db import session_scope
+    from workbench.database.models import Run, RunEvent, RunEventKind
+
+    with session_scope() as db:
+        run = db.get(Run, run_id)
+        assert run is not None
+        events = db.query(RunEvent).filter(RunEvent.run_id == run_id).order_by(RunEvent.seq).all()
+        tools = [
+            (event.payload or {}).get("name")
+            for event in events
+            if event.kind is RunEventKind.TOOL_USE
+        ]
+        notices = [
+            str((event.payload or {}).get("text", ""))
+            for event in events
+            if event.kind is RunEventKind.NOTICE
+        ]
+        plan = (run.plan or "").strip()
+
+        step("Planning")
+        logger.info("    wall clock       : %.0fs over %s turn(s)", seconds, run.num_turns)
+        logger.info("    tool calls       : %s", ", ".join(t for t in tools if t) or "none")
+        logger.info("    run status       : %s", run.status.value)
+        logger.info("    plan             : %s", plan.replace("\n", " ")[:100] or "(none)")
+
+        checks = (
+            ("read conventions.py before planning", "read_file" in tools),
+            ("produced a plan", bool(plan)),
+            ("submitted it with submit_plan", not any("without calling" in n for n in notices)),
+            ("the plan is still about the task", "greet" in plan),
+        )
+        for description, passed in checks:
+            mark = paint(GREEN, "ok  ") if passed else paint(RED, "no  ")
+            logger.info("    %s %s", mark, description)
+        # Submitting through the tool is reported but not required: a plan
+        # written as prose is still kept and read, by design.
+        return all(passed for description, passed in checks if "submit_plan" not in description)
 
 
 def report(run_id: int, seconds: float) -> bool:
@@ -256,11 +338,24 @@ def main() -> int:
             capture_output=True,
         )
         seed_repository(work)
-        run_id = seed_rows()
+        plan_id, run_id = seed_rows()
+        app = start_app(env)
+
+        step(f"Asking {arguments.model} at {arguments.url} to plan it, after a long read")
+        logger.info("    %s", PLAN_BODY)
+        started = time.monotonic()
+        subprocess.run(
+            [sys.executable, "-m", "workbench.runs.runner", str(plan_id)],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        planned = report_plan(plan_id, time.monotonic() - started)
 
         step(f"Asking {arguments.model} at {arguments.url} to do one small task")
         logger.info("    %s", TASK_BODY)
-        app = start_app(env)
 
         started = time.monotonic()
         subprocess.run(
@@ -273,7 +368,7 @@ def main() -> int:
         )
         seconds = time.monotonic() - started
 
-        passed = report(run_id, seconds)
+        passed = report(run_id, seconds) and planned
     finally:
         if app is not None:
             app.terminate()
