@@ -147,13 +147,20 @@ Two things it will not do, both on purpose:
   it had done — reading the worktree rather than the model's own summary, because those
   disagree more often than you would expect.
 
-  Measured on an RTX 3070 Laptop (8 GB) with 30 GB of system memory:
+  It plans first, after reading a long file, and checks the plan is still about the task —
+  then executes. Measured on an RTX 3070 Laptop (8 GB) with 30 GB of system memory, at the
+  32k window the node now sets:
 
-  | model | weights | result |
-  |---|---|---|
-  | `qwen2.5-coder:7b` | 4.7 GB | never used the tool channel — cannot drive a run |
-  | `qwen3:8b` | 5.2 GB | completed the task, 112s over 8 turns |
-  | `gpt-oss:20b` | 13 GB | completed the task, 53s over 10 turns |
+  | model | weights | plan (after a long read) | execute |
+  |---|---|---|---|
+  | `qwen2.5-coder:7b` | 4.7 GB | — | never used the tool channel — cannot drive a run |
+  | `qwen3:8b` | 5.2 GB | 103s, 3 turns | 197s, 6 turns |
+  | `gpt-oss:20b` | 13 GB | 65s, 5 turns | 48s, 10 turns |
+
+  Passing this is necessary, not sufficient. On a real planning task — one that needed
+  reading four files and noticing which statuses a tuple contained — `gpt-oss:20b` was right
+  four times in four and `qwen3:8b` was wrong or half-right both times, despite reading the
+  same files.
 
   **If your node has 16 GB of memory or more, use `gpt-oss:20b`.** It is twice as quick
   here despite not fitting on the card, because a mixture of experts activates only a
@@ -239,6 +246,7 @@ journalctl -u ollama -f
 | A node is missing from `/services` | It was installed without `--head`, or could not reach it — `journalctl -u workbench-deploy -n 50` on the node says which |
 | A node's `last seen` is hours old | Its deploy timer has stopped; the node re-registers on every tick, so a stale time means the timer, not the model server |
 | Runs fail asking for a model the node hasn't got | `WORKBENCH_LOCAL_MODEL` is set on the head and overrides what the node reports — unset it, or pull that model on the node |
+| A plan is fluent and about the wrong thing, a run replies with nothing, or the model asks whether there has been a user query yet | The model lost its task to a too-small context window. The run's log says so ("dropping the oldest messages to fit"). Raise `WORKBENCH_INFERENCE_CONTEXT_TOKENS` in `/etc/workbench/env` on the node; the next deploy tick rewrites the drop-in and restarts Ollama. `ollama ps` on the node shows the window actually in use |
 
 ## The security note worth reading once
 

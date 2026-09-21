@@ -433,11 +433,10 @@ def test_the_transcript_is_written_and_resumed(monkeypatch):
     drain(LocalBackend().run(a_request(prompt="And now this", resume_token=first.resume_token)))
 
     resumed = captured["payloads"][1]["messages"]
-    assert [message["content"] for message in resumed[-3:]] == [
-        "Do the thing",
-        "first",
-        "And now this",
-    ]
+    # The original task is still pinned in the system message; the new message
+    # arrives as a user turn after everything that was said.
+    assert "Do the thing" in resumed[0]["content"]
+    assert [message["content"] for message in resumed[-2:]] == ["first", "And now this"]
 
 
 def test_a_transcript_that_is_gone_starts_fresh_rather_than_failing(monkeypatch):
@@ -732,3 +731,279 @@ def test_a_run_that_asked_a_question_is_not_nudged(monkeypatch, tmp_path):
     assert not any("asking it to continue" in text for text in notices)
     assert isinstance(items[-1], AgentFinished)
     assert items[-1].text == "Waiting to hear which you want."
+
+
+# --- What made local models lose their task ---------------------------------
+#
+# Found on task 50, and none of it looked like what it was. With a 4,096-token
+# window and no reasoning carried between turns, gpt-oss read the right files
+# and then answered a different question, asked whether there had been a user
+# query yet, or replied with nothing at all. The window lives on the node (see
+# `install_node._drop_in`); these are the loop's half.
+
+
+def test_reasoning_goes_back_to_the_model_with_the_reply(monkeypatch, tmp_path):
+    """Without it a model is shown each tool result minus the thought that
+    asked for it, and has to reconstruct its own intent every turn."""
+    worktree = a_repository(tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(
+                chunk(reasoning="I should read app.py before deciding."),
+                tool_call("read_file", {"path": "app.py"}),
+            ),
+            sse(chunk(content="Done.")),
+            captured=captured,
+        ),
+    )
+
+    drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))
+
+    replayed = [m for m in captured["payloads"][1]["messages"] if m["role"] == "assistant"]
+    assert replayed[0]["reasoning"] == "I should read app.py before deciding."
+
+
+def test_a_reply_without_reasoning_sends_none():
+    reply = backend_module._Assistant(text="All done.")
+
+    assert "reasoning" not in reply.as_message()
+
+
+def test_an_empty_plan_turn_is_nudged_rather_than_failed(monkeypatch, tmp_path):
+    """One turn with neither a tool call nor any text used to fail a plan run
+    outright — the plan phase was the only one with no nudge at all."""
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(tool_call("read_file", {"path": "app.py"})),
+            sse(chunk(reasoning="Hmm.")),
+            sse(tool_call("submit_plan", {"plan": "Change x.", "subtasks": []}, call_id="c2")),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))
+
+    assert isinstance(items[-1], AgentFinished)
+    assert items[-1].text == "Change x."
+    assert any("asking it to continue" in n["text"] for n in events(items, RunEventKind.NOTICE))
+
+
+def test_a_plan_run_is_told_its_budget_inside_the_tool_result(monkeypatch, tmp_path):
+    """A capable model does not stop reading on its own; gpt-oss read the right
+    files and ran into the cap twice with no plan. The note rides on the latest
+    tool result rather than arriving as a user turn, because templates drop the
+    reasoning from before the most recent user message."""
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(backend_module, "MAX_TURNS_PLAN", 6)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(sse(tool_call("read_file", {"path": "app.py"})), captured=captured),
+    )
+
+    drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))
+
+    told = captured["payloads"][2]["messages"]  # the third turn: 6 * 0.5
+    assert told[-1]["role"] == "tool"
+    assert "4 turns remain" in told[-1]["content"]
+    assert [m["role"] for m in told].count("user") == 1  # still only the task
+
+
+def test_the_last_plan_turn_offers_only_submit_plan(monkeypatch, tmp_path):
+    """A model given one option and told to use it does. A plan written from a
+    whole run's reading is worth more than "produced no plan"."""
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(backend_module, "MAX_TURNS_PLAN", 3)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(tool_call("read_file", {"path": "app.py"})),
+            sse(tool_call("read_file", {"path": "app.py"}, call_id="c2")),
+            sse(tool_call("submit_plan", {"plan": "Do it.", "subtasks": []}, call_id="c3")),
+            captured=captured,
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))
+
+    last = captured["payloads"][-1]
+    assert [t["function"]["name"] for t in last["tools"]] == ["submit_plan"]
+    assert "last turn" in last["messages"][-1]["content"]
+    assert isinstance(items[-1], AgentFinished)
+    assert items[-1].text == "Do it."
+
+
+def test_an_execute_run_is_told_its_budget_but_keeps_its_tools(monkeypatch, tmp_path):
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(backend_module, "MAX_TURNS_EXECUTE", 4)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(sse(tool_call("read_file", {"path": "app.py"})), captured=captured),
+    )
+
+    drain(LocalBackend().run(a_request(worktree=worktree)))
+
+    assert "report_outcome" in captured["payloads"][1]["messages"][-1]["content"]
+    assert len(captured["payloads"][-1]["tools"]) > 1
+
+
+def test_the_task_is_pinned_where_truncation_cannot_reach(monkeypatch):
+    """Ollama keeps system messages when it truncates and drops the oldest
+    other message first — which is where the task used to be."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module, "_client", stub(sse(chunk(content="ok")), captured=captured)
+    )
+
+    drain(LocalBackend().run(a_request(prompt="Fix the approve button")))
+
+    sent = captured["payloads"][0]["messages"]
+    assert sent[0]["role"] == "system"
+    assert "Fix the approve button" in sent[0]["content"]
+    assert "Fix the approve button" not in sent[1]["content"]
+
+
+def usage(prompt_tokens: int) -> dict[str, Any]:
+    """The last chunk of a stream, when a server was asked to report usage."""
+    return {"model": "test-model", "choices": [], "usage": {"prompt_tokens": prompt_tokens}}
+
+
+def test_usage_is_asked_for(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        backend_module, "_client", stub(sse(chunk(content="ok")), captured=captured)
+    )
+
+    drain(LocalBackend().run(a_request()))
+
+    assert captured["payloads"][0]["stream_options"] == {"include_usage": True}
+
+
+def test_a_shrinking_prompt_inside_a_tool_chain_is_reported(monkeypatch, tmp_path):
+    """The server read fewer tokens than it did a turn ago, although a file's
+    worth of text was added in between: it dropped the start to fit."""
+    worktree = a_repository(tmp_path)
+    (worktree / "big.py").write_text("x = 1\n" * 800)
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(tool_call("read_file", {"path": "big.py"}), usage(3900)),
+            sse(tool_call("read_file", {"path": "app.py"}, call_id="c2"), usage(3100)),
+            sse(chunk(content="done"), usage(3150)),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))
+
+    dropped = [n for n in events(items, RunEventKind.NOTICE) if "dropping" in n["text"]]
+    assert len(dropped) == 1  # said once, not every turn after
+    assert "WORKBENCH_INFERENCE_CONTEXT_TOKENS" in dropped[0]["text"]
+
+
+def test_a_prompt_that_grows_as_expected_is_left_alone(monkeypatch, tmp_path):
+    worktree = a_repository(tmp_path)
+    monkeypatch.setattr(
+        backend_module,
+        "_client",
+        stub(
+            sse(tool_call("read_file", {"path": "app.py"}), usage(1000)),
+            sse(chunk(content="done"), usage(1100)),
+        ),
+    )
+
+    items = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))
+
+    assert not [n for n in events(items, RunEventKind.NOTICE) if "dropping" in n["text"]]
+
+
+def test_a_user_turn_in_between_is_not_mistaken_for_truncation():
+    """Templates drop earlier reasoning at each new user turn, so the prompt
+    legitimately shrinks across a nudge. Comparing across one would cry wolf
+    at exactly the moment someone is reading the run."""
+    window = backend_module._Window()
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "s"}]
+    window.check(messages, backend_module._Assistant(prompt_tokens=5000))
+    window.sent = len(messages)
+    messages += [
+        {"role": "assistant", "content": "", "reasoning": "long thoughts " * 200},
+        {"role": "user", "content": "keep going"},
+    ]
+
+    assert window.check(messages, backend_module._Assistant(prompt_tokens=2000)) is None
+
+
+def test_a_server_that_reports_no_usage_is_never_accused():
+    window = backend_module._Window()
+    window.check([], backend_module._Assistant(prompt_tokens=None))
+
+    assert (
+        window.check([{"role": "tool", "content": "x" * 10_000}], backend_module._Assistant())
+        is None
+    )
+
+
+def test_a_tool_call_the_server_could_not_parse_is_retried(monkeypatch, tmp_path):
+    """Ollama reports a cut-off tool call as its own 500. One bad turn is the
+    model's mistake to correct, not a reason to end the run."""
+    worktree = a_repository(tmp_path)
+    refused = httpx.Response(
+        500,
+        content=b'{"error":{"message":"error parsing tool call: unexpected end of JSON"}}',
+    )
+    replies = iter(
+        [
+            httpx.Response(200, content=sse(tool_call("read_file", {"path": "app.py"}))),
+            refused,
+            httpx.Response(
+                200, content=sse(tool_call("submit_plan", {"plan": "P.", "subtasks": []}, "c2"))
+            ),
+        ]
+    )
+
+    def factory(base_url: str | None = None) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url="http://model.test/v1",
+            transport=httpx.MockTransport(lambda request: next(replies)),
+        )
+
+    monkeypatch.setattr(backend_module, "_client", factory)
+
+    items = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))
+
+    assert isinstance(items[-1], AgentFinished)
+    assert items[-1].text == "P."
+    assert any("could not parse" in n["text"] for n in events(items, RunEventKind.NOTICE))
+
+
+def test_any_other_server_error_mid_run_still_fails_it(monkeypatch, tmp_path):
+    worktree = a_repository(tmp_path)
+    replies = iter(
+        [
+            httpx.Response(200, content=sse(tool_call("read_file", {"path": "app.py"}))),
+            httpx.Response(500, content=b'{"error":{"message":"out of memory"}}'),
+        ]
+    )
+
+    def factory(base_url: str | None = None) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url="http://model.test/v1",
+            transport=httpx.MockTransport(lambda request: next(replies)),
+        )
+
+    monkeypatch.setattr(backend_module, "_client", factory)
+
+    outcome = drain(LocalBackend().run(a_request(phase=RunPhase.PLAN, worktree=worktree)))[-1]
+
+    assert isinstance(outcome, AgentFailed)
+    assert "failed mid-run" in outcome.message

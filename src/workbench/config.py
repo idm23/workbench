@@ -423,6 +423,27 @@ DEFAULT_LOCAL_MODEL = "qwen3:8b"
 #: the whole run rather than the turn.
 DEFAULT_INFERENCE_TIMEOUT_SECONDS = 600
 
+#: How much conversation a node's model server holds, in tokens. The single
+#: most consequential number on a node, and for a long time nobody chose it.
+#:
+#: Ollama sizes its window from the GPU unless told otherwise, and on a card
+#: under 24 GB that means 4,096 tokens — which one plan run passes by its fifth
+#: turn. Past that it does not refuse; it drops the *oldest* messages to fit,
+#: keeping the system prompt and discarding the task. So every local run long
+#: enough to be useful went on working, fluently, without its instructions.
+#: That one fact produced a plan about the wrong subject, a model asking
+#: whether there had been a user query yet, and empty replies that failed
+#: runs — all on the same task, and none looking like truncation.
+#:
+#: Measured on task 50 against the node: the transcript crossed 4,096 at turn
+#: five and reached 7,555. With the whole transcript sent, a 4,096 window
+#: evaluated 3,016 of its 7,480 tokens and the model answered with nothing; at
+#: 16,384 it quoted the task's title back verbatim.
+#:
+#: 32k because gpt-oss's attention keeps its cache small, so the window costs
+#: it almost no memory; a node whose model pays more for it can say so.
+DEFAULT_INFERENCE_CONTEXT_TOKENS = 32_768
+
 
 def inference_base_url() -> str:
     """The OpenAI-compatible endpoint the local backend talks to."""
@@ -456,6 +477,24 @@ def inference_timeout_seconds() -> float:
     except ValueError:
         logger.warning("WORKBENCH_INFERENCE_TIMEOUT_SECONDS is not a number: %r", raw)
         return DEFAULT_INFERENCE_TIMEOUT_SECONDS
+
+
+def inference_context_tokens() -> int:
+    """The context window a node tells its model server to use.
+
+    Read on the node, where it is written into the model server's drop-in.
+    A setting rather than a constant for the same reason `WORKBENCH_LOCAL_MODEL`
+    is: what fits is a fact about one machine's memory.
+    """
+    raw = os.environ.get("WORKBENCH_INFERENCE_CONTEXT_TOKENS", "").strip()
+    if not raw:
+        return DEFAULT_INFERENCE_CONTEXT_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("WORKBENCH_INFERENCE_CONTEXT_TOKENS is not a number: %r", raw)
+        return DEFAULT_INFERENCE_CONTEXT_TOKENS
+    return value if value > 0 else DEFAULT_INFERENCE_CONTEXT_TOKENS
 
 
 def sessions_dir() -> Path:

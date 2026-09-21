@@ -28,6 +28,26 @@ def test_the_drop_in_binds_every_interface(monkeypatch):
     assert "OLLAMA_KEEP_ALIVE" in rendered
 
 
+def test_the_drop_in_gives_the_model_a_real_context_window(monkeypatch):
+    """Left alone, Ollama picks 4,096 on a card under 24 GB and drops a run's
+    task once the conversation outgrows it — silently, and with no error."""
+    monkeypatch.delenv("WORKBENCH_INFERENCE_CONTEXT_TOKENS", raising=False)
+
+    assert "OLLAMA_CONTEXT_LENGTH=32768" in install_node._drop_in()
+
+
+def test_a_node_can_choose_its_own_window(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_INFERENCE_CONTEXT_TOKENS", "16384")
+
+    assert "OLLAMA_CONTEXT_LENGTH=16384" in install_node._drop_in()
+
+
+def test_a_nonsense_window_falls_back_rather_than_breaking_the_unit(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_INFERENCE_CONTEXT_TOKENS", "lots")
+
+    assert "OLLAMA_CONTEXT_LENGTH=32768" in install_node._drop_in()
+
+
 def test_the_drop_in_says_it_is_generated():
     """Someone will edit it on the machine, and it is rewritten on deploy."""
     assert "overwritten" in install_node._drop_in()

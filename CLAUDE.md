@@ -194,6 +194,71 @@ two disagree more often than seems possible.
 weights is a bet on a machine nobody has described yet, and a node with the
 memory can say so through `WORKBENCH_LOCAL_MODEL`.
 
+**That table measured execute runs only, and it was wrong about planning.** The
+harness ran one execute task, which the loop nudges when a model stalls; plan
+runs had no nudge. So `gpt-oss:20b` "completed it in 53s" and then failed every
+real planning run it was given — fluent plans about the wrong subject, replies
+that said nothing, and once, nine turns in, a question about whether there had
+been a user query yet. The harness now plans first, after a deliberately long
+read, and checks the plan is still about the task.
+
+**What was actually wrong was the context window, and it looked like the
+model.** Ollama sizes its window from the GPU, and on a card under 24 GB that is
+4,096 tokens. A plan run on task 50 passed that at its fifth turn and reached
+7,555. Ollama does not refuse an oversized request: it drops the oldest
+messages until the rest fit, *keeping the system message* — so the rules
+survived and the task, in the first user message, went first. Sent the whole
+transcript and asked for the task's title, the model read 3,016 of 7,480 tokens
+and answered with nothing; at 16,384 it quoted the title verbatim.
+
+Five fixes, each for a failure seen on the node rather than reasoned about:
+
+- **The node sets `OLLAMA_CONTEXT_LENGTH`** (32k, `WORKBENCH_INFERENCE_CONTEXT_TOKENS`
+  to change it) in the drop-in it already owns, which the deploy tick converges.
+- **The task is pinned in the system message**, the one thing truncation keeps,
+  so a run that outgrows its window loses old tool output rather than its job.
+  And the loop says when that happens: within a tool-call chain the prompt only
+  grows, so the server reading fewer tokens than was just added is a notice.
+- **Reasoning goes back with each reply.** Measured, not guessed: with a fact
+  placed only in the previous turn's reasoning inside a tool-call chain, both
+  models recalled it under `reasoning` and neither did under `reasoning_content`
+  or `thinking`. Without it a model sees each result minus the thought that
+  asked for it.
+- **A run is told its budget, and a plan run's last turn offers only
+  `submit_plan`.** Given its task and its reasoning, gpt-oss read the right files
+  and then kept reading until the cap, twice, with no plan. Told "twenty turns
+  remain" it wrapped up within seven. The note rides inside the latest tool
+  result rather than as a user turn, because templates discard all earlier
+  reasoning at a new user turn.
+- **The tools answer the questions small models actually ask.** gpt-oss spells
+  reading a file `open_file(path, line_start, line_end)` — fourteen times across
+  two runs, each one refused — so that spelling is now understood. `list_files`
+  had silently dropped any directory holding only directories, so `src/` was
+  invisible at depth 1 and qwen3 spent a run guessing paths. An empty search
+  now says the pattern matches lines, not file names, after qwen3 wrote
+  `approve_plan.*?app\.py` eleven times; `query` is accepted for `pattern`,
+  gpt-oss's other trained spelling. And a tool call Ollama itself could not
+  parse — it answers those with a 500 — is retried like any malformed call,
+  instead of ending the run.
+
+After them, on the same task: `gpt-oss:20b` at 32k produced a correct plan four
+times out of four in 21–33 turns and 160–302s — `finish_run(db, run,
+RunStatus.SUCCEEDED)`, and the observation, beyond what the task said, that the
+existing status guard then refuses a second POST by itself. Through the harness
+at 32k both models now pass: `gpt-oss:20b` planned in 65s and executed in 48s,
+`qwen3:8b` in 103s and 197s. A deliberate stress
+run at the old 4,096 window still fails — nothing here makes a window that small
+workable — but it now says why in its own log, naming the setting, instead of
+producing a confident plan about something else. `qwen3:8b` now uses its
+tools — it read `app.py` and `activity.py` in its first three calls, where the
+run before the tool fixes spent twelve on failed searches and read nothing — and
+still planned wrongly: it placed `approve_plan` in a module it is not in and
+proposed `RUNNING`, a status in the very tuple it had just read. It is slow here
+too once it has read anything, because a dense model's cache grows with the
+window: on an 8 GB card 16k spills a gigabyte onto the CPU, and that run took
+737s for six turns. Its tool literacy was the harness's to fix; its judgement
+was not.
+
 One consequence reached back into the vendor-neutral half. `prompts.execute_prompt` used
 to tell the agent to use the `workbench-outcome` skill, which is one backend's mechanism
 sitting in the module that exists to have none. It now states the *obligation* — report

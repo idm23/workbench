@@ -48,6 +48,7 @@ from workbench.config import (
     gaming_user,
     head_url,
     inference_base_url,
+    inference_context_tokens,
     is_client_node,
     is_gaming_node,
     is_inference_node,
@@ -190,6 +191,10 @@ def _drop_in() -> str:
         "[Service]\n"
         f"Environment=OLLAMA_HOST={OLLAMA_BIND}\n"
         f"Environment=OLLAMA_KEEP_ALIVE={OLLAMA_KEEP_ALIVE}\n"
+        # Without this Ollama picks 4,096 on any card under 24 GB and silently
+        # drops a run's task once the conversation outgrows it. See
+        # `DEFAULT_INFERENCE_CONTEXT_TOKENS` for what that looked like.
+        f"Environment=OLLAMA_CONTEXT_LENGTH={inference_context_tokens()}\n"
     )
 
 
