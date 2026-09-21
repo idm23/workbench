@@ -56,7 +56,7 @@ def plan_prompt(title: str, body: str | None = None) -> str:
     return "\n".join(parts)
 
 
-def execute_prompt(title: str, body: str | None = None) -> str:
+def execute_prompt(title: str, body: str | None = None, context: str | None = None) -> str:
     """The execute phase: carry out the plan.
 
     Usually this resumes the planning conversation, and stays short for
@@ -76,6 +76,11 @@ def execute_prompt(title: str, body: str | None = None) -> str:
     parts = [f"Carry out this task now: {title!r}."]
     if body:
         parts += ["", body]
+    if context:
+        # What this run cannot get from a resumed session: the plan another
+        # agent wrote and a person approved, or what a review asked for. See
+        # `runs.runner.prepare`.
+        parts += ["", context]
     parts += [
         "",
         "Commit your work in logical commits as you go, with clear commit "
@@ -170,6 +175,79 @@ CHECK_CI_SHORTCUT = (
     "Check whether CI is passing on this task's branch and pull request. If "
     "anything is failing, look into why and fix it."
 )
+
+
+#: What goes in front of an approved plan when it is handed to a different
+#: agent to carry out. That agent cannot resume the planner's session, so the
+#: plan has to travel in the prompt.
+APPROVED_PLAN_HEADER = (
+    "A plan for this task was written by another agent and approved by a person. "
+    "Follow it; where the code disagrees with it, trust the code and say so in your "
+    "summary."
+)
+
+#: What goes in front of a review's findings when work is sent back.
+REVIEW_FEEDBACK_HEADER = (
+    "Your earlier work on this task was reviewed, and the reviewer asked for changes. "
+    "The work so far is committed on this branch — check `git log` — so address "
+    "these points on top of it rather than starting over:"
+)
+
+#: Longest diff a review prompt carries. Past this the reviewer is told what was
+#: cut and reads the rest itself.
+MAX_REVIEW_DIFF_CHARS = 60_000
+
+
+def review_prompt(title: str, body: str | None, diff: str, summary: str | None = None) -> str:
+    """The review phase: judge finished work against its task, change nothing.
+
+    The diff is in the prompt rather than left to the reviewer to produce,
+    because a read-only reviewer may not be able to run git — Claude's plan
+    mode cannot — and a review that never sees the change is not one.
+
+    The checklist is not generic. Each item is a mistake that reached a pull
+    request here while the only reviewer was a person: a call site the task
+    named as the important one, left out; an existing test's assertion deleted
+    by an edit that added new tests; tests reported as passing that had never
+    run.
+    """
+    if len(diff) > MAX_REVIEW_DIFF_CHARS:
+        cut = len(diff) - MAX_REVIEW_DIFF_CHARS
+        diff = (
+            f"{diff[:MAX_REVIEW_DIFF_CHARS]}\n… {cut} more characters of diff not shown; "
+            "read the changed files directly."
+        )
+    parts = [
+        "You are reviewing work another agent did on this branch, before it is "
+        "published as a pull request. Change nothing: read, judge, and report.",
+        "",
+        f"# Task: {title}",
+    ]
+    if body:
+        parts += ["", body]
+    if summary:
+        parts += ["", "## What the agent says it did", "", summary]
+    parts += [
+        "",
+        "## The change, as a diff against the branch it will merge into",
+        "",
+        "```diff",
+        diff or "(no changes)",
+        "```",
+        "",
+        "Read the files around the change as well as the diff. Check in particular:",
+        "- Does it do everything the task asks, including any part the task singles "
+        "out as important? List anything missing.",
+        "- Did it remove or weaken anything it should not have — an existing test's "
+        "assertion, a column, a call site? Deleted lines in the diff deserve a look.",
+        "- Do the tests actually exercise the change, and would they fail without it?",
+        "- Is anything claimed in the agent's summary not borne out by the diff?",
+        "",
+        "Approve only if the change is correct and complete enough to merge as it is. "
+        "Otherwise ask for changes, and make each finding specific enough to act on: "
+        "the file, what is wrong, and what it should be instead.",
+    ]
+    return "\n".join(parts)
 
 
 def prompt_for(phase: RunPhase, title: str, body: str | None = None) -> str:

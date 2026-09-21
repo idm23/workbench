@@ -183,6 +183,12 @@ def agent_allowed(project: Project, backend: str, login: str | None) -> bool:
     return agent_choice(backend, login) in project.allowed_agents
 
 
+def parse_agent_choice(choice: str) -> tuple[str, str | None]:
+    """A choice as a backend and a login — the inverse of `agent_choice`."""
+    backend, _, login = choice.partition(":")
+    return backend, (login or None)
+
+
 def agent_choices(project: Project) -> list[str]:
     """What may be picked to start a fresh run on this project, in order.
 
@@ -260,6 +266,7 @@ def start_run(
     backend: str | None = None,
     executor: str | None = None,
     login: str | None = None,
+    seed_message: str | None = None,
 ) -> StartResult:
     """Begin a run, or explain why not.
 
@@ -280,7 +287,9 @@ def start_run(
 
     # An explicit choice is a choice: never second-guessed by failover.
     picked = Chosen(backend) if backend else choose_backend(db, task.project)
-    run = create_run(db, task, phase, backend=picked.backend, login=login)
+    run = create_run(
+        db, task, phase, backend=picked.backend, login=login, seed_message=seed_message
+    )
     if not agent_allowed(task.project, picked.backend, login):
         allowed = ", ".join(task.project.allowed_agents or [])
         message = (

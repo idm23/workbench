@@ -129,6 +129,11 @@ class AgentFinished:
     #: for an execute run — decomposition is a plan-phase concept.
     proposed_subtasks: list[SubtaskProposal] | None = None
 
+    #: A review run's decision: "approve" or "changes". None for every other
+    #: phase, and for a review that never reached one — which is treated as
+    #: "a person should look", never as approval.
+    verdict: str | None = None
+
     #: True when the backend cut the conversation short itself — hitting the
     #: turn limit, say — rather than the agent choosing to stop. Distinct from
     #: whether the process crashed: this is still `AgentFinished`, just not

@@ -78,6 +78,11 @@ class RunPhase(StrEnum):
     #: is why it gets its own turn limit and its own prompt rather than
     #: fitting into the plan/execute split.
     CONVERSATION = "conversation"
+    #: A read-only look at finished work, before anything is published: the
+    #: diff against the task, and a verdict. Its own phase rather than a kind
+    #: of plan because what it produces is a judgement on work that exists,
+    #: not a proposal for work that does not.
+    REVIEW = "review"
 
 
 class RunEventKind(StrEnum):
@@ -259,6 +264,16 @@ class Project(Base):
     # Which agents may work on this project: entries are "backend" (its default
     # login) or "backend:login". Null or empty means any. Enforced by start_run.
     allowed_agents: Mapped[list[str] | None] = mapped_column(JSON, default=None)
+
+    # Who carries out an approved plan, when it should not be the agent that
+    # wrote it — "plan with Claude, execute with local". An agent choice
+    # ("backend" or "backend:login"); null means the planner does, which is
+    # what every project did before this existed.
+    execute_agent: Mapped[str | None] = mapped_column(String(250), default=None)
+
+    # Who rechecks finished work before a pull request is opened. Null means
+    # nobody, and a finished run publishes straight away as it always has.
+    review_agent: Mapped[str | None] = mapped_column(String(250), default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
