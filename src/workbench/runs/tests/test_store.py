@@ -144,6 +144,16 @@ def test_reporting_an_outcome_with_no_detail_leaves_it_unset(db, run):
     assert run.outcome_detail is None
 
 
+def test_create_run_with_login(db, task):
+    run = create_run(db, task, RunPhase.EXECUTE, backend="fake", login="ian@example.com")
+    assert run.login == "ian@example.com"
+
+
+def test_create_run_without_login(db, task):
+    run = create_run(db, task, RunPhase.EXECUTE, backend="fake")
+    assert run.login is None
+
+
 # --- Typing into a run that is still going ----------------------------------
 
 

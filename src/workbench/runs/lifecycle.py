@@ -209,6 +209,7 @@ def start_run(
     *,
     backend: str | None = None,
     executor: str | None = None,
+    login: str | None = None,
 ) -> StartResult:
     """Begin a run, or explain why not.
 
@@ -229,7 +230,7 @@ def start_run(
 
     # An explicit choice is a choice: never second-guessed by failover.
     picked = Chosen(backend) if backend else choose_backend(db, task.project)
-    run = create_run(db, task, phase, backend=picked.backend)
+    run = create_run(db, task, phase, backend=picked.backend, login=login)
     if picked.reason:
         append_event(db, run.id, RunEventKind.NOTICE, {"text": picked.reason})
     return _launch(db, run, executor)
