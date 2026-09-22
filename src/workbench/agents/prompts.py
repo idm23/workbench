@@ -201,9 +201,11 @@ MAX_REVIEW_DIFF_CHARS = 60_000
 def review_prompt(title: str, body: str | None, diff: str, summary: str | None = None) -> str:
     """The review phase: judge finished work against its task, change nothing.
 
-    The diff is in the prompt rather than left to the reviewer to produce,
-    because a read-only reviewer may not be able to run git — Claude's plan
-    mode cannot — and a review that never sees the change is not one.
+    The diff is in the prompt rather than left to the reviewer to produce, so
+    that every reviewer starts from the same, complete picture of the change,
+    whatever its tools. (Claude's plan mode can still run commands — the first
+    live reviews ran `git log`, `ruff` and the test suite to check their
+    claims — it cannot edit, which is the part that matters.)
 
     The checklist is not generic. Each item is a mistake that reached a pull
     request here while the only reviewer was a person: a call site the task
@@ -246,6 +248,10 @@ def review_prompt(title: str, body: str | None, diff: str, summary: str | None =
         "Approve only if the change is correct and complete enough to merge as it is. "
         "Otherwise ask for changes, and make each finding specific enough to act on: "
         "the file, what is wrong, and what it should be instead.",
+        "",
+        "Give your verdict once, with the summary and all findings in the same answer. "
+        "Write the findings as one markdown list — a line per finding starting with `- ` "
+        "— not as separate values.",
     ]
     return "\n".join(parts)
 

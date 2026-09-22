@@ -1406,13 +1406,32 @@ def test_a_review_verdict_and_findings_come_from_structured_output():
             structured_output={
                 "verdict": "changes",
                 "summary": "One call site is missing.",
-                "findings": ["runner.py: the task run gets no login"],
+                "findings": "- runner.py: the task run gets no login",
             }
         )
     )
 
     assert verdict == "changes"
     assert text == "One call site is missing.\n\n- runner.py: the task run gets no login"
+
+
+def test_the_older_list_of_findings_is_still_read():
+    text, _ = backend_module._review(
+        a_result(structured_output={"verdict": "changes", "summary": "S", "findings": ["x"]})
+    )
+
+    assert text == "S\n\n- x"
+
+
+def test_only_the_verdict_is_required():
+    """Run 87: four real reviews rejected over a mangled findings field, and a
+    placeholder recorded instead. A schema asking for less gets the real one."""
+    schema = backend_module._REVIEW_OUTPUT_FORMAT["schema"]
+
+    assert schema["required"] == ["verdict"]
+    assert schema["properties"]["findings"]["type"] == "string"
+    text, verdict = backend_module._review(a_result(structured_output={"verdict": "approve"}))
+    assert (text, verdict) == ("", "approve")
 
 
 def test_a_review_in_prose_has_no_verdict():
