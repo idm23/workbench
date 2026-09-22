@@ -50,6 +50,21 @@ def get_session_factory() -> sessionmaker[Session]:
     return sessionmaker(bind=get_engine(), expire_on_commit=False)
 
 
+def reset_engine() -> None:
+    """Close the process-wide engine's connections, then forget it.
+
+    Clearing the cache alone orphans the engine with its pool still open, and
+    the connections are only closed when the garbage collector gets round to
+    them. The test suite did that between tests and leaked hundreds of them,
+    which was harmless on a machine allowing a million open files and fatal
+    in an agent run allowed 1,024 (#83).
+    """
+    if get_engine.cache_info().currsize:
+        get_engine().dispose()
+    get_engine.cache_clear()
+    get_session_factory.cache_clear()
+
+
 @contextmanager
 def session_scope() -> Iterator[Session]:
     """Transactional scope: commits on success, rolls back on error."""

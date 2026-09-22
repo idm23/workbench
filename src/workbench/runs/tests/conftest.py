@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from workbench.database.db import get_engine, get_session_factory
+from workbench.database.db import get_engine, get_session_factory, reset_engine
 from workbench.database.models import Base, Project, RunPhase, Task, User
 from workbench.git.worktrees import clone_path_for
 from workbench.runs.store import create_run
@@ -21,11 +21,9 @@ def data_dir(tmp_path, monkeypatch):
     db_path = tmp_path / "data" / "workbench.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("WORKBENCH_DB", str(db_path))
-    get_engine.cache_clear()
-    get_session_factory.cache_clear()
+    reset_engine()
     yield db_path.parent
-    get_engine.cache_clear()
-    get_session_factory.cache_clear()
+    reset_engine()
 
 
 @pytest.fixture

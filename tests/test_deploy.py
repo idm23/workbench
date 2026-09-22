@@ -14,6 +14,7 @@ on the server rather than in this file.
 import importlib.util
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -344,7 +345,7 @@ def test_nothing_is_rebuilt_when_there_is_nothing_to_deploy(checkout, monkeypatc
 def make_database(path, rows: int = 3) -> None:
     """A WAL-mode database with content, like the one on the server."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         connection.executemany(
@@ -353,7 +354,7 @@ def make_database(path, rows: int = 3) -> None:
 
 
 def count_users(path) -> int:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         return connection.execute("SELECT count(*) FROM users").fetchone()[0]
 
 

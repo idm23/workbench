@@ -133,7 +133,9 @@ def test_a_local_run_is_a_real_detached_process(tmp_path, monkeypatch):
     def fake_popen(argv, **kwargs):
         started["argv"] = list(argv)
         started["session"] = kwargs.get("start_new_session")
-        return real_popen(["sleep", "5"], start_new_session=True)
+        process = real_popen(["sleep", "5"], start_new_session=True)
+        started["process"] = process  # type: ignore[assignment]
+        return process
 
     monkeypatch.setattr(executors_module.subprocess, "Popen", fake_popen)
     executor = LocalProcessExecutor()
@@ -145,6 +147,10 @@ def test_a_local_run_is_a_real_detached_process(tmp_path, monkeypatch):
     assert started["argv"][1:] == ["-m", "workbench.runs.runner", "9"]  # type: ignore[index]
     assert executor.is_running(result.handle) is True
     executor.cancel(result.handle)
+    # Reaped, not just signalled: a process object dropped while its process is
+    # still exiting is a resource warning, and the suite now treats those as
+    # failures (#83).
+    started["process"].wait(timeout=10)  # type: ignore[union-attr]
 
 
 def test_a_pid_that_is_gone_is_not_running():
