@@ -733,6 +733,7 @@ class ClaudeBackend:
         value.
         """
         from workbench.config import billing_mode
+
         return f"billing {billing_mode()}"
 
     def credential_status(self) -> CredentialStatus:
