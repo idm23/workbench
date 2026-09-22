@@ -729,7 +729,7 @@ class ClaudeBackend:
         """Return the notice that the claude backend is charged via a subscription.
 
         This uses the same wording as the historic notice in the runner; the
-        billing mode is a run‑time configuration, so we just reflect its current
+        billing mode is a run-time configuration, so we just reflect its current
         value.
         """
         from workbench.config import billing_mode

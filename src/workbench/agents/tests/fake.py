@@ -62,7 +62,7 @@ class FakeBackend:
     @property
     def name(self) -> str:
         return self._name
-    
+
     @property
     def billing_notice(self) -> str:
         return self._billing_notice

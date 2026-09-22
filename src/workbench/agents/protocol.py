@@ -333,9 +333,9 @@ class Backend(Protocol):
 
     @property
     def billing_notice(self) -> str:
-        """Human‑readable notice describing what the backend actually spends.
+        """Human-readable notice describing what the backend actually spends.
 
-        The ``runner`` used to answer a machine‑wide question via
+        The ``runner`` used to answer a machine-wide question via
         :func:`config.billing_mode`. That question is not specific to an
         individual backend and thus gave wrong information for backends that
         bill nothing (e.g., the local GPU/clock backend).  This property

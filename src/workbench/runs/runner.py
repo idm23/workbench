@@ -1104,13 +1104,13 @@ def execute(db: Session, run: Run) -> Run:
     """One run, start to finish, always ending in a recorded outcome."""
     mark_running(db, run)
     # Emit a notice describing what the selected backend actually spends. The
-    # runner used to quote the machine‑wide billing mode, which was wrong for backends
+    # runner used to quote the machine-wide billing mode, which was wrong for backends
     # that bill nothing.  Backends now expose their own notice via the
     # ``billing_notice`` property.
     backend = get_backend(run.backend)
     if isinstance(backend, Backend):
-        notice_text = f"Backend {backend.name}, {backend.billing_notice}"
-    else:  # Unknown backend – fall back to the old generic notice
+        notice_text = f"Backend {backend.name}, {backend.billing_notice}."
+    else:  # Unknown backend - fall back to the old generic notice
         notice_text = f"Backend {run.backend}, billing {billing_mode()}."
     append_event(
         db,
