@@ -510,6 +510,237 @@ def _replace_lines(content: str, first: int, end: int, new: str) -> str:
     return "\n".join(lines) + ("\n" if trailing else "")
 
 
+#: The patch format gpt-oss writes: OpenAI's `apply_patch`, the editing tool it
+#: was trained with. Its first five edits of run 83 were all patches like this,
+#: sent to `edit_file`, which refused them for having no `new_text`.
+_PATCH_BEGIN = "*** Begin Patch"
+_PATCH_END = "*** End Patch"
+_PATCH_FILE = re.compile(r"^\*\*\* (Update|Add|Delete) File: (.+?)\s*$")
+
+
+@dataclass
+class _Chunk:
+    header: str
+    lines: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class _FilePatch:
+    op: str
+    path: str
+    chunks: list[_Chunk] = field(default_factory=list)
+
+
+def _parse_patch(text: str, default_path: str | None) -> list[_FilePatch] | str:
+    """A patch as files and chunks, or why it could not be read.
+
+    Accepts the full form (`*** Begin Patch`, `*** Update File: ...`) and the
+    bare one gpt-oss also sent — `@@` chunks with the file named separately in
+    `path` — because both arrived in the same run.
+    """
+    files: list[_FilePatch] = []
+    current: _FilePatch | None = None
+    # Trailing blank lines are the patch ending, not empty context lines: left
+    # in, a patch that ends in a newline — most of them — would ask for a blank
+    # line after its last chunk that the file may not have.
+    for raw in text.replace("\r\n", "\n").rstrip().split("\n"):
+        if raw.strip() in (_PATCH_BEGIN, _PATCH_END) or raw.startswith("*** End of File"):
+            continue
+        if match := _PATCH_FILE.match(raw):
+            current = _FilePatch(op=match.group(1).lower(), path=match.group(2).strip())
+            files.append(current)
+            continue
+        if raw.startswith("*** "):
+            return f"This patch uses {raw.split(':')[0]!r}, which is not supported."
+        if current is None:
+            if not default_path:
+                return "Say which file the patch is for: `*** Update File: <path>`, or `path`."
+            current = _FilePatch(op="update", path=default_path)
+            files.append(current)
+        if current.op == "add":
+            current.chunks = current.chunks or [_Chunk(header="")]
+            current.chunks[0].lines.append(("+", raw[1:] if raw.startswith("+") else raw))
+            continue
+        if raw.startswith("@@"):
+            current.chunks.append(_Chunk(header=raw[2:].strip().strip("@").strip()))
+            continue
+        if not current.chunks:
+            current.chunks.append(_Chunk(header=""))
+        tag, body = (raw[0], raw[1:]) if raw[:1] in (" ", "-", "+") else (" ", raw)
+        current.chunks[-1].lines.append((tag, body))
+    for patch in files:
+        # A chunk that only locates (no + or -) says where the next one is.
+        patch.chunks = [c for c in patch.chunks if c.lines or c.header]
+    return files or "The patch is empty."
+
+
+def _find_block(lines: list[str], wanted: list[str], start: int) -> tuple[int, int] | None:
+    """Where `wanted` appears at or after `start`: (index, indentation shift).
+
+    Exact first, then ignoring trailing whitespace, then with every line off by
+    the *same* indentation — and nothing looser. A uniform shift is evidence the
+    model retyped the block one level out; anything less uniform is a guess, and
+    an earlier guess of this kind put a `return` inside a loop.
+    """
+    n = len(wanted)
+    if n == 0:
+        return None
+    for i in range(start, len(lines) - n + 1):
+        if lines[i : i + n] == wanted:
+            return i, 0
+    for i in range(start, len(lines) - n + 1):
+        if [line.rstrip() for line in lines[i : i + n]] == [w.rstrip() for w in wanted]:
+            return i, 0
+    for i in range(start, len(lines) - n + 1):
+        shifts = {
+            _indent_width(lines[i + k]) - _indent_width(wanted[k])
+            for k in range(n)
+            if wanted[k].strip()
+        }
+        if len(shifts) == 1 and all(lines[i + k].strip() == wanted[k].strip() for k in range(n)):
+            return i, shifts.pop()
+    return None
+
+
+def _indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _shift(line: str, by: int) -> str:
+    if not line.strip() or by == 0:
+        return line
+    return " " * by + line if by > 0 else line[min(-by, _indent_width(line)) :]
+
+
+def _apply_chunks(content: str, chunks: list[_Chunk], path: str) -> tuple[str, list[int]] | str:
+    """The file with every chunk applied in order, and where each landed."""
+    trailing = content.endswith("\n")
+    lines = (content[:-1] if trailing else content).split("\n")
+    position, landed = 0, []
+    for number, chunk in enumerate(chunks, start=1):
+        if chunk.header:
+            hint = next((i for i in range(position, len(lines)) if chunk.header in lines[i]), None)
+            if hint is not None:
+                position = hint
+        old = [body for tag, body in chunk.lines if tag in " -"]
+        if not any(tag in "-+" for tag, _ in chunk.lines):
+            # Context only: it locates the chunk after it, as gpt-oss used it.
+            found = _find_block(lines, old, position)
+            if found is not None:
+                position = found[0] + len(old)
+            continue
+        if not old:
+            return (
+                f"Chunk {number} for {path} has no context lines to place it by. Include "
+                "a few unchanged lines, prefixed with a space, around the change."
+            )
+        found = _find_block(lines, old, position)
+        if found is None:
+            preview = "\n".join(old[:3])
+            return (
+                f"Chunk {number} for {path} does not match the file. These lines were "
+                f"not found (after line {position + 1}):\n{preview}\nRead the file and "
+                "copy the context lines exactly."
+            )
+        index, shift = found
+        replacement, k = [], 0
+        for tag, body in chunk.lines:
+            if tag == " ":
+                replacement.append(lines[index + k])  # the file's own text, always
+                k += 1
+            elif tag == "-":
+                k += 1
+            else:
+                replacement.append(_shift(body, shift))
+        lines[index : index + len(old)] = replacement
+        landed.append(index)
+        position = index + len(replacement)
+    return "\n".join(lines) + ("\n" if trailing else ""), landed
+
+
+def _apply_patch(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    """Apply a patch in the `*** Begin Patch` format — gpt-oss's own.
+
+    Every file is checked before any is written, so a patch is applied whole
+    or not at all. The same guards as `edit_file` apply: a Python file that
+    would stop compiling is refused, and lines that disappear are listed.
+    """
+    patch = args.get("patch", args.get("input"))
+    if not isinstance(patch, str) or not patch.strip():
+        return ToolResult("`patch` must be the patch text.", is_error=True)
+    default = args.get("path")
+    parsed = _parse_patch(patch, str(default) if default else None)
+    if isinstance(parsed, str):
+        return ToolResult(parsed, is_error=True)
+
+    root = context.worktree.resolve()
+    writes: list[tuple[Path, str | None]] = []
+    reports: list[str] = []
+    for file in parsed:
+        target = _resolve(context, file.path)
+        if isinstance(target, ToolResult):
+            return target
+        shown = target.relative_to(root)
+        if file.op == "delete":
+            if not target.is_file():
+                return ToolResult(
+                    f"{shown} does not exist, so it cannot be deleted.", is_error=True
+                )
+            writes.append((target, None))
+            reports.append(f"Deleted {shown}.")
+            continue
+        if file.op == "add":
+            if target.exists():
+                return ToolResult(
+                    f"{shown} already exists. Use `*** Update File:` to change it.", is_error=True
+                )
+            body = "\n".join(line for _, line in file.chunks[0].lines) if file.chunks else ""
+            new = body if body.endswith("\n") else body + "\n"
+            if (broken := _broken_python(target, None, new)) is not None:
+                return ToolResult(
+                    f"Not applied — {shown} would not compile: {broken}.", is_error=True
+                )
+            writes.append((target, new))
+            reports.append(f"Added {shown} ({len(new.splitlines())} lines).")
+            continue
+        if not target.is_file():
+            return ToolResult(
+                f"{shown} is not a file. Use `*** Add File:` to create it.", is_error=True
+            )
+        before = target.read_text(encoding="utf-8")
+        applied = _apply_chunks(before, file.chunks, str(shown))
+        if isinstance(applied, str):
+            return ToolResult(applied, is_error=True)
+        after, landed = applied
+        if (broken := _broken_python(target, before, after)) is not None:
+            return ToolResult(
+                f"Not applied — {shown} would no longer compile: {broken}. Check the "
+                "indentation of the added lines against the context around them.",
+                is_error=True,
+            )
+        writes.append((target, after))
+        report = f"Updated {shown}."
+        for index in landed[:3]:
+            report += f"\n{_around(after, index, index + 6)}"
+        if gone := _removed(before, after):
+            shown_gone = "\n".join(f"  {line}" for line in gone[:8])
+            report += (
+                f"\nThese lines are no longer in the file — make sure that was meant:\n{shown_gone}"
+            )
+        reports.append(report)
+
+    for target, new in writes:
+        try:
+            if new is None:
+                target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(new, encoding="utf-8")
+        except OSError as exc:
+            return ToolResult(f"Could not write {target}: {exc}", is_error=True)
+    return ToolResult("\n\n".join(reports))
+
+
 def _edit_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     """Change part of a file, by quoting it or by naming its lines.
 
@@ -518,6 +749,9 @@ def _edit_file(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     it sent a line range in all eight edits of one run, and refusing it cost
     that run most of its turns.
     """
+    if isinstance(args.get("patch"), str):
+        # gpt-oss's own format, sent here more often than to apply_patch.
+        return _apply_patch(context, args)
     target = _resolve(context, str(args.get("path") or ""))
     if isinstance(target, ToolResult):
         return target
@@ -914,6 +1148,24 @@ TOOLS: dict[str, Tool] = {
             handler=_edit_file,
         ),
         Tool(
+            name="apply_patch",
+            description=(
+                "Apply a patch in the *** Begin Patch format. Each file starts with "
+                "`*** Update File: <path>`, `*** Add File: <path>` or `*** Delete File: "
+                "<path>`; in an update, `@@` starts a chunk, lines starting with a space "
+                "are unchanged context that locates it, `-` lines are removed and `+` "
+                "lines added. Copy context lines exactly from the file."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string", "description": "The whole patch."},
+                },
+                "required": ["patch"],
+            },
+            handler=_apply_patch,
+        ),
+        Tool(
             name="report_outcome",
             description=(
                 "Tell Workbench how this task went. Call it once, near the end, "
@@ -1013,6 +1265,7 @@ WORKING_TOOLS = (
     "run_command",
     "write_file",
     "edit_file",
+    "apply_patch",
     "report_outcome",
     "ask_user",
 )
