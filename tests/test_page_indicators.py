@@ -54,6 +54,7 @@ def session(tmp_path, monkeypatch):
         db.commit()
         yield db
     app.dependency_overrides.clear()
+    engine.dispose()
 
 
 @pytest.fixture

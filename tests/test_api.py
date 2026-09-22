@@ -83,6 +83,7 @@ def client(tmp_path, monkeypatch):
 
     _engine = None
     app.dependency_overrides.clear()
+    engine.dispose()
 
 
 def test_projects_are_listed(client):
