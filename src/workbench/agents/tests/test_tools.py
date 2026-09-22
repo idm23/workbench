@@ -842,3 +842,133 @@ def test_a_line_that_does_not_point_at_the_quote_is_refused(context, worktree):
     assert result.is_error
     assert "not at line 40" in result.text
     assert "x = 1" not in path.read_text()
+
+
+# --- gpt-oss's own patch format ---------------------------------------------
+#
+# Run 83's first five edits were all patches like these, sent to edit_file and
+# refused for having no `new_text`. Replayed, four of the five now apply; the
+# fifth used `...` as an ellipsis inside its context and is rightly refused.
+
+MODULE = (
+    "class Backend:\n"
+    "    def name(self) -> str:\n"
+    "        ...\n"
+    "\n"
+    "    def run(self) -> None:\n"
+    "        ...\n"
+)
+
+
+@pytest.fixture
+def module(worktree) -> Path:
+    path = worktree / "src" / "protocol.py"
+    path.write_text(MODULE, encoding="utf-8")
+    return path
+
+
+def test_a_full_patch_updates_a_file_by_its_context(context, module):
+    result = call(
+        context,
+        "apply_patch",
+        patch=(
+            "*** Begin Patch\n*** Update File: src/protocol.py\n@@\n"
+            "     def name(self) -> str:\n         ...\n+\n+    def billing(self) -> str:\n"
+            "+        ...\n*** End Patch"
+        ),
+    )
+
+    assert not result.is_error, result.text
+    assert "    def billing(self) -> str:\n        ...\n\n    def run" in module.read_text()
+
+
+def test_edit_file_forwards_a_bare_patch_with_its_path(context, module):
+    """How gpt-oss actually sent them: to edit_file, as `patch`, file in `path`."""
+    result = call(
+        context,
+        "edit_file",
+        path="src/protocol.py",
+        patch="@@\n     def run(self) -> None:\n-        ...\n+        return None\n",
+    )
+
+    assert not result.is_error, result.text
+    assert "        return None\n" in module.read_text()
+
+
+def test_a_chunk_that_does_not_match_changes_nothing(context, module):
+    result = call(
+        context,
+        "apply_patch",
+        patch=(
+            "*** Update File: src/protocol.py\n@@\n"
+            "     def gone(self):\n-        ...\n+        pass\n"
+        ),
+    )
+
+    assert result.is_error
+    assert "does not match" in result.text
+    assert module.read_text() == MODULE
+
+
+def test_a_block_retyped_one_level_out_is_shifted_back_uniformly(context, module):
+    """Every context line four columns short: the model's structure, shifted."""
+    result = call(
+        context,
+        "apply_patch",
+        patch=(
+            "*** Update File: src/protocol.py\n@@\n"
+            " def run(self) -> None:\n-    ...\n+    return None\n"
+        ),
+    )
+
+    assert not result.is_error, result.text
+    assert "    def run(self) -> None:\n        return None\n" in module.read_text()
+
+
+def test_the_header_hint_picks_the_right_place(context, module):
+    result = call(
+        context,
+        "apply_patch",
+        patch=(
+            "*** Update File: src/protocol.py\n@@ def run(self) -> None:\n"
+            "-        ...\n+        pass\n"
+        ),
+    )
+
+    assert not result.is_error, result.text
+    text = module.read_text()
+    assert text.count("        ...") == 1 and "        pass" in text.split("def run")[1]
+
+
+def test_files_can_be_added_and_deleted(context, worktree, module):
+    result = call(
+        context,
+        "apply_patch",
+        patch=(
+            "*** Begin Patch\n*** Add File: src/new.py\n+x = 1\n"
+            "*** Delete File: src/protocol.py\n*** End Patch"
+        ),
+    )
+
+    assert not result.is_error, result.text
+    assert (worktree / "src" / "new.py").read_text() == "x = 1\n"
+    assert not module.exists()
+
+
+def test_a_patch_is_applied_whole_or_not_at_all(context, worktree, module):
+    """The second file would not compile, so the first is not written either."""
+    (worktree / "src" / "other.py").write_text("y = 2\n", encoding="utf-8")
+
+    result = call(
+        context,
+        "apply_patch",
+        patch=(
+            "*** Begin Patch\n*** Update File: src/protocol.py\n@@\n"
+            "     def run(self) -> None:\n-        ...\n+        return None\n"
+            "*** Update File: src/other.py\n@@\n-y = 2\n+y = (\n*** End Patch"
+        ),
+    )
+
+    assert result.is_error
+    assert "would no longer compile" in result.text
+    assert module.read_text() == MODULE
