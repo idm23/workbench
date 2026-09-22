@@ -632,22 +632,62 @@ def bills_subscription() -> bool:
     return billing_mode() != "api"
 
 
-def agent_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
+def agent_database_dir(worktree: Path) -> Path:
+    """Where `agent_database` keeps the scratch database for `worktree`."""
+    return data_dir() / "agent-databases" / worktree.name
+
+
+def agent_database(worktree: Path) -> Path:
+    """The database an agent working in `worktree` sees as `WORKBENCH_DB`.
+
+    Never this instance's own. The runner has to write events into the real
+    database, so the run unit points `WORKBENCH_DB` at it and grants the
+    directory, and every command the agent runs used to inherit both. An
+    `alembic upgrade head` typed in a worktree then applied that branch's
+    unreviewed migration to production (#87). The database is the one file on
+    the machine that GitHub cannot give back.
+
+    Overridden rather than removed. With the variable unset, anything imported
+    from this deployment's own virtualenv falls back to `repo_root()`, and that
+    is production's database again.
+
+    One per worktree rather than one per run, so a conversation continuing a
+    run finds whatever the run before it migrated. It sits outside the worktree
+    so it can never show up in `git status` or a commit, and `remove_worktree`
+    deletes it along with the worktree. The directory is created here, because
+    `sqlite3` refuses to create a file in a directory that does not exist yet.
+    """
+    directory = agent_database_dir(worktree)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / "workbench.db"
+
+
+def agent_environment(
+    base: Mapping[str, str] | None = None, *, worktree: Path | None = None
+) -> dict[str, str]:
     """The environment an agent process should run with.
 
-    A copy, and pure, so the decision above can be tested without a subprocess
-    or a mutated interpreter. The runner applies it to itself once at startup,
+    A copy, and pure apart from creating the scratch database's directory, so
+    the decision above can be tested without a subprocess or a mutated
+    interpreter. The runner applies it to itself once at startup,
     which is the single place where every backend inherits from.
 
     Note what is *not* removed: the agent still needs a credential, and under a
     subscription that is the OAuth token in the service user's home directory.
     This makes the account concrete rather than ambient — the home directory of
     the user the unit runs as is the thing that decides who pays.
+
+    Given the `worktree` an agent is working in, `WORKBENCH_DB` points at that
+    worktree's scratch database, not this instance's own. See `agent_database`.
+    The runner calls this without a worktree when it prunes its own
+    environment, because the runner itself still needs the real database.
     """
     env = dict(os.environ if base is None else base)
     if bills_subscription():
         for name in API_CREDENTIAL_VARS:
             env.pop(name, None)
+    if worktree is not None:
+        env["WORKBENCH_DB"] = str(agent_database(worktree))
     return env
 
 

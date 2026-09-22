@@ -830,6 +830,18 @@ question below rather than guessed at.
   does: `sudo -iu workbench <venv>/bin/python -m workbench.doctor --login`. Either way
   the credential is readable by model-authored shell commands running as that user —
   inherent, but worth stating.
+- **An agent never sees the real database.** The run unit points `WORKBENCH_DB` at this
+  instance's database and grants its directory, because the runner records events there
+  — and every command the agent ran used to inherit both, so an `alembic upgrade head`
+  typed in a worktree applied that branch's unreviewed migration to production. The
+  database is the one file GitHub cannot give back. `config.agent_environment(worktree=)`
+  now points the variable at a scratch database per worktree, for `run_command`, the
+  Claude CLI and the project's setup command alike, and `remove_worktree` deletes it.
+  Overridden rather than unset: unset, code imported from the deployment's own virtualenv
+  falls back to `repo_root()`, which is production again. What it does not stop is an
+  agent that goes looking for the file by path; `ReadWritePaths` cannot help, because the
+  runner in the same unit has to write there. That wants the runner split from the agent's
+  process, and it is still #87's remaining half.
 - **The credential is two paths, not one.** `~/.claude` is a directory; `~/.claude.json`
   is a separate file beside it. An allowlist naming only the first leaves the second
   read-only under `ProtectSystem=strict`, and the CLI writes both. That failure arrives

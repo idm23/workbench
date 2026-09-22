@@ -56,6 +56,7 @@ from workbench.agents.protocol import (
     SubtaskProposal,
 )
 from workbench.agents.tests.helpers import drain
+from workbench.config import agent_database
 from workbench.database.models import RunEventKind, RunPhase
 
 
@@ -411,12 +412,15 @@ def test_the_run_and_task_ids_reach_the_environment(monkeypatch):
 
     drain(ClaudeBackend().run(a_request(run_id=42, task_id=7)))
 
-    assert captured["options"].env == {
-        "WORKBENCH_RUN_ID": "42",
-        "WORKBENCH_TASK_ID": "7",
-        "WORKBENCH_PROJECT_ID": "0",
-        "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
-    }
+    assert (
+        captured["options"].env.items()
+        >= {
+            "WORKBENCH_RUN_ID": "42",
+            "WORKBENCH_TASK_ID": "7",
+            "WORKBENCH_PROJECT_ID": "0",
+            "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
+        }.items()
+    )
 
 
 def test_the_project_id_reaches_the_environment_too(monkeypatch):
@@ -1379,7 +1383,21 @@ def test_there_is_no_login_command_when_there_is_no_cli():
     assert status.login_command == ()
 
 
+def test_the_agent_is_handed_a_scratch_database(monkeypatch, tmp_path):
+    """The SDK lays `env` over the runner's own, which names the real one (#87)."""
+    production = tmp_path / "data" / "workbench.db"
+    monkeypatch.setenv("WORKBENCH_DB", str(production))
+    worktree = tmp_path / "data" / "worktrees" / "task-3-x"
+    request = backend_module.AgentRequest(worktree=worktree, phase=RunPhase.EXECUTE, prompt="x")
+
+    env = backend_module._env_for(request)
+
+    assert env["WORKBENCH_DB"] == str(agent_database(worktree))
+    assert env["WORKBENCH_DB"] != str(production)
+
+
 def test_a_named_login_points_the_cli_at_its_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
     monkeypatch.setattr("workbench.config.agent_home", lambda: tmp_path)
     (tmp_path / ".claude-logins" / "ian@example.com").mkdir(parents=True)
     request = backend_module.AgentRequest(
@@ -1394,7 +1412,8 @@ def test_a_named_login_points_the_cli_at_its_directory(monkeypatch, tmp_path):
     assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-logins" / "ian@example.com")
 
 
-def test_no_login_leaves_the_default_config_dir(tmp_path):
+def test_no_login_leaves_the_default_config_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
     request = backend_module.AgentRequest(worktree=tmp_path, phase=RunPhase.EXECUTE, prompt="x")
 
     assert "CLAUDE_CONFIG_DIR" not in backend_module._env_for(request)

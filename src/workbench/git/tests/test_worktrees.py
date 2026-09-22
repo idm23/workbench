@@ -10,6 +10,7 @@ import subprocess
 
 import pytest
 
+from workbench.config import agent_database, agent_database_dir
 from workbench.git.worktrees import (
     Discarded,
     GitFailed,
@@ -27,6 +28,8 @@ from workbench.git.worktrees import (
     fetch_checkout,
     has_commits,
     local_checkout,
+    remove_worktree,
+    run_setup_command,
     slugify,
     sync_worktree,
 )
@@ -95,6 +98,28 @@ def test_ensure_worktree_is_idempotent(repo):
     second = ensure_worktree(repo, task_id=1, title="Same task", base_branch="main")
 
     assert first == second
+
+
+def test_a_setup_command_gets_the_scratch_database(repo, tmp_path):
+    """It runs the task branch's code, so it must not migrate production (#87)."""
+    ready = ensure_worktree(repo, task_id=1, title="Setup", base_branch="main")
+    assert isinstance(ready, WorktreeReady)
+
+    result = run_setup_command(ready.path, 'echo "$WORKBENCH_DB"')
+
+    assert isinstance(result, GitOk)
+    assert result.stdout == str(agent_database(ready.path))
+    assert result.stdout != str(tmp_path / "data" / "workbench.db")
+
+
+def test_removing_a_worktree_removes_its_scratch_database(repo):
+    ready = ensure_worktree(repo, task_id=1, title="Doomed", base_branch="main")
+    assert isinstance(ready, WorktreeReady)
+    agent_database(ready.path).write_text("", encoding="utf-8")
+
+    remove_worktree(repo, ready.path)
+
+    assert not agent_database_dir(ready.path).exists()
 
 
 def test_has_commits_is_false_before_any_work(repo):

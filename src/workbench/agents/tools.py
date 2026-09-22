@@ -319,7 +319,7 @@ def _run_command(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=agent_environment(),
+            env=agent_environment(worktree=context.worktree),
             check=False,
         )
     except subprocess.TimeoutExpired:
