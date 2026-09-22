@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from workbench.app import app
-from workbench.database.db import get_db, get_engine, get_session_factory, make_engine
+from workbench.database.db import get_db, make_engine, reset_engine
 from workbench.database.models import (
     Base,
     Project,
@@ -69,8 +69,7 @@ def session(tmp_path, monkeypatch):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("WORKBENCH_DB", str(db_path))
     monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "2")
-    get_engine.cache_clear()
-    get_session_factory.cache_clear()
+    reset_engine()
     engine = make_engine(f"sqlite+pysqlite:///{db_path}")
     Base.metadata.create_all(engine)
 
@@ -95,8 +94,8 @@ def session(tmp_path, monkeypatch):
         db.commit()
         yield db
     app.dependency_overrides.clear()
-    get_engine.cache_clear()
-    get_session_factory.cache_clear()
+    reset_engine()
+    engine.dispose()
 
 
 @pytest.fixture(autouse=True)

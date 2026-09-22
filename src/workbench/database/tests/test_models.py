@@ -32,6 +32,7 @@ def session(tmp_path):
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
+    engine.dispose()
 
 
 def _project(user: User, url: str = "https://github.com/idm23/workbench") -> Project:

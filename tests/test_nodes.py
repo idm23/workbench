@@ -34,6 +34,7 @@ def db(tmp_path, monkeypatch):
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
+    engine.dispose()
 
 
 @pytest.fixture
@@ -54,6 +55,7 @@ def client(tmp_path, monkeypatch):
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    engine.dispose()
 
 
 def a_node(**overrides) -> Registration:

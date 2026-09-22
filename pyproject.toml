@@ -72,6 +72,14 @@ testpaths = ["src/workbench", "tests"]
 # sys.path, and CI uses the latter. A suite whose result depends on how it was
 # started is worse than one that is simply wrong.
 pythonpath = ["."]
+# An unclosed database or an unreaped child process fails the test that leaked
+# it. Unenforced, the leaks piled up to thousands of open files and surfaced as
+# a garbage-collection warning blamed on whichever unrelated test happened to be
+# running (#83).
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 target-version = "py314"

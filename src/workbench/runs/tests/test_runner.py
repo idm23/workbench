@@ -935,6 +935,7 @@ def test_watch_for_input_does_not_miss_a_row_committed_near_the_idle_deadline(
         return [body async for body in watcher]
 
     assert asyncio.run(scenario()) == ["from elsewhere"]
+    other_engine.dispose()
 
 
 class InputCapturingBackend:

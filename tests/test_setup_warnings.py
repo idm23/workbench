@@ -58,6 +58,7 @@ def client(tmp_path, monkeypatch):
         identifiers = (project.user_id, project.id)
     yield TestClient(app), identifiers
     app.dependency_overrides.clear()
+    engine.dispose()
 
 
 class FakeDoctor:
