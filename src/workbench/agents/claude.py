@@ -724,6 +724,17 @@ class ClaudeBackend:
     def name(self) -> str:
         return BACKEND_NAME
 
+    @property
+    def billing_notice(self) -> str:
+        """Return the notice that the claude backend is charged via a subscription.
+
+        This uses the same wording as the historic notice in the runner; the
+        billing mode is a run‑time configuration, so we just reflect its current
+        value.
+        """
+        from workbench.config import billing_mode
+        return f"billing {billing_mode()}"
+
     def credential_status(self) -> CredentialStatus:
         """Ask the CLI who it would authenticate as. See the protocol's note.
 

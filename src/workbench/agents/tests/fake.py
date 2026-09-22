@@ -33,6 +33,7 @@ class FakeBackend:
         events: Sequence[AgentEvent] = (),
         outcome: AgentOutcome | None = None,
         name: str = "fake",
+        billing_notice: str = "billing a fake subscription",
         credential: CredentialStatus | None = None,
     ) -> None:
         self._events = list(events)
@@ -48,6 +49,7 @@ class FakeBackend:
             account="fake@example.com",
             detail="Signed in as fake@example.com, billing a Claude subscription.",
         )
+        self._billing_notice = billing_notice
         self.requests: list[AgentRequest] = []
 
     @property
@@ -60,6 +62,10 @@ class FakeBackend:
     @property
     def name(self) -> str:
         return self._name
+    
+    @property
+    def billing_notice(self) -> str:
+        return self._billing_notice
 
     def credential_status(self) -> CredentialStatus:
         return self.credential
