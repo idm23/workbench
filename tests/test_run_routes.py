@@ -1923,3 +1923,35 @@ def test_the_page_offers_the_handoff_settings_and_the_review_buttons(client, ses
     assert f"/projects/{task.project_id}/handoff" in page
     assert f"/runs/{review.id}/send-back" in page
     assert f"/runs/{review.id}/publish" in page
+
+
+def test_a_retry_keeps_the_plan_it_was_executing(client, session, executor):
+    """A handed-off execute run's seed is the approved plan. A retry that
+    starts fresh — as one with a too-long old conversation now does — would
+    otherwise get the task and no plan."""
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    failed = create_run(
+        session, task, RunPhase.EXECUTE, backend="local", seed_message="The approved plan."
+    )
+    finish_run(session, failed, RunStatus.FAILED, error="4 tool calls failed")
+
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "execute"})
+
+    retry = session.query(Run).filter_by(task_id=task.id).order_by(Run.id.desc()).first()
+    assert retry.id != failed.id
+    assert (retry.backend, retry.seed_message) == ("local", "The approved plan.")
+
+
+def test_a_fresh_choice_carries_no_old_seed(client, session, executor):
+    from workbench.runs.store import create_run, finish_run
+
+    task = a_task(session)
+    old = create_run(session, task, RunPhase.EXECUTE, backend="local", seed_message="Old plan.")
+    finish_run(session, old, RunStatus.FAILED)
+
+    client.post(f"/tasks/{task.id}/runs", data={"phase": "execute", "agent": "claude"})
+
+    fresh = session.query(Run).filter_by(task_id=task.id).order_by(Run.id.desc()).first()
+    assert fresh.seed_message is None

@@ -910,6 +910,7 @@ def start_task_run(
 
     backend: str | None
     login: str | None
+    seed: str | None = None
     if agent:
         backend, _, login = agent.partition(":")
         if backend not in available_backends():
@@ -921,10 +922,16 @@ def start_task_run(
         # silently reverting to the project's default.
         last = task.runs[-1]
         backend, login = last.backend, last.login
+        if last.phase is chosen:
+            # And with what it was handed. For a run executing another agent's
+            # approved plan, the seed *is* the plan, and a retry that starts a
+            # fresh session — as one whose old conversation is too long now
+            # does — would otherwise be left with the task and no plan.
+            seed = last.seed_message
     else:
         backend, login = None, None
 
-    result = start_run(db, task, chosen, backend=backend, login=login)
+    result = start_run(db, task, chosen, backend=backend, login=login, seed_message=seed)
     if isinstance(result, Run):
         return _redirect(target, notice=f"Run {result.id} started ({chosen.value}).")
     return _redirect(target, error=result.message)
