@@ -141,6 +141,11 @@
   {% endif %}
 {% endif %}
 
+{#- Everything below that a run can change, up to the tree's end. The poll
+    script at the foot of the page swaps this one element for a fresh copy
+    rather than reloading the page, so "Add a task" and the Discuss dialog,
+    which are outside it, are never disturbed by it. -#}
+<div id="live">
 {% if archived_count %}
   <p class="sub">
     <a href="/projects/{{ project.id }}/archive">{{ archived_count }} task{{ 's' if archived_count != 1 }} archived</a>
@@ -257,7 +262,7 @@
     {% for node in nodes %}
       {% set busy = activity.get(node.task.id) %}
       {% set effective_status = node.effective_status %}
-      <li data-depth="{{ node.depth }}"
+      <li data-depth="{{ node.depth }}" data-task="{{ node.task.id }}"
           style="padding-left: {{ node.depth * 1.25 }}rem; --depth: {{ node.depth }}; view-transition-name: task-{{ node.task.id }};">
         <div class="task {{ 'done' if effective_status == 'done' }} {{ 'busy' if busy }} {{ 'parent' if not node.is_leaf }}">
           <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
@@ -322,10 +327,6 @@
 
             <div class="task-actions">
               {% set pr_url = pr_urls.get(node.task.id) %}
-              {% if pr_url %}
-                <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
-              {% endif %}
-              {{ talk_actions(node.task.id, pr_url) }}
               {% if busy and busy.is_question %}
                 {# The agent asked something and stopped. Answering resumes its
                    session, which is the same machinery Discuss uses — so this
@@ -420,35 +421,53 @@
                   <button class="slim" type="submit">{{ 'Execute' if node.task.entry_phase == 'execute' else 'Plan' }}</button>
                 </form>
               {% endif %}
-              {% if node.task.worktree_path and not (busy and busy.status in ('queued', 'running')) %}
-                {# A branch is set once, when its worktree is first created,
-                   and nothing brings it forward after that — safe to offer
-                   any time nothing is actively writing to the worktree,
-                   since the route itself refuses rather than reconciling. #}
-                <form method="post" action="/tasks/{{ node.task.id }}/sync">
-                  <button class="slim secondary" type="submit">Sync</button>
-                </form>
-                {# Next to the button it unblocks, because that is the only
-                   context it makes sense in: Sync refuses a dirty worktree,
-                   and nothing could resolve that refusal without a shell on
-                   the server. It stashes rather than destroys, so it stays a
-                   secondary and asks for no confirmation. #}
-                <form method="post" action="/tasks/{{ node.task.id }}/discard-changes">
-                  <button class="slim secondary" type="submit">Discard changes</button>
-                </form>
+              {% if pr_url %}
+                <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
               {% endif %}
-              {% if effective_status in ('done', 'cancelled') %}
-                {# Off the tree, not deleted — see the archive page linked
-                   above. Only offered once a task is actually finished, so
-                   this is never how open work quietly disappears. #}
-                <form method="post" action="/tasks/{{ node.task.id }}/archive">
-                  <button class="slim secondary" type="submit">Archive</button>
-                </form>
-              {% endif %}
-              <form method="post" action="/tasks/{{ node.task.id }}/delete">
-                <button class="slim danger" type="submit">Delete</button>
-              </form>
             </div>
+          </div>
+          {#- Everything that is not the next step lives behind "…": a row
+              could carry seven buttons, and when they are all in view they
+              all look equally important. A native popover, so it
+              light-dismisses, closes on Escape, and needs no script. It is
+              anchored to its button where the browser supports anchor
+              positioning, and centred on the screen where it does not.
+              Delete is in here too, which puts one deliberate press in
+              front of the only irreversible action on the page. -#}
+          <button type="button" class="slim ghost more" popovertarget="task-menu-{{ node.task.id }}"
+                  aria-label="More actions" title="More actions"
+                  style="anchor-name: --task-menu-{{ node.task.id }};">&hellip;</button>
+          <div popover id="task-menu-{{ node.task.id }}" class="menu"
+               style="position-anchor: --task-menu-{{ node.task.id }};">
+            {{ talk_actions(node.task.id, pr_url) }}
+            {% if node.task.worktree_path and not (busy and busy.status in ('queued', 'running')) %}
+              {# A branch is set once, when its worktree is first created,
+                 and nothing brings it forward after that — safe to offer
+                 any time nothing is actively writing to the worktree,
+                 since the route itself refuses rather than reconciling. #}
+              <form method="post" action="/tasks/{{ node.task.id }}/sync">
+                <button class="slim secondary" type="submit">Sync</button>
+              </form>
+              {# Next to the button it unblocks, because that is the only
+                 context it makes sense in: Sync refuses a dirty worktree,
+                 and nothing could resolve that refusal without a shell on
+                 the server. It stashes rather than destroys, so it stays a
+                 secondary and asks for no confirmation. #}
+              <form method="post" action="/tasks/{{ node.task.id }}/discard-changes">
+                <button class="slim secondary" type="submit">Discard changes</button>
+              </form>
+            {% endif %}
+            {% if effective_status in ('done', 'cancelled') %}
+              {# Off the tree, not deleted — see the archive page linked
+                 above. Only offered once a task is actually finished, so
+                 this is never how open work quietly disappears. #}
+              <form method="post" action="/tasks/{{ node.task.id }}/archive">
+                <button class="slim secondary" type="submit">Archive</button>
+              </form>
+            {% endif %}
+            <form method="post" action="/tasks/{{ node.task.id }}/delete">
+              <button class="slim danger" type="submit">Delete</button>
+            </form>
           </div>
         </div>
       </li>
@@ -461,6 +480,7 @@
      to compare against even though there is no #task-tree to hang it on. #}
   <span hidden id="activity-version" data-activity-version="{{ activity_version }}"></span>
 {% endif %}
+</div>
 
 <form method="post" action="/projects/{{ project.id }}/tasks">
   <label for="title">Add a task</label>
@@ -481,50 +501,49 @@
   <button type="submit">Add task</button>
 </form>
 
-{% if nodes %}
 <script>
   // Collapsing a parent hides its whole subtree — the contiguous run of
   // later <li>s at a greater depth, since `flatten()` renders the tree
   // depth-first. Expanding only reveals direct children: a grandchild
   // collapsed on its own stays collapsed rather than an ancestor's toggle
   // forcing it back open.
-  (function () {
-    var tree = document.getElementById("task-tree");
-    if (!tree) return;
+  //
+  // Listened for on the document rather than the tree, because the tree is
+  // replaced whenever the poll below finds it stale.
+  function setExpanded(toggle, expanded) {
+    var item = toggle.closest("li");
+    var depth = Number(item.dataset.depth);
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    toggle.setAttribute("aria-label", expanded ? "Collapse subtasks" : "Expand subtasks");
 
-    tree.addEventListener("click", function (event) {
-      var toggle = event.target.closest(".twist");
-      if (!toggle) return;
-      var item = toggle.closest("li");
-      var depth = Number(item.dataset.depth);
-      var wasExpanded = toggle.getAttribute("aria-expanded") !== "false";
-      toggle.setAttribute("aria-expanded", wasExpanded ? "false" : "true");
-      toggle.setAttribute("aria-label", wasExpanded ? "Expand subtasks" : "Collapse subtasks");
-
-      var skipBelow = null;
-      var sibling = item.nextElementSibling;
-      while (sibling && Number(sibling.dataset.depth) > depth) {
-        var siblingDepth = Number(sibling.dataset.depth);
-        if (wasExpanded) {
-          sibling.hidden = true;
-        } else if (skipBelow !== null && siblingDepth > skipBelow) {
-          // Left as-is: still under a nested toggle that is its own
-          // "collapsed", which this ancestor's expansion does not override.
-        } else {
-          skipBelow = null;
-          sibling.hidden = false;
-          var innerToggle = sibling.querySelector(".twist");
-          if (innerToggle && innerToggle.getAttribute("aria-expanded") === "false") {
-            skipBelow = siblingDepth;
-          }
+    var skipBelow = null;
+    var sibling = item.nextElementSibling;
+    while (sibling && Number(sibling.dataset.depth) > depth) {
+      var siblingDepth = Number(sibling.dataset.depth);
+      if (!expanded) {
+        sibling.hidden = true;
+      } else if (skipBelow !== null && siblingDepth > skipBelow) {
+        // Left as-is: still under a nested toggle that is its own
+        // "collapsed", which this ancestor's expansion does not override.
+      } else {
+        skipBelow = null;
+        sibling.hidden = false;
+        var innerToggle = sibling.querySelector(".twist");
+        if (innerToggle && innerToggle.getAttribute("aria-expanded") === "false") {
+          skipBelow = siblingDepth;
         }
-        sibling = sibling.nextElementSibling;
       }
-    });
-  })();
+      sibling = sibling.nextElementSibling;
+    }
+  }
+
+  document.addEventListener("click", function (event) {
+    var toggle = event.target.closest("#task-tree .twist");
+    if (toggle) setExpanded(toggle, toggle.getAttribute("aria-expanded") === "false");
+  });
 </script>
-{% endif %}
-{% if discussable %}
+{# Rendered whether or not anything is discussable yet: a swapped-in tree can
+   bring the first Discuss button with it. #}
   {# One dialog for the whole page, pointed at whichever run opened it. The
      run page has the same dialog with a fixed action, because there is only
      ever one run there; here the action is set on the way in. #}
@@ -543,49 +562,84 @@
     (function () {
       var dialog = document.getElementById("discuss-dialog");
       var form = document.getElementById("discuss-form");
-      document.querySelectorAll("[data-open-discuss]").forEach(function (button) {
-        button.addEventListener("click", function () {
-          form.action = "/runs/" + button.dataset.run + "/continue";
-          document.getElementById("discuss-message").value = "";
-          dialog.showModal();
-        });
+      // Delegated, for the same reason as the collapse toggles above.
+      document.addEventListener("click", function (event) {
+        var button = event.target.closest("[data-open-discuss]");
+        if (!button) return;
+        var menu = button.closest("[popover]");
+        if (menu) menu.hidePopover();
+        form.action = "/runs/" + button.dataset.run + "/continue";
+        document.getElementById("discuss-message").value = "";
+        dialog.showModal();
       });
       document.getElementById("discuss-cancel").addEventListener("click", function () {
         dialog.close();
       });
     })();
   </script>
-{% endif %}
 
 <script>
   // The task tree is rendered once per request from a snapshot — nothing
-  // pushes an update to an open tab. This is the project-scoped analogue of
-  // what `run_detail.html` does with SSE for a single run: poll a cheap
-  // fingerprint and reload the whole page when it moves, because teaching
-  // this page to patch itself in place is a lot more code than a reload.
+  // pushes an update to an open tab. So poll a cheap fingerprint, and when it
+  // moves, fetch this page again and swap in its `#live` region.
+  //
+  // The whole page rather than an endpoint for the tree alone, because the
+  // tree is not the only thing that goes stale: "Ready for review" and "Ready
+  // to execute" move with it. One route rendering one template cannot drift
+  // from itself, and a render is ~50ms.
   (function () {
     var marker = document.getElementById("task-tree") || document.getElementById("activity-version");
     if (!marker) return;
-    var startVersion = marker.dataset.activityVersion;
+    var version = marker.dataset.activityVersion;
 
-    function isDiscussing() {
-      // An open dialog counts as mid-type even before anything is typed into
-      // it: a reload closes it, and someone who has just opened it is reading
-      // the plan they are about to argue with.
-      var dialog = document.getElementById("discuss-dialog");
-      return !!(dialog && dialog.open);
+    function isBusy(live) {
+      // A swap would discard any of these out from under someone: an open
+      // "…" menu, a form already submitting, or a picker changed and not yet
+      // sent. The next tick will do just as well.
+      if (live.querySelector("[popover]:popover-open, form[data-busy]")) return true;
+      return Array.prototype.some.call(live.querySelectorAll("select"), function (select) {
+        return Array.prototype.some.call(select.options, function (option) {
+          return option.selected !== option.defaultSelected;
+        });
+      });
     }
 
-    function isMidType(el) {
-      // "Add a task"'s title/body are the one thing on this page a person is
-      // likely to be typing into when a poll tick lands — never discard that
-      // out from under them for a reload that can just as well happen next
-      // tick instead.
-      if (!el) return false;
-      var tag = el.tagName;
-      if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
-      if (tag === "INPUT" && el.type !== "text") return false;
-      return el.value.length > 0;
+    function swap(fresh) {
+      var live = document.getElementById("live");
+      var collapsed = Array.prototype.map.call(
+        live.querySelectorAll('.twist[aria-expanded="false"]'),
+        function (toggle) { return toggle.closest("li").dataset.task; }
+      );
+      live.replaceWith(fresh);
+      // Keep what was folded folded, outermost first, so a nested fold
+      // is applied inside an ancestor's rather than undone by it.
+      collapsed.forEach(function (id) {
+        var toggle = document.querySelector('#task-tree li[data-task="' + id + '"] .twist');
+        if (toggle) setExpanded(toggle, false);
+      });
+    }
+
+    function refresh(newVersion) {
+      return fetch(location.pathname)
+        .then(function (response) { return response.text(); })
+        .then(function (html) {
+          var page = new DOMParser().parseFromString(html, "text/html");
+          var fresh = page.getElementById("live");
+          var live = document.getElementById("live");
+          if (!fresh || !live || isBusy(live)) return; // next tick
+          var limits = page.querySelector(".limits");
+          var apply = function () {
+            swap(fresh);
+            var current = document.querySelector(".limits");
+            if (limits && current) current.replaceWith(limits);
+          };
+          // Rows carry their own view-transition-name, so a same-document
+          // transition moves each one rather than flashing the list.
+          var calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          if (document.startViewTransition && !calm) document.startViewTransition(apply);
+          else apply();
+          version = newVersion;
+        });
     }
 
     window.setInterval(function () {
@@ -596,14 +650,7 @@
       fetch("/projects/{{ project.id }}/activity-version")
         .then(function (response) { return response.json(); })
         .then(function (data) {
-          if (data.version === startVersion) return;
-          if (isMidType(document.activeElement) || isDiscussing()) return; // next tick
-          // Same key base.html's own scroll-restore script reads back on
-          // load — a poll-triggered reload never fires the `submit` event
-          // that script stashes position on, so without this the tree would
-          // jump to the top on every auto-refresh.
-          sessionStorage.setItem("scrollY:" + location.pathname, String(window.scrollY));
-          window.location.reload();
+          if (data.version !== version) return refresh(data.version);
         })
         .catch(function () { /* offline for a tick; try again next interval */ });
     }, 5000);
