@@ -201,6 +201,44 @@ def test_done_count_uses_effective_status_not_raw_status():
     assert roots[0].progress == "1/1"
 
 
+@pytest.mark.parametrize("status", [TaskStatus.DONE, TaskStatus.CANCELLED])
+def test_a_done_or_cancelled_leaf_is_finished(status):
+    task = make(1)
+    task.status = status
+
+    assert build_tree([task])[0].is_finished
+
+
+@pytest.mark.parametrize("status", [TaskStatus.OPEN, TaskStatus.ACTIVE, TaskStatus.BLOCKED])
+def test_an_unfinished_leaf_is_not(status):
+    task = make(1)
+    task.status = status
+
+    assert not build_tree([task])[0].is_finished
+
+
+def test_a_parent_is_finished_once_everything_under_it_is():
+    tasks = [make(1, title="parent"), make(2, parent=1), make(3, parent=2)]
+    tasks[0].status = TaskStatus.OPEN
+    tasks[1].status = TaskStatus.OPEN
+    tasks[2].status = TaskStatus.DONE
+
+    assert all(node.is_finished for node in flatten(build_tree(tasks)))
+
+
+def test_a_parent_marked_done_over_an_open_child_is_not_finished():
+    """Hiding it would leave the open child indented under nothing."""
+    tasks = [make(1, title="parent"), make(2, parent=1)]
+    tasks[0].status = TaskStatus.DONE
+    tasks[1].status = TaskStatus.OPEN
+
+    parent, child = flatten(build_tree(tasks))
+
+    assert parent.effective_status is TaskStatus.DONE
+    assert not parent.is_finished
+    assert not child.is_finished
+
+
 def busy(run_id: int = 1) -> TaskActivity:
     """A minimal in-flight run, for tasks that should be excluded as busy."""
     return TaskActivity(run_id=run_id, phase=RunPhase.CONVERSATION, status=RunStatus.RUNNING)

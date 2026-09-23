@@ -439,3 +439,23 @@ def test_a_question_does_not_offer_approve(client, session):
 
     assert ">Approve" not in page
     assert ">Answer<" in page
+
+
+# --- Finished tasks -----------------------------------------------------------
+
+
+def test_finished_tasks_are_marked_and_counted(client, session):
+    """Hidden by CSS until asked for, so the page carries them and says how many."""
+    from workbench.database.models import TaskStatus
+
+    session.query(Task).filter_by(title="Something else").one().status = TaskStatus.DONE
+    session.commit()
+
+    page = _squashed(project_page(client, session))
+
+    assert page.count('class="finished"') == 1
+    assert "Show 1 finished" in page
+
+
+def test_nothing_finished_offers_no_toggle(client, session):
+    assert "data-toggle-finished>" not in project_page(client, session)
