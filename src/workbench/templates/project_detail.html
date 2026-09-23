@@ -258,7 +258,7 @@
       {% set busy = activity.get(node.task.id) %}
       {% set effective_status = node.effective_status %}
       <li data-depth="{{ node.depth }}"
-          style="padding-left: {{ node.depth * 1.25 }}rem; --depth: {{ node.depth }};">
+          style="padding-left: {{ node.depth * 1.25 }}rem; --depth: {{ node.depth }}; view-transition-name: task-{{ node.task.id }};">
         <div class="task {{ 'done' if effective_status == 'done' }} {{ 'busy' if busy }} {{ 'parent' if not node.is_leaf }}">
           <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">
             <input type="hidden" name="new_status"
