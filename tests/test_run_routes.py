@@ -1559,17 +1559,15 @@ def test_a_second_click_resumes_the_first_conversation_rather_than_duplicating(
     assert session.query(Run).count() == 1
 
 
-def test_a_conversation_and_a_task_run_share_the_concurrency_cap(
-    client, session, executor, monkeypatch
-):
+def test_a_full_task_cap_still_lets_the_project_talk(client, session, executor, monkeypatch):
+    """The project's chat has a slot of its own."""
     monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "1")
     project = a_project(session)
     client.post(f"/tasks/{a_task(session).id}/runs", data={"phase": "plan"})
 
     response = client.post(f"/projects/{project.id}/conversation")
 
-    assert "error=" in response.headers["location"]
-    assert "limit+is+1" in response.headers["location"]
+    assert "error=" not in response.headers["location"]
 
 
 def test_talking_to_a_missing_project_is_a_404(client, session):

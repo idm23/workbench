@@ -260,16 +260,33 @@ def test_a_conversation_takes_the_projects_backend(db, task, executor):
     assert run.backend == "something-else"
 
 
-def test_a_conversation_and_a_task_run_share_the_same_cap(db, task, executor, monkeypatch):
-    """A standing conversation bills the same subscription window a task run
-    does, so it gets no exemption from what protects that window."""
+def test_a_project_conversation_holds_no_task_slot(db, task, executor, monkeypatch):
+    """The chat beside the tree has a slot of its own. Talking must not stop
+    a task starting."""
     monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "1")
     conversation = start_conversation(db, task.project)
     assert isinstance(conversation, Run)
 
     result = start_run(db, task, RunPhase.PLAN)
 
-    assert isinstance(result, TooManyRuns)
+    assert isinstance(result, Run)
+
+
+def test_a_full_cap_does_not_keep_the_chat_waiting(db, task, executor, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "1")
+    assert isinstance(start_run(db, task, RunPhase.PLAN), Run)
+
+    assert isinstance(start_conversation(db, task.project), Run)
+
+
+def test_the_cap_defaults_to_five(db, task, executor, monkeypatch):
+    monkeypatch.delenv("WORKBENCH_MAX_CONCURRENT_RUNS", raising=False)
+    others = [_a_task(db, task, f"other {n}") for n in range(6)]
+
+    results = [start_run(db, t, RunPhase.PLAN) for t in others]
+
+    assert all(isinstance(r, Run) for r in results[:5])
+    assert isinstance(results[5], TooManyRuns)
 
 
 # --- The concurrency cap ---------------------------------------------------

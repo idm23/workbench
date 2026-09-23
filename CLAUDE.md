@@ -1226,9 +1226,12 @@ than no list at all.
   on first load — and gets the rest exactly once. A phone that sleeps through half a run
   loses nothing, and reading a run back a week later is the same query with a different
   number in it.
-- **Nothing caps concurrency.** `max_concurrent_runs` defaults to 2, and `start` reaps
+- **Nothing caps concurrency.** `max_concurrent_runs` defaults to 5, and `start` reaps
   before checking it — otherwise a run killed mid-flight holds a slot forever and the cap
-  becomes a way to lock yourself out.
+  becomes a way to lock yourself out. A project's own conversation is not counted: it is
+  the chat beside the tree, one per project, and it must neither queue behind task runs
+  nor stop them starting. A task's Discuss conversation is counted, because it is work on
+  that task.
 - **Store token and cost per run.** `runs.total_cost_usd` and `runs.num_turns` exist. A
   backend that reports neither leaves them null rather than zero.
 - **`open/active/done` has nowhere for a failed or cancelled run.** Task statuses are
