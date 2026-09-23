@@ -405,7 +405,7 @@
   .task-actions:not(:has(*)) { display: none; }
   /* The project page: the tree and its chat. Tabs on a phone, two columns
      once both fit. */
-  .wrap.wide { max-width: 78rem; }
+  .wrap.wide { max-width: 80rem; }
   .tabs {
     display: flex;
     gap: var(--space-1);
@@ -436,11 +436,13 @@
   /* Side by side, the chat is pinned to the full height of the window rather
      than laid out below the page's header: in the flow, its composer started
      below the fold whenever there was a warning or a rate-limit panel above
-     it. The page's own content takes the width left of it. */
+     it. It sits on the left, and the page's own content takes the width to
+     its right. */
   @media (min-width: 64rem) {
     .wrap.wide {
       --chat-width: min(28rem, 40vw);
-      padding-right: calc(var(--chat-width) + var(--space-6));
+      /* The chat's own edge gutter, the chat, then the gap between columns. */
+      padding-left: calc(1.25rem + var(--chat-width) + var(--space-7));
     }
     .tabs { display: none; }
     .columns[data-show] > .col-chat,
@@ -449,10 +451,10 @@
       position: fixed;
       top: 0;
       bottom: 0;
-      right: max(0px, calc((100vw - 78rem) / 2));
+      left: max(0px, calc((100vw - 80rem) / 2));
       width: calc(var(--chat-width) + 1.25rem);
-      padding: max(var(--space-4), env(safe-area-inset-top)) 1.25rem
-               max(var(--space-4), env(safe-area-inset-bottom)) 0;
+      padding: max(var(--space-4), env(safe-area-inset-top)) 0
+               max(var(--space-4), env(safe-area-inset-bottom)) 1.25rem;
     }
     .col-chat .chat { height: 100%; }
   }
