@@ -29,6 +29,7 @@ from workbench.agents.tools import (
     tool_names_for,
     tools_for,
 )
+from workbench.config import agent_database
 from workbench.database.models import RunPhase
 
 
@@ -44,7 +45,9 @@ def worktree(tmp_path) -> Path:
 
 
 @pytest.fixture
-def context(worktree) -> ToolContext:
+def context(worktree, tmp_path, monkeypatch) -> ToolContext:
+    # Where the scratch database lands, rather than this checkout's own data/.
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
     return ToolContext(worktree=worktree, api_base="http://127.0.0.1:8787", run_id=7, task_id=3)
 
 
@@ -133,6 +136,14 @@ def test_a_command_reports_its_exit_code(context):
 
     assert "[exit 0]" in result.text
     assert "hello" in result.text
+
+
+def test_a_command_cannot_reach_this_instances_database(context, tmp_path):
+    """`alembic upgrade head` in a worktree must not migrate production (#87)."""
+    result = call(context, "run_command", command='echo "db=$WORKBENCH_DB"')
+
+    assert f"db={tmp_path / 'data' / 'workbench.db'}" not in result.text
+    assert f"db={agent_database(context.worktree)}" in result.text
 
 
 def test_a_failing_command_is_information_not_a_tool_error(context):
