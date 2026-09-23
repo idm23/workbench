@@ -84,6 +84,19 @@ class TaskNode:
             return TaskStatus.DONE
         return TaskStatus.ACTIVE
 
+    @property
+    def is_finished(self) -> bool:
+        """Done or cancelled, and so is everything under it.
+
+        What the tree hides by default. Asked of the whole subtree rather than
+        of the task alone, because a parent can be marked done by hand while a
+        child is still open (see `effective_status`), and hiding that parent
+        would leave the open child indented under nothing.
+        """
+        return self.effective_status in (TaskStatus.DONE, TaskStatus.CANCELLED) and all(
+            child.is_finished for child in self.children
+        )
+
 
 def build_tree(tasks: list[Task]) -> list[TaskNode]:
     """Turn a flat list into roots with nested children.

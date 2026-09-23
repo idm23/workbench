@@ -5,6 +5,22 @@
 {% block back %}<a class="back" href="/users/{{ project.user_id }}">&lsaquo; {{ project.user.name }}</a>{% endblock %}
 
 {% block content %}
+<script>
+  // Before the tree is parsed, so a device that asked to see finished tasks
+  // never renders without them first.
+  try {
+    if (localStorage.getItem("finished-tasks") === "shown") {
+      document.documentElement.dataset.finished = "shown";
+    }
+  } catch (e) { /* no storage: the default, hidden */ }
+  document.addEventListener("click", function (event) {
+    if (!event.target.closest("[data-toggle-finished]")) return;
+    var root = document.documentElement;
+    var shown = root.dataset.finished !== "shown";
+    if (shown) root.dataset.finished = "shown"; else delete root.dataset.finished;
+    try { localStorage.setItem("finished-tasks", shown ? "shown" : "hidden"); } catch (e) {}
+  });
+</script>
 {% macro talk_actions(task_id, pr_url=None) %}
   {#- The Discuss / Split / Check CI trio, wherever a task appears on this
       page. One macro rather than three copies: the tree lists the same task in
@@ -258,11 +274,25 @@
 {% endif %}
 
 {% if nodes %}
+  {#- Finished work is hidden unless asked for: a project's tree is mostly
+      done tasks within a few weeks, and reading past them to find what is
+      left is the cost this saves. Hidden by CSS rather than left out of the
+      page, so showing them is instant and the choice (kept per device, on the
+      root element) survives the poll swapping this region. -#}
+  {% set finished_count = nodes | selectattr("is_finished") | list | length %}
+  {% if finished_count %}
+    <div class="tree-filter">
+      <button type="button" class="slim ghost" data-toggle-finished>
+        <span class="when-finished-hidden">Show {{ finished_count }} finished</span>
+        <span class="when-finished-shown">Hide finished</span>
+      </button>
+    </div>
+  {% endif %}
   <ul class="tree" id="task-tree" data-activity-version="{{ activity_version }}">
     {% for node in nodes %}
       {% set busy = activity.get(node.task.id) %}
       {% set effective_status = node.effective_status %}
-      <li data-depth="{{ node.depth }}" data-task="{{ node.task.id }}"
+      <li data-depth="{{ node.depth }}" data-task="{{ node.task.id }}"{% if node.is_finished %} class="finished"{% endif %}
           style="padding-left: {{ node.depth * 1.25 }}rem; --depth: {{ node.depth }}; view-transition-name: task-{{ node.task.id }};">
         <div class="task {{ 'done' if effective_status == 'done' }} {{ 'busy' if busy }} {{ 'parent' if not node.is_leaf }}">
           <form method="post" action="/tasks/{{ node.task.id }}/status" style="border: none; padding: 0; margin: 0;">

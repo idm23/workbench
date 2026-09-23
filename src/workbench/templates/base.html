@@ -403,6 +403,11 @@
   .task-actions select { max-width: 100%; }
   /* A row whose only actions are in its menu gets no empty action strip. */
   .task-actions:not(:has(*)) { display: none; }
+  /* Finished tasks are hidden until asked for — see project_detail.html. */
+  :root:not([data-finished="shown"]) #task-tree li.finished { display: none; }
+  :root:not([data-finished="shown"]) .when-finished-shown,
+  :root[data-finished="shown"] .when-finished-hidden { display: none; }
+  .tree-filter { display: flex; justify-content: flex-end; margin-bottom: var(--space-2); }
   /* The row's "…" sits in the card's top-right corner, level with the title,
      so it costs no height of its own. */
   .task > .more { flex: 0 0 auto; min-height: 2rem; margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2)) 0 0; }
