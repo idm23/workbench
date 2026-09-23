@@ -722,11 +722,8 @@ class LocalBackend:
 
     @property
     def billing_notice(self) -> str:
-        """Notice that the local backend consumes a GPU and wall clock but does not bill.
-
-        The text matches the wording used in the historic notice for local runs.
-        """
-        return "spends a GPU and wall clock, bills nothing"
+        """A run spends a GPU and a wall clock, which is the point of having it."""
+        return "spending a GPU and a wall clock, billing nothing"
 
     def credential_status(self) -> CredentialStatus:
         """Whether a run started now would reach a model, and which one.

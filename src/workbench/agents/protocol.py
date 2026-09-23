@@ -333,17 +333,12 @@ class Backend(Protocol):
 
     @property
     def billing_notice(self) -> str:
-        """Human-readable notice describing what the backend actually spends.
+        """What a run on this backend spends, as a clause for its first notice.
 
-        The ``runner`` used to answer a machine-wide question via
-        :func:`config.billing_mode`. That question is not specific to an
-        individual backend and thus gave wrong information for backends that
-        bill nothing (e.g., the local GPU/clock backend).  This property
-        allows each backend implementation to report what its billing model
-        is, and the runner will simply forward it.
-
-        The format of the string is up to the implementation; the runner will
-        insert it directly into the first notice for a run, after the backend
-        name.
+        A backend's question rather than the machine's: `config.billing_mode`
+        says which way a Claude run bills, and quoting it for every backend had
+        a local run announcing a subscription it never touches. The runner
+        writes it as "Backend <name>, <billing_notice>." so it reads as a
+        lowercase clause with no full stop.
         """
         ...

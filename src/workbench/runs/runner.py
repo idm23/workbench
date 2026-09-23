@@ -51,7 +51,6 @@ from workbench.agents.protocol import (
 from workbench.agents.registry import UnknownBackend, get_backend
 from workbench.config import (
     agent_environment,
-    billing_mode,
     github_token,
     input_idle_seconds,
     local_model_override,
@@ -1103,21 +1102,11 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
 def execute(db: Session, run: Run) -> Run:
     """One run, start to finish, always ending in a recorded outcome."""
     mark_running(db, run)
-    # Emit a notice describing what the selected backend actually spends. The
-    # runner used to quote the machine-wide billing mode, which was wrong for backends
-    # that bill nothing.  Backends now expose their own notice via the
-    # ``billing_notice`` property.
+    # An unknown backend spends nothing and says so in a moment, when
+    # `prepare` refuses it by name.
     backend = get_backend(run.backend)
-    if isinstance(backend, Backend):
-        notice_text = f"Backend {backend.name}, {backend.billing_notice}."
-    else:  # Unknown backend - fall back to the old generic notice
-        notice_text = f"Backend {run.backend}, billing {billing_mode()}."
-    append_event(
-        db,
-        run.id,
-        RunEventKind.NOTICE,
-        {"text": notice_text},
-    )
+    spends = "" if isinstance(backend, UnknownBackend) else f", {backend.billing_notice}"
+    append_event(db, run.id, RunEventKind.NOTICE, {"text": f"Backend {run.backend}{spends}."})
 
     prepared = prepare(db, run)
     if isinstance(prepared, NotPrepared):

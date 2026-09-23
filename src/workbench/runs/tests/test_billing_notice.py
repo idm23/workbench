@@ -1,45 +1,57 @@
-"""Test that the runner reports the correct billing notice for a local run.
+"""The first line of every run says what it spends, and that is the backend's answer.
 
-The original issue was that the runner always reported a subscription based
-notice for every backend, even the local GPU backend that does not bill
-anything.  The :func:`workbench.agents.local.LocalBackend.billing_notice`
-property now returns a string describing the actual consumption, and the
-runner should forward that string.
-
-This test exercises the end-to-end code path that creates a run, executes the
-runner, records a ``RunEventKind.NOTICE`` event, and then inspects the
-payload to ensure that the notice does not mention a subscription.  It also
-confirms that the text contains the expected phrase ``spends a GPU`` and that
-the notice ends with a period.
+It used to quote `config.billing_mode` for every backend, so a run on a GPU in
+the next room announced that it was billing a subscription.
 """
 
-import pytest
-
+from workbench.agents.claude import ClaudeBackend
 from workbench.agents.local import LocalBackend
-from workbench.database.models import RunEvent, RunEventKind, RunPhase
+from workbench.agents.registry import UnknownBackend
+from workbench.agents.tests.fake import FakeBackend
+from workbench.database.models import RunEvent, RunEventKind
+from workbench.runs import runner as runner_module
 from workbench.runs.runner import execute
-from workbench.runs.store import create_run
 
 
-@pytest.fixture
-def run_local(db, task):
-    """Create a run that uses the local backend."""
-    return create_run(db, task, RunPhase.EXECUTE, backend="local")
-
-
-def test_local_run_billing_notice(db, run_local, monkeypatch):
-    """The runner should emit a notice that does not mention a subscription."""
-    # Ensure the registry uses the local backend implementation.
-    monkeypatch.setattr(
-        "workbench.agents.registry.get_backend",
-        lambda name: LocalBackend(),
+def first_notice(db, run) -> str:
+    event = (
+        db.query(RunEvent)
+        .filter_by(run_id=run.id, kind=RunEventKind.NOTICE)
+        .order_by(RunEvent.seq)
+        .first()
     )
-    execute(db, run_local)
+    assert event is not None
+    return event.payload["text"]
 
-    events = db.query(RunEvent).filter_by(run_id=run_local.id).order_by(RunEvent.seq).all()
-    notice_texts = [e.payload["text"] for e in events if e.kind is RunEventKind.NOTICE]
-    assert notice_texts, "No notice event emitted"
-    notice = notice_texts[0]
-    assert "subscription" not in notice, "Local run should not mention a subscription"
-    assert "spends a GPU" in notice, "Billing notice should describe GPU usage"
-    assert notice.endswith("."), "Notice should end with a period"
+
+def test_the_runner_quotes_the_backend(db, run, checkout, monkeypatch):
+    fake = FakeBackend(billing_notice="spending a GPU and a wall clock, billing nothing")
+    monkeypatch.setattr(runner_module, "get_backend", lambda _name: fake)
+
+    execute(db, run)
+
+    assert first_notice(db, run) == (
+        f"Backend {run.backend}, spending a GPU and a wall clock, billing nothing."
+    )
+
+
+def test_an_unknown_backend_claims_to_spend_nothing(db, run, checkout, monkeypatch):
+    """`prepare` is what explains an unknown backend; the notice only names it."""
+    unknown = UnknownBackend("nonesuch", ("claude", "local"))
+    monkeypatch.setattr(runner_module, "get_backend", lambda _name: unknown)
+
+    execute(db, run)
+
+    assert first_notice(db, run) == f"Backend {run.backend}."
+
+
+def test_a_local_run_mentions_no_subscription():
+    assert "subscription" not in LocalBackend().billing_notice
+
+
+def test_a_claude_run_follows_the_billing_mode(monkeypatch):
+    monkeypatch.delenv("WORKBENCH_BILLING", raising=False)
+    assert ClaudeBackend().billing_notice == "billing a Claude subscription"
+
+    monkeypatch.setenv("WORKBENCH_BILLING", "api")
+    assert ClaudeBackend().billing_notice == "billing the metered API"

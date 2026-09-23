@@ -33,7 +33,7 @@ class FakeBackend:
         events: Sequence[AgentEvent] = (),
         outcome: AgentOutcome | None = None,
         name: str = "fake",
-        billing_notice: str = "billing a fake subscription",
+        billing_notice: str = "billing nothing",
         credential: CredentialStatus | None = None,
     ) -> None:
         self._events = list(events)
