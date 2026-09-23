@@ -386,11 +386,9 @@ def test_a_run_that_left_no_session_offers_nothing_to_talk_to(client, session):
 
     page = _squashed(project_page(client, session))
 
-    # The attribute pair, not the bare word: the poll-guard script names the
-    # dialog's id too, so `"discuss-dialog" not in page` would be testing that
-    # script rather than the buttons.
+    # The attribute pair, not the bare word: the page's scripts name
+    # `data-open-discuss` too.
     assert "data-open-discuss data-run=" not in page
-    assert '<dialog id="discuss-dialog">' not in page
 
 
 def test_the_dialog_is_rendered_once_for_the_whole_page(client, session):
@@ -405,8 +403,14 @@ def test_the_dialog_is_rendered_once_for_the_whole_page(client, session):
     assert page.count("data-open-discuss data-run=") == 2
 
 
-def test_a_page_with_nothing_to_discuss_has_no_dialog(client, session):
-    assert '<dialog id="discuss-dialog">' not in _squashed(project_page(client, session))
+def test_the_dialog_is_there_before_anything_is_discussable(client, session):
+    """The poll swaps a fresh tree in without reloading, and that tree can
+    bring the first Discuss button with it. The dialog it opens has to be on
+    the page already."""
+    page = _squashed(project_page(client, session))
+
+    assert "data-open-discuss data-run=" not in page
+    assert '<dialog id="discuss-dialog">' in page
 
 
 def test_a_question_is_shown_on_the_tree_with_an_answer_button(client, session):
