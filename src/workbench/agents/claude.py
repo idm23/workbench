@@ -745,6 +745,13 @@ class ClaudeBackend:
     def name(self) -> str:
         return BACKEND_NAME
 
+    @property
+    def billing_notice(self) -> str:
+        """Which account pays is decided by `config.billing_mode`, not here."""
+        if bills_subscription():
+            return "billing a Claude subscription"
+        return "billing the metered API"
+
     def credential_status(self) -> CredentialStatus:
         """Ask the CLI who it would authenticate as. See the protocol's note.
 
