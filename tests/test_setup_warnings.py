@@ -11,6 +11,7 @@ then they miss the real one.
 
 import json
 import subprocess
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,10 +25,11 @@ from workbench.database.models import Base, Project, Task, User
 
 @pytest.fixture(autouse=True)
 def no_cached_answer():
-    """The TTL cache is process-wide, so tests would otherwise see each other."""
-    doctor._warnings_at.cache_clear()
+    """The cache is process-wide, so tests would otherwise see each other."""
+    doctor._page_warnings_cache.cache_clear()
     yield
-    doctor._warnings_at.cache_clear()
+    doctor._page_warnings_cache().settle()
+    doctor._page_warnings_cache.cache_clear()
 
 
 @pytest.fixture
@@ -229,14 +231,47 @@ def test_two_page_loads_inside_the_window_ask_once(monkeypatch, client):
 
 
 def test_the_answer_expires(monkeypatch):
-    """Cached for the life of a bucket, not the life of the process — the whole
-    point is that somebody goes and fixes it while this keeps running."""
+    """Cached for a minute, not the life of the process: the whole point is
+    that somebody goes and fixes it while this keeps running."""
     fake = FakeDoctor([a_check("agent-credential", "fail")])
     monkeypatch.setattr(doctor.subprocess, "run", fake)
-    clock = iter([0.0, doctor.PAGE_STATUS_TTL_SECONDS + 1.0])
-    monkeypatch.setattr(doctor.time, "monotonic", lambda: next(clock))
+    now = [0.0]
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: now[0])
 
     doctor.page_warnings()
+    now[0] = doctor.PAGE_STATUS_TTL_SECONDS + 1.0
     doctor.page_warnings()
+    doctor._page_warnings_cache().settle()
 
     assert fake.calls == 2
+
+
+def test_an_expired_answer_is_served_while_the_new_one_is_fetched(monkeypatch):
+    """The probe takes seconds on the server. A page opened after a minute away
+    must not wait for it: it gets the last answer, and the next page gets the
+    new one."""
+    now = [0.0]
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(doctor.subprocess, "run", FakeDoctor([a_check("agent-credential", "fail")]))
+    assert len(doctor.page_warnings()) == 1
+
+    fixed = FakeDoctor([a_check("agent-credential", "ok")])
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_and_fixed(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return fixed(*args, **kwargs)
+
+    monkeypatch.setattr(doctor.subprocess, "run", slow_and_fixed)
+    now[0] = doctor.PAGE_STATUS_TTL_SECONDS + 1.0
+
+    assert len(doctor.page_warnings()) == 1, "the stale answer, without waiting"
+    assert started.wait(timeout=5), "a refresh started behind the request"
+    assert len(doctor.page_warnings()) == 1, "still stale while it runs"
+
+    release.set()
+    doctor._page_warnings_cache().settle()
+    assert doctor.page_warnings() == ()
+    assert fixed.calls == 1, "two requests during one refresh started one probe"

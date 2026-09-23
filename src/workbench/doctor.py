@@ -39,12 +39,13 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 import httpx
@@ -1905,23 +1906,79 @@ class PageWarning:
 
 
 def page_warnings() -> tuple[PageWarning, ...]:
-    """What every page should be saying, cached for `PAGE_STATUS_TTL_SECONDS`.
+    """What every page should be saying, at most `PAGE_STATUS_TTL_SECONDS` stale.
 
-    Keyed on a coarse time bucket, which is what gives this a TTL without a
-    mutable module-level slot or a lock. `maxsize=1` rather than `@cache`: the
-    key is a monotonically rising integer, so an unbounded cache is a leak.
+    Stale-while-revalidate: an expired answer is still served, and the probe
+    that replaces it runs behind the request rather than in front of it. The
+    probe is a subprocess that takes about 2.6 seconds on the server, so a TTL
+    that made the unlucky request wait turned every page opened after a minute
+    away into a 50x slower one. The warnings were always allowed to be a minute
+    out of date; what was not acceptable is somebody waiting for the refresh.
+
+    Only the very first request of a process waits, because there is nothing
+    stale to serve yet.
 
     Contrast `app.deployed_revision`, which caches for the life of the process
     and argues it is safe *because* a running process cannot change revision.
-    That reasoning does not transfer — the whole point of this is that someone
-    goes and fixes the thing while the process keeps running.
+    That reasoning does not transfer. The whole point of this is that someone
+    goes and fixes the thing while the process keeps running, so the answer
+    must go on changing.
     """
-    return _warnings_at(int(time.monotonic() // PAGE_STATUS_TTL_SECONDS))
+    return _page_warnings_cache().get()
 
 
-@lru_cache(maxsize=1)
-def _warnings_at(_bucket: int) -> tuple[PageWarning, ...]:
-    return _probe_page_warnings()
+class _PageWarningsCache:
+    """The last answer, when it was asked, and whether a refresh is in flight.
+
+    Guarded by a lock because FastAPI renders sync routes on a threadpool, and
+    two requests finding the same expired answer must start one probe, not two.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._first_probe = threading.Lock()
+        self._answer: tuple[PageWarning, ...] | None = None
+        self._asked_at = 0.0
+        self._refresh: threading.Thread | None = None
+
+    def get(self) -> tuple[PageWarning, ...]:
+        with self._lock:
+            answer = self._answer
+            if answer is not None:
+                expired = time.monotonic() - self._asked_at >= PAGE_STATUS_TTL_SECONDS
+                if expired and self._refresh is None:
+                    self._refresh = threading.Thread(
+                        target=self._ask, name="page-warnings", daemon=True
+                    )
+                    self._refresh.start()
+                return answer
+
+        # Nothing to serve yet. Concurrent first requests share one probe.
+        with self._first_probe:
+            with self._lock:
+                if self._answer is not None:
+                    return self._answer
+            return self._ask()
+
+    def _ask(self) -> tuple[PageWarning, ...]:
+        answer = _probe_page_warnings()
+        with self._lock:
+            self._answer = answer
+            self._asked_at = time.monotonic()
+            self._refresh = None
+        return answer
+
+    def settle(self) -> None:
+        """Wait for a refresh in flight. For tests, which need to see it land."""
+        with self._lock:
+            refresh = self._refresh
+        if refresh is not None:
+            refresh.join()
+
+
+@cache
+def _page_warnings_cache() -> _PageWarningsCache:
+    return _PageWarningsCache()
 
 
 def _probe_page_warnings() -> tuple[PageWarning, ...]:
