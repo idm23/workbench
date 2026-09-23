@@ -454,6 +454,17 @@ is keyed to the directory it was issued in. A new run rather than a resurrection
 old one, so the record of what happened stays what happened. So a dialog is something a
 person chooses, not something every run waits around on the chance of.
 
+**The project chat is always visible, and never kept running.** It sits beside the task
+tree (two columns on a computer, a tab on a phone) and reads every conversation run of the
+project as one thread (`runs/chat.py`). Sending a message types it into the running session
+if there is one, and otherwise starts a run that resumes the same session with that message
+as its opening. Keeping a process alive between messages was considered and bought
+nothing. An idle session spends no tokens either way. And the prompt cache does not
+outlive a pause of more than a few minutes, so the first message after a break re-sends
+the whole transcript whether or not the process stayed up. What staying up *would* cost
+is a slot. The project chat has a slot of its own for the same reason: a chat that queued
+behind task runs, or stopped them starting, would be no use for talking about them.
+
 **An agent can now ask a question, and that is the same decision rather than a reversal
 of it.** Agents said outright, in real runs here, that there was no way to reach the
 person — and every prompt told them so, because asking did nothing. Now an execute run

@@ -4,6 +4,8 @@
 
 {% block back %}<a class="back" href="/users/{{ project.user_id }}">&lsaquo; {{ project.user.name }}</a>{% endblock %}
 
+{% block wrap_class %}wide{% endblock %}
+
 {% block content %}
 <script>
   // Before the tree is parsed, so a device that asked to see finished tasks
@@ -53,6 +55,15 @@
   {% endif %}
 {% endmacro %}
 
+{#- Two columns on a computer, two tabs on a phone: the tree and the chat
+    about it. The tabs are hidden by CSS once there is room for both. -#}
+<div class="tabs" role="tablist" aria-label="View">
+  <button type="button" role="tab" class="tab" data-show="tasks" aria-selected="true">Tasks</button>
+  <button type="button" role="tab" class="tab" data-show="chat" aria-selected="false">Chat{% if conversation %} <span class="pip"></span>{% endif %}</button>
+</div>
+<div class="columns" id="columns" data-show="tasks">
+<div class="col-tasks">
+
 <h1 class="mono" style="font-size: clamp(1.3rem, 6vw, 1.8rem);">{{ project.owner }}/{{ project.repo }}</h1>
 <p class="sub">
   {% if project.description %}{{ project.description }}{% else %}No description.{% endif %}
@@ -66,14 +77,9 @@
   <form method="post" action="/projects/{{ project.id }}/clone" style="border: none; padding: 0; margin-bottom: 1.75rem;">
     <button type="submit">Clone repository</button>
   </form>
-{% else %}
-  {% if conversation %}
-    {# The project's own standing conversation — not scoped to any task. #}
-    <a class="conversation-banner" href="/runs/{{ conversation.id }}"
-       title="Run {{ conversation.id }} is {{ conversation.status.value }}"
-    ><span class="pip"></span>Continue conversation</a>
-  {% else %}
-    {# Which agent works this project, and where to go when it runs out of window.
+{% endif %}
+
+{# Which agent works this project, and where to go when it runs out of window.
    Here rather than in a settings page the app does not have, and both together
    because the second is meaningless without the first. #}
 <details class="task-note foldable" style="margin-bottom: 1.25rem;">
@@ -150,12 +156,6 @@
     <button class="slim" type="submit">Save</button>
   </form>
 </details>
-
-<form method="post" action="/projects/{{ project.id }}/conversation" style="border: none; padding: 0; margin-bottom: 1.75rem;">
-      <button type="submit">Talk to this project</button>
-    </form>
-  {% endif %}
-{% endif %}
 
 {#- Everything below that a run can change, up to the tree's end. The poll
     script at the foot of the page swaps this one element for a fresh copy
@@ -530,6 +530,191 @@
   {% endif %}
   <button type="submit">Add task</button>
 </form>
+</div>
+
+<aside class="col-chat">
+  {% include "_chat.html" %}
+</aside>
+</div>
+
+<script>
+  // Tabs, for a screen too narrow for both columns. Remembered per device,
+  // so a phone that is mostly used for chat opens on it.
+  (function () {
+    var columns = document.getElementById("columns");
+    var tabs = document.querySelectorAll(".tab");
+    function show(which) {
+      columns.dataset.show = which;
+      tabs.forEach(function (tab) {
+        tab.setAttribute("aria-selected", tab.dataset.show === which ? "true" : "false");
+      });
+      if (which === "chat") {
+        var log = document.getElementById("chat-log");
+        log.scrollTop = log.scrollHeight;
+      }
+    }
+    tabs.forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        show(tab.dataset.show);
+        try { localStorage.setItem("project-tab", tab.dataset.show); } catch (e) {}
+      });
+    });
+    try {
+      var saved = localStorage.getItem("project-tab");
+      if (saved === "chat" || saved === "tasks") show(saved);
+    } catch (e) { /* the default, tasks */ }
+  })();
+</script>
+
+<script>
+  // The chat. Sending never reloads the page: the server either types the
+  // message into the running session or starts one that resumes the thread,
+  // and answers with the run to stream. What arrives is shown as plain text
+  // while it streams; once the session goes quiet the log is fetched again,
+  // rendered, which is when Markdown appears. The same trade the run page
+  // makes, for the same reason: model output never goes through innerHTML
+  // on this side.
+  (function () {
+    var log = document.getElementById("chat-log");
+    var form = document.getElementById("chat-form");
+    if (!log || !form) return;
+    var message = document.getElementById("chat-message");
+    var typing = document.getElementById("chat-typing");
+    var live = document.getElementById("chat-live");
+    var failure = document.getElementById("chat-error");
+    var send = form.querySelector('button[type="submit"]');
+    var source = null;
+    var runId = log.dataset.run;
+
+    function scrollDown() { log.scrollTop = log.scrollHeight; }
+
+    function lastMessageIsMine() {
+      var messages = log.querySelectorAll(".chat-msg");
+      var last = messages[messages.length - 1];
+      return !!(last && last.classList.contains("mine"));
+    }
+
+    function setLive(on) {
+      live.className = "live-dot" + (on ? " on" : "");
+      live.textContent = on ? "live" : "";
+      typing.hidden = !(on && lastMessageIsMine());
+    }
+
+    function add(kind, text) {
+      var empty = log.querySelector(".chat-empty");
+      if (empty) empty.remove();
+      var item = document.createElement("li");
+      item.className = kind === "input" ? "chat-msg mine"
+        : kind === "text" ? "chat-msg theirs" : "chat-tool";
+      item.textContent = text;
+      log.insertBefore(item, typing);
+      typing.hidden = !(source && lastMessageIsMine());
+      scrollDown();
+    }
+
+    function refresh() {
+      return fetch(location.pathname)
+        .then(function (response) { return response.text(); })
+        .then(function (html) {
+          var page = new DOMParser().parseFromString(html, "text/html");
+          var fresh = page.getElementById("chat-log");
+          var freshError = page.getElementById("chat-error");
+          if (!fresh) return;
+          log.innerHTML = fresh.innerHTML;
+          typing = document.getElementById("chat-typing");
+          localTimes();
+          var link = page.querySelector(".chat-head a");
+          var ours = document.querySelector(".chat-head a");
+          if (link && !ours) document.querySelector(".chat-head").appendChild(link);
+          else if (link && ours) ours.href = link.getAttribute("href");
+          if (freshError) {
+            failure.textContent = freshError.textContent;
+            failure.hidden = freshError.hidden;
+          }
+          scrollDown();
+        })
+        .catch(function () { /* the plain-text version stays */ });
+    }
+
+    function connect(id, after) {
+      if (source) source.close();
+      runId = String(id);
+      source = new EventSource("/runs/" + id + "/events?after=" + after);
+      setLive(true);
+      ["input", "text", "tool_use"].forEach(function (kind) {
+        source.addEventListener(kind, function (event) {
+          try {
+            var data = JSON.parse(event.data);
+            add(kind, data.name || data.text || "");
+          } catch (error) { /* skip a bad frame */ }
+        });
+      });
+      source.addEventListener("end", function () {
+        source.close();
+        source = null;
+        setLive(false);
+        refresh();
+      });
+    }
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var text = message.value.trim();
+      if (!text || send.getAttribute("aria-busy") === "true") return;
+      send.setAttribute("aria-busy", "true");
+      failure.hidden = true;
+      fetch(form.action, {
+        method: "POST",
+        body: new FormData(form),
+        headers: { "Accept": "application/json" },
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (data) {
+          if (data.error) {
+            failure.textContent = data.error;
+            failure.hidden = false;
+            return;
+          }
+          message.value = "";
+          message.style.height = "";
+          // A running session delivers the message back through the stream
+          // it is already on; a new one is streamed from its start.
+          if (!source || String(data.run) !== runId) connect(data.run, 0);
+        })
+        .catch(function () {
+          failure.textContent = "Could not reach the server. Nothing was sent.";
+          failure.hidden = false;
+        })
+        .finally(function () { send.removeAttribute("aria-busy"); });
+    });
+
+    // Enter sends where there is a keyboard; on a touchscreen it is a new
+    // line, and the button sends.
+    var keyboard = window.matchMedia("(pointer: fine)").matches;
+    message.addEventListener("keydown", function (event) {
+      if (keyboard && event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    message.addEventListener("input", function () {
+      message.style.height = "";
+      message.style.height = Math.min(message.scrollHeight, 160) + "px";
+    });
+
+    // Rendered in UTC, because the server cannot know where the reader is.
+    function localTimes() {
+      log.querySelectorAll("time").forEach(function (time) {
+        time.textContent = new Date(time.dateTime).toLocaleString([], {
+          weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+        });
+      });
+    }
+    localTimes();
+    scrollDown();
+    if (runId) connect(runId, Number(log.dataset.after) || 0);
+  })();
+</script>
 
 <script>
   // Collapsing a parent hides its whole subtree — the contiguous run of

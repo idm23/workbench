@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
+    JSONResponse,
     RedirectResponse,
     StreamingResponse,
 )
@@ -47,6 +48,7 @@ from workbench.database.models import (
     DeviceSubscription,
     Project,
     Run,
+    RunEvent,
     RunEventKind,
     RunPhase,
     RunStatus,
@@ -83,6 +85,7 @@ from workbench.runs.activity import (
     pr_url_by_task,
     project_activity_fingerprint,
 )
+from workbench.runs.chat import chat_history, failed_without_a_word
 from workbench.runs.lifecycle import (
     NotCancellable,
     active_run_for_project,
@@ -496,6 +499,7 @@ def show_project(
     # a choice nothing but that login would satisfy.
     choices = agent_choices(project)
     agent_options = [(choice, agent_label(choice)) for choice in choices]
+    conversation = active_run_for_project(db, project.id)
     preferred_agent = agent_choice(project.agent_backend or default_agent_backend(), None)
     agent_default = preferred_agent if preferred_agent in choices else None
 
@@ -542,7 +546,17 @@ def show_project(
             # The project's own standing conversation, if one is in flight —
             # what lets the page offer "Continue" instead of "Talk to this
             # project" without a second click to find out.
-            "conversation": active_run_for_project(db, project.id),
+            "conversation": conversation,
+            # The chat beside the tree: the thread so far, and where its live
+            # stream should pick up if a session is running.
+            "chat": chat_history(db, project.id),
+            "chat_failed": failed_without_a_word(db, project.id),
+            "chat_after": (
+                db.scalar(select(func.max(RunEvent.seq)).where(RunEvent.run_id == conversation.id))
+                or 0
+                if conversation
+                else 0
+            ),
             "checkout": checkout,
             # Only worth computing for a task that would actually show the
             # picker: one with no worktree yet has nothing to choose between.
@@ -797,6 +811,45 @@ def start_project_conversation(db: DbSession, project_id: int) -> RedirectRespon
     if isinstance(result, Run):
         return _redirect(f"/runs/{result.id}")
     return _redirect(f"/projects/{project.id}", error=result.message)
+
+
+@app.post("/projects/{project_id}/chat", response_model=None)
+def send_to_project_chat(
+    request: Request, db: DbSession, project_id: int, message: Annotated[str, Form()]
+) -> JSONResponse | RedirectResponse:
+    """Say something in the chat beside the task tree.
+
+    Typed into the project's conversation if one is running, and otherwise
+    the opening of a new one that resumes the same session. So the chat is
+    always there to type into, and an agent is only running while it has
+    something to answer.
+
+    Answers the page's script in JSON with the run to stream, and anything
+    else with the usual redirect, so the form still works without script.
+    """
+    project = _get_project_or_404(db, project_id)
+    wants_json = "application/json" in request.headers.get("accept", "")
+
+    def answer(run: Run | None, error: str | None = None) -> JSONResponse | RedirectResponse:
+        if wants_json:
+            code = status.HTTP_200_OK if error is None else status.HTTP_409_CONFLICT
+            return JSONResponse({"run": run.id if run else None, "error": error}, code)
+        return _redirect(f"/projects/{project.id}", error=error)
+
+    cleaned = message.strip()
+    if not cleaned:
+        return answer(None, "Type something first.")
+
+    run = active_run_for_project(db, project.id)
+    if run is None:
+        result = start_conversation(db, project, seed_message=cleaned)
+        if not isinstance(result, Run):
+            return answer(None, result.message)
+        return answer(result)
+
+    append_input(db, run.id, cleaned)
+    append_event(db, run.id, RunEventKind.INPUT, {"text": cleaned})
+    return answer(run)
 
 
 @app.post("/projects/{project_id}/clone")
