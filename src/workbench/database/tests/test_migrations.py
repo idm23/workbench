@@ -12,6 +12,7 @@ idea, cheap enough to run on every commit.
 """
 
 import sqlite3
+from contextlib import contextmanager
 
 import pytest
 from alembic import command
@@ -23,6 +24,22 @@ from sqlalchemy.orm import Session
 from workbench.config import repo_root
 from workbench.database.db import make_engine
 from workbench.database.models import Project, Run, RunEvent, RunPhase, Task, User
+
+
+@contextmanager
+def _connect(database):
+    """A raw connection that commits on success *and* closes.
+
+    `with sqlite3.connect(...) as connection:` only commits or rolls back — it
+    never closes the connection, a long-standing trap in the standard library.
+    Seven uses of it here leaked a connection each (#83).
+    """
+    connection = sqlite3.connect(database)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 @pytest.fixture
@@ -56,7 +73,7 @@ def seed_previous_revision(database) -> None:
     models, which is precisely the shape the migration is supposed to produce —
     the rows have to predate it to be a real test.
     """
-    with sqlite3.connect(database) as connection:
+    with _connect(database) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(
             "INSERT INTO users (id, name, created_at) VALUES (1, 'ian', '2026-01-01 00:00:00')"
@@ -77,7 +94,7 @@ def test_every_revision_applies_in_order(alembic_config):
     for revision in revisions(alembic_config):
         command.upgrade(alembic_config, revision)
 
-    with sqlite3.connect(database_of(alembic_config)) as connection:
+    with _connect(database_of(alembic_config)) as connection:
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -94,7 +111,7 @@ def test_upgrading_over_existing_rows_preserves_them(alembic_config):
 
     command.upgrade(alembic_config, "head")
 
-    with sqlite3.connect(database_of(alembic_config)) as connection:
+    with _connect(database_of(alembic_config)) as connection:
         users = connection.execute("SELECT name FROM users").fetchall()
         projects = connection.execute("SELECT owner, repo FROM projects ORDER BY id").fetchall()
 
@@ -114,7 +131,7 @@ def test_columns_added_to_populated_tables_are_nullable(alembic_config):
 
     command.upgrade(alembic_config, "head")
 
-    with sqlite3.connect(database_of(alembic_config)) as connection:
+    with _connect(database_of(alembic_config)) as connection:
         rows = connection.execute("SELECT setup_command, agent_backend FROM projects").fetchall()
 
     assert rows == [(None, None), (None, None)]
@@ -132,7 +149,7 @@ def test_dropping_a_column_keeps_the_rest_of_the_row(alembic_config):
 
     command.upgrade(alembic_config, "head")
 
-    with sqlite3.connect(database_of(alembic_config)) as connection:
+    with _connect(database_of(alembic_config)) as connection:
         projects = connection.execute(
             "SELECT owner, repo, github_url FROM projects ORDER BY id"
         ).fetchall()
@@ -156,7 +173,7 @@ def test_downgrade_and_upgrade_again_with_data_present(alembic_config):
     command.downgrade(alembic_config, "-1")
     command.upgrade(alembic_config, "head")
 
-    with sqlite3.connect(database_of(alembic_config)) as connection:
+    with _connect(database_of(alembic_config)) as connection:
         assert connection.execute("SELECT count(*) FROM projects").fetchone()[0] == 2
         assert connection.execute("SELECT count(*) FROM users").fetchone()[0] == 1
 
@@ -195,6 +212,7 @@ def test_the_migrated_schema_accepts_todays_models(alembic_config):
         session.commit()
 
         assert session.query(RunEvent).one().payload == {"text": "hello"}
+    engine.dispose()
 
 
 def test_foreign_keys_survive_the_batch_rewrites(alembic_config):
@@ -205,7 +223,7 @@ def test_foreign_keys_survive_the_batch_rewrites(alembic_config):
     """
     command.upgrade(alembic_config, "head")
 
-    with sqlite3.connect(database_of(alembic_config)) as connection:
+    with _connect(database_of(alembic_config)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         keys = {
             table: [row[2] for row in connection.execute(f"PRAGMA foreign_key_list({table})")]
@@ -246,6 +264,7 @@ def test_cascade_still_bites_after_migrating(alembic_config):
         for table in ("projects", "tasks", "runs", "run_events"):
             remaining = session.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
             assert remaining == 0, table
+    engine.dispose()
 
 
 def test_a_projects_own_conversation_cascades_too(alembic_config):
@@ -273,3 +292,4 @@ def test_a_projects_own_conversation_cascades_too(alembic_config):
 
         remaining = session.execute(text("SELECT count(*) FROM runs")).scalar_one()
         assert remaining == 0
+    engine.dispose()

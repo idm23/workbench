@@ -37,6 +37,7 @@ def db(tmp_path, monkeypatch):
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
+    engine.dispose()
 
 
 @pytest.fixture

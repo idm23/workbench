@@ -58,7 +58,13 @@ from workbench.agents.protocol import (
     CredentialStatus,
     SubtaskProposal,
 )
-from workbench.config import agent_environment, bills_subscription, claude_login_dir, port
+from workbench.config import (
+    agent_database,
+    agent_environment,
+    bills_subscription,
+    claude_login_dir,
+    port,
+)
 from workbench.database.models import RunEventKind, RunPhase
 
 logger = logging.getLogger(__name__)
@@ -114,6 +120,13 @@ _PLAN_OUTPUT_FORMAT = {
 #: The shape of a review's answer. Structured output for the same reason a
 #: plan's is: plan mode, which a review runs in, allows no tool that could
 #: report it any other way.
+#:
+#: Only `verdict` is required, and `findings` is one markdown string rather
+#: than an array — both learned from run 87. Its first four answers were real
+#: reviews that failed validation because the findings array was mangled into
+#: the summary string; the fifth, which passed, was `{"summary": "test",
+#: "findings": ["a", "b"]}`. A strict schema did not make the answer better,
+#: it made the recorded answer a placeholder.
 _REVIEW_OUTPUT_FORMAT = {
     "type": "json_schema",
     "schema": {
@@ -121,9 +134,12 @@ _REVIEW_OUTPUT_FORMAT = {
         "properties": {
             "verdict": {"type": "string", "enum": ["approve", "changes"]},
             "summary": {"type": "string"},
-            "findings": {"type": "array", "items": {"type": "string"}},
+            "findings": {
+                "type": "string",
+                "description": "Each finding as a markdown bullet: file, problem, fix.",
+            },
         },
-        "required": ["verdict", "summary", "findings"],
+        "required": ["verdict"],
     },
 }
 
@@ -349,6 +365,9 @@ def _env_for(request: AgentRequest) -> dict[str, str]:
         "WORKBENCH_PROJECT_ID": str(request.project_id),
         "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
     }
+    # Laid over the runner's environment, which still names the real database
+    # because the runner writes to it. See `agent_database`.
+    env["WORKBENCH_DB"] = str(agent_database(request.worktree))
     if request.login:
         directory = claude_login_dir(request.login)
         if directory is not None:
@@ -458,10 +477,12 @@ def _review(result: ResultMessage) -> tuple[str, str | None]:
         return result.result or "", None
     verdict = structured.get("verdict")
     summary = str(structured.get("summary") or "").strip()
-    findings = [str(f).strip() for f in structured.get("findings") or [] if str(f).strip()]
-    text = summary
-    if findings:
-        text = f"{summary}\n\n" + "\n".join(f"- {finding}" for finding in findings)
+    raw = structured.get("findings")
+    if isinstance(raw, list):  # the older shape, still accepted
+        findings = "\n".join(f"- {str(f).strip()}" for f in raw if str(f).strip())
+    else:
+        findings = str(raw or "").strip()
+    text = f"{summary}\n\n{findings}" if summary and findings else summary or findings
     return text.strip(), verdict if verdict in ("approve", "changes") else None
 
 

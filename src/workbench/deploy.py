@@ -28,6 +28,7 @@ import pwd
 import shutil
 import sqlite3
 import subprocess
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -192,7 +193,12 @@ def restore_snapshot() -> DeployFailed | None:
     ensure_data_dir()
     logger.info("Restoring a snapshot of %s over %s", source, target)
     try:
-        with sqlite3.connect(source) as origin, sqlite3.connect(target) as replica:
+        # closing(), not the connection's own context manager: that one commits
+        # and never closes, which leaks both handles on every staging deploy.
+        with (
+            closing(sqlite3.connect(source)) as origin,
+            closing(sqlite3.connect(target)) as replica,
+        ):
             origin.backup(replica)
     except sqlite3.Error as error:
         return DeployFailed("restoring the database snapshot", str(error))

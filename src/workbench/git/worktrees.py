@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from workbench.config import repos_dir, worktrees_dir
+from workbench.config import agent_database_dir, agent_environment, repos_dir, worktrees_dir
 from workbench.git.github import InvalidReference, parse_repo_reference
 
 logger = logging.getLogger(__name__)
@@ -231,8 +231,10 @@ def remove_worktree(repo: Path, path: Path) -> GitResult:
 
     `--force` because an abandoned agent run routinely leaves the tree dirty,
     and refusing to clean up would strand the directory permanently. The task
-    row is being deleted; its scratch space goes with it.
+    row is being deleted; its scratch space goes with it, including the
+    database its agents were given in place of the real one.
     """
+    shutil.rmtree(agent_database_dir(path), ignore_errors=True)
     result = _run_git(["worktree", "remove", "--force", str(path)], cwd=repo)
     if isinstance(result, GitFailed) and path.exists():
         # Worktree metadata can be missing or stale — the recorded repo may
@@ -514,6 +516,9 @@ def run_setup_command(worktree: Path, command: str) -> GitResult:
     A worktree contains tracked files only — no .env, no node_modules, no venv
     — so without this most first builds fail for reasons unrelated to the task.
     Shell-quoted by the user, so it runs through a shell deliberately.
+
+    It runs the task branch's code, so it gets the same scratch database an
+    agent does. A setup command that migrates must never migrate production.
     """
     try:
         completed = subprocess.run(
@@ -523,6 +528,7 @@ def run_setup_command(worktree: Path, command: str) -> GitResult:
             capture_output=True,
             text=True,
             timeout=NETWORK_TIMEOUT_SECONDS,
+            env=agent_environment(worktree=worktree),
             check=False,
         )
     except subprocess.TimeoutExpired:

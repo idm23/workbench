@@ -56,6 +56,7 @@ from workbench.agents.protocol import (
     SubtaskProposal,
 )
 from workbench.agents.tests.helpers import drain
+from workbench.config import agent_database
 from workbench.database.models import RunEventKind, RunPhase
 
 
@@ -411,12 +412,15 @@ def test_the_run_and_task_ids_reach_the_environment(monkeypatch):
 
     drain(ClaudeBackend().run(a_request(run_id=42, task_id=7)))
 
-    assert captured["options"].env == {
-        "WORKBENCH_RUN_ID": "42",
-        "WORKBENCH_TASK_ID": "7",
-        "WORKBENCH_PROJECT_ID": "0",
-        "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
-    }
+    assert (
+        captured["options"].env.items()
+        >= {
+            "WORKBENCH_RUN_ID": "42",
+            "WORKBENCH_TASK_ID": "7",
+            "WORKBENCH_PROJECT_ID": "0",
+            "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
+        }.items()
+    )
 
 
 def test_the_project_id_reaches_the_environment_too(monkeypatch):
@@ -1379,7 +1383,21 @@ def test_there_is_no_login_command_when_there_is_no_cli():
     assert status.login_command == ()
 
 
+def test_the_agent_is_handed_a_scratch_database(monkeypatch, tmp_path):
+    """The SDK lays `env` over the runner's own, which names the real one (#87)."""
+    production = tmp_path / "data" / "workbench.db"
+    monkeypatch.setenv("WORKBENCH_DB", str(production))
+    worktree = tmp_path / "data" / "worktrees" / "task-3-x"
+    request = backend_module.AgentRequest(worktree=worktree, phase=RunPhase.EXECUTE, prompt="x")
+
+    env = backend_module._env_for(request)
+
+    assert env["WORKBENCH_DB"] == str(agent_database(worktree))
+    assert env["WORKBENCH_DB"] != str(production)
+
+
 def test_a_named_login_points_the_cli_at_its_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
     monkeypatch.setattr("workbench.config.agent_home", lambda: tmp_path)
     (tmp_path / ".claude-logins" / "ian@example.com").mkdir(parents=True)
     request = backend_module.AgentRequest(
@@ -1394,7 +1412,8 @@ def test_a_named_login_points_the_cli_at_its_directory(monkeypatch, tmp_path):
     assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-logins" / "ian@example.com")
 
 
-def test_no_login_leaves_the_default_config_dir(tmp_path):
+def test_no_login_leaves_the_default_config_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
     request = backend_module.AgentRequest(worktree=tmp_path, phase=RunPhase.EXECUTE, prompt="x")
 
     assert "CLAUDE_CONFIG_DIR" not in backend_module._env_for(request)
@@ -1406,13 +1425,32 @@ def test_a_review_verdict_and_findings_come_from_structured_output():
             structured_output={
                 "verdict": "changes",
                 "summary": "One call site is missing.",
-                "findings": ["runner.py: the task run gets no login"],
+                "findings": "- runner.py: the task run gets no login",
             }
         )
     )
 
     assert verdict == "changes"
     assert text == "One call site is missing.\n\n- runner.py: the task run gets no login"
+
+
+def test_the_older_list_of_findings_is_still_read():
+    text, _ = backend_module._review(
+        a_result(structured_output={"verdict": "changes", "summary": "S", "findings": ["x"]})
+    )
+
+    assert text == "S\n\n- x"
+
+
+def test_only_the_verdict_is_required():
+    """Run 87: four real reviews rejected over a mangled findings field, and a
+    placeholder recorded instead. A schema asking for less gets the real one."""
+    schema = backend_module._REVIEW_OUTPUT_FORMAT["schema"]
+
+    assert schema["required"] == ["verdict"]
+    assert schema["properties"]["findings"]["type"] == "string"
+    text, verdict = backend_module._review(a_result(structured_output={"verdict": "approve"}))
+    assert (text, verdict) == ("", "approve")
 
 
 def test_a_review_in_prose_has_no_verdict():

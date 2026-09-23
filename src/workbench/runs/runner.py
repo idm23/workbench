@@ -444,8 +444,8 @@ def prepare(db: Session, run: Run) -> Prepared | NotPrepared:
     node = _endpoint(db, run) if backend.wants_endpoint else None
     resume = resume_token_for(db, task, run.backend)
     if run.phase is RunPhase.REVIEW:
-        # A fresh look, never a resumed one, with the change in front of it:
-        # a read-only reviewer may not be able to run git itself.
+        # A fresh look, never a resumed one, with the change in front of it
+        # from the start rather than left for the reviewer to go and find.
         work = _latest_execute_run(db, task)
         prompt = review_prompt(
             task.title,
