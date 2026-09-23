@@ -19,6 +19,28 @@
 <link rel="manifest" href="/static/manifest.webmanifest">
 <title>{% block title %}Workbench{% endblock %}</title>
 <style>
+  /* One scale for each of spacing, type and radius. A value that is not on
+     one of these is a decision somebody made once and nobody else can see,
+     which is how a page ends up looking assembled rather than designed. */
+  :root {
+    --space-1: .25rem;
+    --space-2: .5rem;
+    --space-3: .75rem;
+    --space-4: 1rem;
+    --space-5: 1.25rem;
+    --space-6: 1.75rem;
+    --space-7: 2.5rem;
+
+    /* 2xs is for uppercase eyebrow labels only; running text starts at xs. */
+    --text-2xs: .72rem;
+    --text-xs: .85rem;
+    --text-sm: .92rem;
+    --text-md: 1rem;
+
+    --radius-sm: .55rem;
+    --radius-md: .75rem;
+    --radius-lg: .9rem;
+  }
   :root {
     --bg: #f5f3ee;
     --panel: #ffffff;
@@ -84,8 +106,8 @@
     align-items: center;
     color: var(--muted);
     text-decoration: none;
-    font-size: .9rem;
-    margin-bottom: 1.25rem;
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-5);
     transition: color .15s ease, transform .15s ease;
   }
   .back:hover { color: var(--accent); transform: translateX(-2px); }
@@ -93,16 +115,16 @@
     font-size: clamp(1.75rem, 8vw, 2.5rem);
     line-height: 1.08;
     letter-spacing: -0.025em;
-    margin: 0 0 .4rem;
+    margin: 0 0 var(--space-2);
     font-weight: 750;
   }
-  .sub { color: var(--muted); margin: 0 0 1.75rem; font-size: .95rem; }
+  .sub { color: var(--muted); margin: 0 0 var(--space-6); font-size: var(--text-sm); }
 
   .msg {
-    padding: .85rem 1.05rem;
-    border-radius: .75rem;
-    margin-bottom: 1.25rem;
-    font-size: .95rem;
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-5);
+    font-size: var(--text-sm);
     border-left: 3px solid transparent;
     box-shadow: 0 1px 2px var(--shadow-soft);
   }
@@ -113,12 +135,12 @@
      divider — the `.row`/subtask `<li>` below fills its parent's padding box
      exactly (see the negative margin), so hovering the link and hovering the
      card are the same event and need no extra selector to keep in sync. */
-  ul.items { list-style: none; margin: 0 0 1.75rem; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+  ul.items { list-style: none; margin: 0 0 var(--space-6); padding: 0; display: flex; flex-direction: column; gap: var(--space-3); }
   ul.items li {
     background: var(--panel);
     border: 1px solid var(--rule);
-    border-radius: .85rem;
-    padding: 1rem 1.1rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-4);
     box-shadow: 0 1px 2px var(--shadow-soft);
     overflow: hidden;
     transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
@@ -126,8 +148,8 @@
   ul.items li:hover { border-color: var(--accent); box-shadow: 0 4px 12px var(--shadow); transform: translateY(-1px); }
   .row {
     display: block;
-    margin: -1rem -1.1rem;
-    padding: 1rem 1.1rem;
+    margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4));
+    padding: var(--space-4) var(--space-4);
     text-decoration: none;
     color: inherit;
   }
@@ -135,57 +157,57 @@
     font-weight: 650;
     display: flex;
     justify-content: space-between;
-    gap: 1rem;
+    gap: var(--space-4);
     align-items: baseline;
   }
-  .row-meta { color: var(--muted); font-size: .9rem; margin-top: .25rem; }
+  .row-meta { color: var(--muted); font-size: var(--text-sm); margin-top: var(--space-1); }
   .chev { color: var(--muted); font-weight: 400; display: inline-block; transition: transform .15s ease, color .15s ease; }
   ul.items li:hover .chev { transform: translateX(2px); color: var(--accent); }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: .85rem;
+    font-size: var(--text-xs);
   }
   .badge {
     display: inline-block;
-    font-size: .75rem;
+    font-size: var(--text-2xs);
     color: var(--muted);
     background: var(--panel-2);
     border: 1px solid var(--rule);
     border-radius: 999px;
-    padding: .1rem .6rem;
-    margin-top: .5rem;
+    padding: .1rem var(--space-3);
+    margin-top: var(--space-2);
   }
   .empty {
     color: var(--muted);
     border: 1.5px dashed var(--rule);
-    border-radius: .85rem;
-    padding: 1.5rem 1.25rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-6) var(--space-5);
     text-align: center;
-    margin-bottom: 1.75rem;
-    font-size: .95rem;
+    margin-bottom: var(--space-6);
+    font-size: var(--text-sm);
     background: var(--panel-2);
   }
 
-  form { border-top: 1px solid var(--rule); padding-top: 1.25rem; }
+  form { border-top: 1px solid var(--rule); padding-top: var(--space-5); }
   label {
     display: block;
-    font-size: .8rem;
+    font-size: var(--text-xs);
     text-transform: uppercase;
     letter-spacing: .07em;
     color: var(--muted);
     font-weight: 700;
-    margin-bottom: .45rem;
+    margin-bottom: var(--space-2);
   }
   input[type=text], textarea, select {
     width: 100%;
-    padding: .8rem .9rem;
+    padding: var(--space-3) var(--space-4);
     font: inherit;
-    font-size: 1rem; /* 16px minimum, or iOS zooms on focus */
+    font-size: var(--text-md); /* 16px minimum, or iOS zooms on focus */
     background: var(--panel);
     color: var(--fg);
     border: 1px solid var(--rule);
-    border-radius: .7rem;
-    margin-bottom: .75rem;
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-3);
     transition: border-color .15s ease, box-shadow .15s ease;
   }
   input[type=text]:focus, textarea:focus, select:focus {
@@ -193,18 +215,18 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
   }
-  .hint { color: var(--muted); font-size: .85rem; margin: -.35rem 0 .75rem; }
+  .hint { color: var(--muted); font-size: var(--text-xs); margin: calc(-1 * var(--space-2)) 0 var(--space-3); }
   textarea { resize: vertical; }
   button {
     width: 100%;
     min-height: 2.9rem; /* comfortable tap target */
-    padding: .75rem 1rem;
-    font-size: 1rem;
+    padding: var(--space-3) var(--space-4);
+    font-size: var(--text-md);
     font-weight: 650;
     color: var(--accent-fg);
     background: var(--accent);
     border: none;
-    border-radius: .7rem;
+    border-radius: var(--radius-md);
     cursor: pointer;
     box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent);
     transition: transform .1s ease, box-shadow .15s ease, opacity .15s ease;
@@ -244,7 +266,7 @@
   @media (prefers-reduced-motion: reduce) {
     button[aria-busy="true"] { animation: none; }
   }
-  button.slim { width: auto; min-height: 2.3rem; padding: .4rem .9rem; font-size: .85rem; border-radius: .55rem; }
+  button.slim { width: auto; min-height: 2.3rem; padding: var(--space-2) var(--space-4); font-size: var(--text-xs); border-radius: var(--radius-sm); }
   /* A link styled to sit in the same action row as the slim buttons above —
      "View PR" leaves the app, so it is an <a> rather than a form button, but
      it should not look like a different kind of control for that reason. */
@@ -254,10 +276,10 @@
     justify-content: center;
     width: auto;
     min-height: 2.3rem;
-    padding: .4rem .9rem;
-    font-size: .85rem;
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-xs);
     font-weight: 650;
-    border-radius: .55rem;
+    border-radius: var(--radius-sm);
     text-decoration: none;
     background: transparent;
     color: var(--fg);
@@ -265,13 +287,71 @@
     transition: border-color .15s ease, color .15s ease;
   }
   a.slim:hover { border-color: var(--accent); color: var(--accent); }
+  /* The quietest button: no fill and no border until it is pointed at. For
+     controls that open something rather than do something — the "…" on a
+     task row, and the items in the menu it opens. */
+  button.ghost {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid transparent;
+    box-shadow: none;
+  }
+  button.ghost:hover { color: var(--accent); border-color: var(--rule); box-shadow: none; }
+  button.more { min-width: 2.3rem; padding-inline: var(--space-3); font-size: var(--text-md); letter-spacing: .08em; }
+
+  /* One focus ring for everything a keyboard can reach. Inputs keep their own
+     glow below, which wins on specificity; this is for the controls that had
+     nothing but the browser default, which on a coloured button is often
+     invisible. */
+  :where(button, a, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* A task row's "…" menu. A native popover: the top layer, light dismiss
+     and Escape come from the browser. Anchored under its button where anchor
+     positioning exists, flipping when there is no room; elsewhere the UA
+     centres it, which on a phone reads as a small sheet and is fine. */
+  .menu {
+    min-width: 12rem;
+    max-width: calc(100vw - 2 * var(--space-4));
+    padding: var(--space-1);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-md);
+    background: var(--panel);
+    color: var(--fg);
+    box-shadow: 0 8px 24px var(--shadow);
+  }
+  @supports (position-anchor: --a) {
+    .menu {
+      inset: auto;
+      margin: var(--space-1) 0 0;
+      position-area: bottom span-left;
+      position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+    }
+  }
+  .menu form { border: none; padding: 0; margin: 0; }
+  .menu button, .menu a.slim {
+    display: flex;
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+    background: transparent;
+    color: var(--fg);
+    border: none;
+    box-shadow: none;
+    border-radius: var(--radius-sm);
+  }
+  .menu button:hover, .menu a.slim:hover { background: var(--panel-2); color: var(--accent); box-shadow: none; }
+  .menu button.danger { color: var(--danger); }
+  .menu button.danger:hover { background: var(--danger-bg); color: var(--danger); }
 
   /* The task tree. Indentation is a left margin driven by depth rather than
      nested <ul>s, so the template iterates one flat list and there is no
      recursive Jinja macro to read — collapsing (see the page's own script)
      works the same way, by hiding a contiguous run of later list items
      rather than by hiding a DOM subtree. */
-  ul.tree { list-style: none; margin: 0 0 1.75rem; padding: 0; display: flex; flex-direction: column; gap: .6rem; }
+  ul.tree { list-style: none; margin: 0 0 var(--space-6); padding: 0; display: flex; flex-direction: column; gap: var(--space-3); }
   /* A thin guide line at the parent's own indent level, so a nested task
      visibly branches from something rather than just sitting further right.
      `--depth` is set inline alongside the padding it already needs. */
@@ -288,12 +368,12 @@
   ul.tree li[data-depth]:not([data-depth="0"]):last-child::before { bottom: 0; }
   .task {
     display: flex;
-    gap: .75rem;
+    gap: var(--space-3);
     align-items: flex-start;
     background: var(--panel);
     border: 1px solid var(--rule);
-    border-radius: .85rem;
-    padding: .9rem 1rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-4);
     box-shadow: 0 1px 2px var(--shadow-soft);
     transition: border-color .15s ease, box-shadow .15s ease;
   }
@@ -304,18 +384,28 @@
   .task-title { font-weight: 650; overflow-wrap: anywhere; }
   .task.done { opacity: .72; }
   .task.done .task-title { color: var(--muted); text-decoration: line-through; }
-  .task-note { color: var(--muted); font-size: .9rem; margin-top: .15rem; }
+  .task-note { color: var(--muted); font-size: var(--text-sm); margin-top: .15rem; }
   /* A folded body: the disclosure triangle is replaced with a "more"/"less"
      word, since the triangle alone reads as a bullet on a phone rather than
      as something to tap. */
   .task-note summary { cursor: pointer; list-style: none; }
   .task-note summary::-webkit-details-marker { display: none; }
-  .task-note summary::after { content: "more"; color: var(--accent); font-weight: 600; margin-left: .3rem; }
+  .task-note summary::after { content: "more"; color: var(--accent); font-weight: 600; margin-left: var(--space-1); }
   .task-note[open] summary::after { content: "less"; }
-  .task-note-rest { margin-top: .3rem; }
-  .task-body .meter { max-width: 12rem; margin-top: .35rem; }
-  .task-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
+  .task-note-rest { margin-top: var(--space-1); }
+  .task-body .meter { max-width: 12rem; margin-top: var(--space-2); }
+  .task-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
   .task-actions form { border: none; padding: 0; margin: 0; }
+  /* A select sizes itself to its longest option, and a branch list can hold
+     a long one: without these the row, and then the page, scrolled sideways
+     on a phone. */
+  .task-actions form { max-width: 100%; min-width: 0; }
+  .task-actions select { max-width: 100%; }
+  /* A row whose only actions are in its menu gets no empty action strip. */
+  .task-actions:not(:has(*)) { display: none; }
+  /* The row's "…" sits in the card's top-right corner, level with the title,
+     so it costs no height of its own. */
+  .task > .more { flex: 0 0 auto; min-height: 2rem; margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2)) 0 0; }
 
   /* The Discuss dialog on a run's page — the one place this app opens a real
      modal rather than a plain form. A native <dialog> rather than anything
@@ -324,17 +414,17 @@
      the rest of the app's small, framework-free scripts. */
   dialog {
     width: min(28rem, 90vw);
-    padding: 1.25rem;
+    padding: var(--space-5);
     border: 1px solid var(--rule);
-    border-radius: .85rem;
+    border-radius: var(--radius-lg);
     background: var(--panel);
     color: var(--fg);
     box-shadow: 0 8px 24px var(--shadow-soft);
   }
   dialog::backdrop { background: rgba(0, 0, 0, .45); }
   dialog form { border: none; padding: 0; }
-  .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; }
-  .dialog-actions button { width: auto; min-height: 2.3rem; padding: .4rem .9rem; font-size: .85rem; border-radius: .55rem; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .dialog-actions button { width: auto; min-height: 2.3rem; padding: var(--space-2) var(--space-4); font-size: var(--text-xs); border-radius: var(--radius-sm); }
   /* A run in flight gets a warm border rather than only the pip inside —
      legible even to someone scanning the whole tree at a glance. */
   .task.busy {
@@ -379,7 +469,7 @@
     border-radius: 999px;
     background: var(--panel);
     cursor: pointer;
-    font-size: .85rem;
+    font-size: var(--text-xs);
     line-height: 1;
     color: var(--fg);
     padding: 0;
@@ -396,13 +486,13 @@
   .status {
     display: inline-flex;
     align-items: center;
-    gap: .3rem;
-    font-size: .7rem;
+    gap: var(--space-1);
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: .06em;
     font-weight: 700;
     border-radius: 999px;
-    padding: .2rem .65rem;
+    padding: .2rem var(--space-3);
     color: var(--muted);
     background: color-mix(in srgb, var(--muted) 14%, var(--panel));
   }
@@ -448,15 +538,15 @@
   .conversation-banner {
     display: flex;
     align-items: center;
-    gap: .55rem;
+    gap: var(--space-2);
     text-decoration: none;
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 12%, var(--panel));
     border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--rule));
-    border-radius: .85rem;
-    padding: .9rem 1.1rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-4);
     font-weight: 650;
-    margin-bottom: 1.75rem;
+    margin-bottom: var(--space-6);
     transition: box-shadow .15s ease, transform .15s ease;
   }
   .conversation-banner:hover { box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 25%, transparent); transform: translateY(-1px); }
@@ -470,13 +560,13 @@
      not — so a setup problem outranks a usage gauge. Two states rather than
      one, because "nobody can reach this from a phone" and "no agent can run"
      are not the same size of problem. */
-  .setup { margin-bottom: 1.25rem; }
+  .setup { margin-bottom: var(--space-5); }
   .setup-item {
     border: 1px solid var(--rule);
     border-left-width: 3px;
-    border-radius: .75rem;
-    padding: .7rem .85rem;
-    margin-bottom: .6rem;
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-3);
+    margin-bottom: var(--space-3);
     box-shadow: 0 1px 2px var(--shadow-soft);
   }
   .setup-item.urgent { border-left-color: var(--danger); background: var(--danger-bg); }
@@ -485,14 +575,14 @@
   .setup-item.urgent .setup-title { color: var(--danger); }
   .setup-detail {
     color: var(--muted);
-    font-size: .85rem;
+    font-size: var(--text-xs);
     margin-top: .15rem;
     /* Details carry newlines — a deploy key's is a pasteable public half. */
     white-space: pre-wrap;
   }
   .setup-fix {
-    margin-top: .4rem;
-    font-size: .8rem;
+    margin-top: var(--space-2);
+    font-size: var(--text-xs);
     /* Long commands scroll rather than widening the page. A body that scrolls
        sideways on a phone is the one layout failure that ruins every page. */
     overflow-x: auto;
@@ -504,9 +594,9 @@
      which is why this sits on every page rather than on a run's own. */
   .limits {
     border: 1px solid var(--rule);
-    border-radius: .85rem;
-    padding: .75rem .9rem;
-    margin-bottom: 1.25rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-3) var(--space-4);
+    margin-bottom: var(--space-5);
     background: var(--panel);
     box-shadow: 0 1px 2px var(--shadow-soft);
   }
@@ -514,31 +604,31 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    gap: .75rem;
-    font-size: .7rem;
+    gap: var(--space-3);
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: .07em;
     font-weight: 700;
     color: var(--muted);
   }
-  .limits-empty { color: var(--muted); font-size: .85rem; margin: .35rem 0 0; }
-  .limit { margin-top: .5rem; }
+  .limits-empty { color: var(--muted); font-size: var(--text-xs); margin: var(--space-2) 0 0; }
+  .limit { margin-top: var(--space-2); }
   .limit-row {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    gap: .75rem;
-    font-size: .85rem;
+    gap: var(--space-3);
+    font-size: var(--text-xs);
   }
   .limit-name { color: var(--fg); }
-  .limit-meta { color: var(--muted); font-size: .8rem; white-space: nowrap; }
+  .limit-meta { color: var(--muted); font-size: var(--text-xs); white-space: nowrap; }
   /* A meter rather than a progress bar: this is a measurement against a known
      maximum, not a task advancing, and screen readers say so. */
   .meter {
     display: block;
     width: 100%;
     height: .4rem;
-    margin-top: .3rem;
+    margin-top: var(--space-1);
     border-radius: 999px;
     background: var(--rule);
     overflow: hidden;
@@ -556,30 +646,30 @@
 
   /* A run's page: metadata, then the event log as it arrives. */
   h2.section {
-    font-size: .78rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: .08em;
     color: var(--muted);
     font-weight: 700;
-    margin: 2rem 0 .75rem;
+    margin: var(--space-7) 0 var(--space-3);
     display: flex;
     align-items: center;
-    gap: .5rem;
+    gap: var(--space-2);
   }
   .run-meta {
     border: 1px solid var(--rule);
-    border-radius: .85rem;
-    padding: .3rem .9rem;
-    margin-bottom: 1.25rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-1) var(--space-4);
+    margin-bottom: var(--space-5);
     background: var(--panel);
     box-shadow: 0 1px 2px var(--shadow-soft);
   }
   .run-meta > div {
     display: flex;
     justify-content: space-between;
-    gap: 1rem;
-    padding: .5rem 0;
-    font-size: .9rem;
+    gap: var(--space-4);
+    padding: var(--space-2) 0;
+    font-size: var(--text-sm);
     border-top: 1px solid var(--rule);
     overflow-wrap: anywhere;
   }
@@ -588,10 +678,10 @@
   .block {
     background: var(--panel);
     border: 1px solid var(--rule);
-    border-radius: .85rem;
-    padding: .9rem 1rem;
-    margin: 0 0 1.25rem;
-    font-size: .85rem;
+    border-radius: var(--radius-lg);
+    padding: var(--space-4) var(--space-4);
+    margin: 0 0 var(--space-5);
+    font-size: var(--text-xs);
     line-height: 1.5;
     box-shadow: 0 1px 2px var(--shadow-soft);
     /* Long tool output and diffstats scroll inside their own box rather than
@@ -660,11 +750,11 @@
      result is a plain `<details>`: the peek is gone, the toggle still opens
      the full plan. Degraded, never broken — which is why the summary carries
      its own label rather than relying on the peek to say what it is. */
-  .foldable { margin-top: .35rem; }
+  .foldable { margin-top: var(--space-2); }
   .foldable > summary {
     cursor: pointer;
     list-style: none;
-    font-size: .85rem;
+    font-size: var(--text-xs);
     font-weight: 600;
     color: var(--accent);
     /* Above the fading peek, which is pulled up underneath it. */
@@ -691,19 +781,19 @@
      The left border is each kind's whole identity; the background only
      lifts `text` and `input` slightly above the rest, since those are what a
      person actually reads and everything else is supporting detail. */
-  ul.events { list-style: none; margin: 0 0 1.75rem; padding: 0; display: flex; flex-direction: column; gap: .5rem; }
+  ul.events { list-style: none; margin: 0 0 var(--space-6); padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
   .ev {
     display: flex;
-    gap: .75rem;
-    padding: .65rem .85rem;
-    border-radius: .7rem;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-3);
+    border-radius: var(--radius-md);
     border-left: 3px solid var(--rule);
     background: var(--panel-2);
-    font-size: .9rem;
+    font-size: var(--text-sm);
   }
   .ev-kind {
-    flex: 0 0 4.8rem;
-    font-size: .62rem;
+    flex: 0 0 5.6rem; /* fits TOOL_RESULT at --text-2xs */
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: .06em;
     font-weight: 700;
@@ -716,7 +806,7 @@
      but should not compete with what the agent actually said. */
   .ev.thinking .ev-body, .ev.tool_result .ev-body, .ev.notice .ev-body { color: var(--muted); }
   .ev.tool_use { border-left-color: var(--fg); }
-  .ev.tool_use .ev-body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
+  .ev.tool_use .ev-body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--text-xs); }
   .ev.status { border-left-color: var(--accent); }
   .ev.status .ev-kind { color: var(--accent); }
   /* What a person typed in, set apart so a conversation does not read as
@@ -725,14 +815,14 @@
   .ev.input .ev-kind { color: var(--accent); }
   .ev.input .ev-body { font-weight: 650; color: var(--fg); }
 
-  .live-dot { font-size: .65rem; letter-spacing: .06em; color: var(--accent); font-weight: 700; }
+  .live-dot { font-size: var(--text-2xs); letter-spacing: .06em; color: var(--accent); font-weight: 700; }
   .live-dot.on::before {
     content: "";
     display: inline-block;
     width: .4rem; height: .4rem;
     border-radius: 999px;
     background: var(--accent);
-    margin-right: .3rem;
+    margin-right: var(--space-1);
     vertical-align: middle;
     animation: pulse 1.6s ease-in-out infinite;
   }

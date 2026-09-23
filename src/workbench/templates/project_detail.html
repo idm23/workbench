@@ -322,10 +322,6 @@
 
             <div class="task-actions">
               {% set pr_url = pr_urls.get(node.task.id) %}
-              {% if pr_url %}
-                <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
-              {% endif %}
-              {{ talk_actions(node.task.id, pr_url) }}
               {% if busy and busy.is_question %}
                 {# The agent asked something and stopped. Answering resumes its
                    session, which is the same machinery Discuss uses — so this
@@ -420,35 +416,53 @@
                   <button class="slim" type="submit">{{ 'Execute' if node.task.entry_phase == 'execute' else 'Plan' }}</button>
                 </form>
               {% endif %}
-              {% if node.task.worktree_path and not (busy and busy.status in ('queued', 'running')) %}
-                {# A branch is set once, when its worktree is first created,
-                   and nothing brings it forward after that — safe to offer
-                   any time nothing is actively writing to the worktree,
-                   since the route itself refuses rather than reconciling. #}
-                <form method="post" action="/tasks/{{ node.task.id }}/sync">
-                  <button class="slim secondary" type="submit">Sync</button>
-                </form>
-                {# Next to the button it unblocks, because that is the only
-                   context it makes sense in: Sync refuses a dirty worktree,
-                   and nothing could resolve that refusal without a shell on
-                   the server. It stashes rather than destroys, so it stays a
-                   secondary and asks for no confirmation. #}
-                <form method="post" action="/tasks/{{ node.task.id }}/discard-changes">
-                  <button class="slim secondary" type="submit">Discard changes</button>
-                </form>
+              {% if pr_url %}
+                <a class="slim" href="{{ pr_url }}" target="_blank" rel="noopener">View PR</a>
               {% endif %}
-              {% if effective_status in ('done', 'cancelled') %}
-                {# Off the tree, not deleted — see the archive page linked
-                   above. Only offered once a task is actually finished, so
-                   this is never how open work quietly disappears. #}
-                <form method="post" action="/tasks/{{ node.task.id }}/archive">
-                  <button class="slim secondary" type="submit">Archive</button>
-                </form>
-              {% endif %}
-              <form method="post" action="/tasks/{{ node.task.id }}/delete">
-                <button class="slim danger" type="submit">Delete</button>
-              </form>
             </div>
+          </div>
+          {#- Everything that is not the next step lives behind "…": a row
+              could carry seven buttons, and when they are all in view they
+              all look equally important. A native popover, so it
+              light-dismisses, closes on Escape, and needs no script. It is
+              anchored to its button where the browser supports anchor
+              positioning, and centred on the screen where it does not.
+              Delete is in here too, which puts one deliberate press in
+              front of the only irreversible action on the page. -#}
+          <button type="button" class="slim ghost more" popovertarget="task-menu-{{ node.task.id }}"
+                  aria-label="More actions" title="More actions"
+                  style="anchor-name: --task-menu-{{ node.task.id }};">&hellip;</button>
+          <div popover id="task-menu-{{ node.task.id }}" class="menu"
+               style="position-anchor: --task-menu-{{ node.task.id }};">
+            {{ talk_actions(node.task.id, pr_url) }}
+            {% if node.task.worktree_path and not (busy and busy.status in ('queued', 'running')) %}
+              {# A branch is set once, when its worktree is first created,
+                 and nothing brings it forward after that — safe to offer
+                 any time nothing is actively writing to the worktree,
+                 since the route itself refuses rather than reconciling. #}
+              <form method="post" action="/tasks/{{ node.task.id }}/sync">
+                <button class="slim secondary" type="submit">Sync</button>
+              </form>
+              {# Next to the button it unblocks, because that is the only
+                 context it makes sense in: Sync refuses a dirty worktree,
+                 and nothing could resolve that refusal without a shell on
+                 the server. It stashes rather than destroys, so it stays a
+                 secondary and asks for no confirmation. #}
+              <form method="post" action="/tasks/{{ node.task.id }}/discard-changes">
+                <button class="slim secondary" type="submit">Discard changes</button>
+              </form>
+            {% endif %}
+            {% if effective_status in ('done', 'cancelled') %}
+              {# Off the tree, not deleted — see the archive page linked
+                 above. Only offered once a task is actually finished, so
+                 this is never how open work quietly disappears. #}
+              <form method="post" action="/tasks/{{ node.task.id }}/archive">
+                <button class="slim secondary" type="submit">Archive</button>
+              </form>
+            {% endif %}
+            <form method="post" action="/tasks/{{ node.task.id }}/delete">
+              <button class="slim danger" type="submit">Delete</button>
+            </form>
           </div>
         </div>
       </li>
@@ -545,6 +559,8 @@
       var form = document.getElementById("discuss-form");
       document.querySelectorAll("[data-open-discuss]").forEach(function (button) {
         button.addEventListener("click", function () {
+          var menu = button.closest("[popover]");
+          if (menu) menu.hidePopover();
           form.action = "/runs/" + button.dataset.run + "/continue";
           document.getElementById("discuss-message").value = "";
           dialog.showModal();
