@@ -403,6 +403,154 @@
   .task-actions select { max-width: 100%; }
   /* A row whose only actions are in its menu gets no empty action strip. */
   .task-actions:not(:has(*)) { display: none; }
+  /* The project page: the tree and its chat. Tabs on a phone, two columns
+     once both fit. */
+  .wrap.wide { max-width: 78rem; }
+  .tabs {
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-1);
+    margin-bottom: var(--space-4);
+    background: var(--panel-2);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-md);
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 5;
+  }
+  .tab {
+    flex: 1;
+    min-height: 2.3rem;
+    padding: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--muted);
+    background: transparent;
+    box-shadow: none;
+    border-radius: var(--radius-sm);
+  }
+  .tab:hover { box-shadow: none; color: var(--fg); }
+  .tab[aria-selected="true"] { background: var(--panel); color: var(--fg); box-shadow: 0 1px 2px var(--shadow-soft); }
+  .tab .pip { color: var(--accent); margin-left: var(--space-1); }
+  .columns[data-show="tasks"] > .col-chat,
+  .columns[data-show="chat"] > .col-tasks { display: none; }
+  /* Side by side, the chat is pinned to the full height of the window rather
+     than laid out below the page's header: in the flow, its composer started
+     below the fold whenever there was a warning or a rate-limit panel above
+     it. The page's own content takes the width left of it. */
+  @media (min-width: 64rem) {
+    .wrap.wide {
+      --chat-width: min(28rem, 40vw);
+      padding-right: calc(var(--chat-width) + var(--space-6));
+    }
+    .tabs { display: none; }
+    .columns[data-show] > .col-chat,
+    .columns[data-show] > .col-tasks { display: block; }
+    .col-chat {
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      right: max(0px, calc((100vw - 78rem) / 2));
+      width: calc(var(--chat-width) + 1.25rem);
+      padding: max(var(--space-4), env(safe-area-inset-top)) 1.25rem
+               max(var(--space-4), env(safe-area-inset-bottom)) 0;
+    }
+    .col-chat .chat { height: 100%; }
+  }
+
+  .chat {
+    display: flex;
+    flex-direction: column;
+    /* The window, less the back link and the tabs above it on a phone. */
+    height: calc(100dvh - 8.5rem);
+    min-height: 20rem;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 1px 2px var(--shadow-soft);
+    overflow: hidden;
+  }
+  .chat-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--rule);
+    font-size: var(--text-2xs);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    font-weight: 700;
+    color: var(--muted);
+  }
+  .chat-head a { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--accent); text-decoration: none; }
+  .chat-log {
+    flex: 1;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    list-style: none;
+    margin: 0;
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .chat-msg {
+    max-width: 88%;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .chat-msg.mine {
+    align-self: flex-end;
+    white-space: pre-wrap;
+    background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+    border-bottom-right-radius: var(--space-1);
+  }
+  .chat-msg.theirs {
+    align-self: flex-start;
+    white-space: pre-wrap;
+    background: var(--panel-2);
+    border: 1px solid var(--rule);
+    border-bottom-left-radius: var(--space-1);
+  }
+  .chat-msg.theirs.prose { white-space: normal; }
+  .chat-tool {
+    align-self: flex-start;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: var(--text-2xs);
+    padding-left: var(--space-3);
+  }
+  .chat-tool::before { content: "\21B3  "; }
+  .chat-session {
+    align-self: center;
+    color: var(--muted);
+    font-size: var(--text-2xs);
+    margin: var(--space-2) 0;
+  }
+  .chat-empty { color: var(--muted); text-align: center; margin: auto; padding: var(--space-4); font-size: var(--text-sm); }
+  .chat-typing { align-self: flex-start; display: flex; gap: var(--space-1); padding: var(--space-2) var(--space-3); }
+  .chat-typing[hidden] { display: none; }
+  .chat-typing span {
+    width: .4rem; height: .4rem; border-radius: 999px; background: var(--muted);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .chat-typing span:nth-child(2) { animation-delay: .2s; }
+  .chat-typing span:nth-child(3) { animation-delay: .4s; }
+  @media (prefers-reduced-motion: reduce) { .chat-typing span { animation: none; } }
+  .chat-error { margin: 0 var(--space-3) var(--space-3); }
+  .chat-compose {
+    display: flex;
+    gap: var(--space-2);
+    align-items: flex-end;
+    margin: 0;
+    padding: var(--space-3);
+    border-top: 1px solid var(--rule);
+  }
+  .chat-compose textarea { flex: 1; margin: 0; resize: none; min-height: 2.9rem; max-height: 10rem; }
+  .chat-compose button { flex: 0 0 auto; min-height: 2.9rem; }
+
   /* Finished tasks are hidden until asked for — see project_detail.html. */
   :root:not([data-finished="shown"]) #task-tree li.finished { display: none; }
   :root:not([data-finished="shown"]) .when-finished-shown,
@@ -534,30 +682,6 @@
   /* Someone who has asked for less motion still gets the dot and the label. */
   @media (prefers-reduced-motion: reduce) {
     .status.live .pip { animation: none; }
-  }
-
-  /* The project's own standing conversation. Sized and coloured like the
-     primary button it stands in for, not like the small activity pill a
-     task's own busy marker uses — this is the one action on the page, not
-     a status report. */
-  .conversation-banner {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    text-decoration: none;
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 12%, var(--panel));
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--rule));
-    border-radius: var(--radius-lg);
-    padding: var(--space-4) var(--space-4);
-    font-weight: 650;
-    margin-bottom: var(--space-6);
-    transition: box-shadow .15s ease, transform .15s ease;
-  }
-  .conversation-banner:hover { box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 25%, transparent); transform: translateY(-1px); }
-  .conversation-banner .pip { animation: pulse 1.6s ease-in-out infinite; }
-  @media (prefers-reduced-motion: reduce) {
-    .conversation-banner .pip { animation: none; }
   }
 
   /* Setup warnings. Above the rate-limit panel deliberately: a window that is
@@ -846,7 +970,7 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap {% block wrap_class %}{% endblock %}">
   {% block back %}{% endblock %}
   {% if error %}<p class="msg error">{{ error }}</p>{% endif %}
   {% if notice %}<p class="msg notice">{{ notice }}</p>{% endif %}

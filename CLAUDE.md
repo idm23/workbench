@@ -454,6 +454,17 @@ is keyed to the directory it was issued in. A new run rather than a resurrection
 old one, so the record of what happened stays what happened. So a dialog is something a
 person chooses, not something every run waits around on the chance of.
 
+**The project chat is always visible, and never kept running.** It sits beside the task
+tree (two columns on a computer, a tab on a phone) and reads every conversation run of the
+project as one thread (`runs/chat.py`). Sending a message types it into the running session
+if there is one, and otherwise starts a run that resumes the same session with that message
+as its opening. Keeping a process alive between messages was considered and bought
+nothing. An idle session spends no tokens either way. And the prompt cache does not
+outlive a pause of more than a few minutes, so the first message after a break re-sends
+the whole transcript whether or not the process stayed up. What staying up *would* cost
+is a slot. The project chat has a slot of its own for the same reason: a chat that queued
+behind task runs, or stopped them starting, would be no use for talking about them.
+
 **An agent can now ask a question, and that is the same decision rather than a reversal
 of it.** Agents said outright, in real runs here, that there was no way to reach the
 person — and every prompt told them so, because asking did nothing. Now an execute run
@@ -1226,9 +1237,12 @@ than no list at all.
   on first load — and gets the rest exactly once. A phone that sleeps through half a run
   loses nothing, and reading a run back a week later is the same query with a different
   number in it.
-- **Nothing caps concurrency.** `max_concurrent_runs` defaults to 2, and `start` reaps
+- **Nothing caps concurrency.** `max_concurrent_runs` defaults to 5, and `start` reaps
   before checking it — otherwise a run killed mid-flight holds a slot forever and the cap
-  becomes a way to lock yourself out.
+  becomes a way to lock yourself out. A project's own conversation is not counted: it is
+  the chat beside the tree, one per project, and it must neither queue behind task runs
+  nor stop them starting. A task's Discuss conversation is counted, because it is work on
+  that task.
 - **Store token and cost per run.** `runs.total_cost_usd` and `runs.num_turns` exist. A
   backend that reports neither leaves them null rather than zero.
 - **`open/active/done` has nowhere for a failed or cancelled run.** Task statuses are

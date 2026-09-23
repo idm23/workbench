@@ -563,10 +563,11 @@ def default_executor() -> str:
     return DEFAULT_EXECUTOR
 
 
-#: How many runs may be active at once, across every project. Runs bill a
-#: subscription, so what three simultaneous agents waste is a rate-limit window
-#: shared with everything else on the account — not a few dollars.
-DEFAULT_MAX_CONCURRENT_RUNS = 2
+#: How many task runs may be active at once, across every project. Runs bill a
+#: subscription, so what too many simultaneous agents waste is a rate-limit
+#: window shared with everything else on the account, not a few dollars. A
+#: project's own conversation is not counted: see `runs_holding_a_slot`.
+DEFAULT_MAX_CONCURRENT_RUNS = 5
 
 
 def max_concurrent_runs() -> int:

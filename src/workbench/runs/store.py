@@ -65,15 +65,29 @@ def create_run(
     return run
 
 
-def create_conversation(db: Session, project: Project, backend: str) -> Run:
+def create_conversation(
+    db: Session, project: Project, backend: str, seed_message: str | None = None
+) -> Run:
     """Record the intent to talk to a project directly — the conversation
     counterpart to `create_run`, with a project instead of a task and no
-    phase to choose (`RunPhase.CONVERSATION` is the only one there is)."""
+    phase to choose (`RunPhase.CONVERSATION` is the only one there is).
+
+    `seed_message` is what someone typed to start it, from the chat beside
+    the task tree; see `prompts.seeded_conversation_prompt`."""
     run = Run(
-        project_id=project.id, phase=RunPhase.CONVERSATION, backend=backend, status=RunStatus.QUEUED
+        project_id=project.id,
+        phase=RunPhase.CONVERSATION,
+        backend=backend,
+        status=RunStatus.QUEUED,
+        seed_message=seed_message,
     )
     db.add(run)
     db.commit()
+    if seed_message:
+        # Recorded as the chat's own message now, before anything starts the
+        # runner: this is the only moment the web process is certainly the
+        # run's one writer, which is what `next_seq` relies on.
+        append_event(db, run.id, RunEventKind.INPUT, {"text": seed_message})
     return run
 
 

@@ -285,3 +285,14 @@ def conversation_prompt(owner: str, repo: str) -> str:
         "This conversation runs for a while — reply to each message and "
         "then wait for the next one rather than assuming you are finished."
     )
+
+
+def seeded_conversation_prompt(owner: str, repo: str, message: str) -> str:
+    """`conversation_prompt`, opening with what the person just typed.
+
+    The chat beside the task tree starts a session only when someone sends
+    something, so there is always a first message. Handing it over as the
+    opening skips the "say you're here" round trip, which bills a reply
+    nobody asked for.
+    """
+    return f"{conversation_prompt(owner, repo)}\n\nThey wrote:\n\n{message}"

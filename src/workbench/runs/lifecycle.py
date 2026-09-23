@@ -99,6 +99,19 @@ def active_runs(db: Session) -> list[Run]:
     )
 
 
+def runs_holding_a_slot(db: Session) -> list[Run]:
+    """The active runs counted against `max_concurrent_runs`.
+
+    Every active run except a project's own conversation. That one has a slot
+    of its own: it is the chat beside the task tree, one per project at most
+    (`start_conversation` refuses a second), and a chat that had to queue
+    behind task runs, or that stopped tasks starting while someone was
+    reading it, would be no use as a place to talk about them. A task's
+    conversation (Discuss) is still counted, because it is work on that task.
+    """
+    return [run for run in active_runs(db) if run.project_id is None]
+
+
 def active_run_for_task(db: Session, task_id: int) -> Run | None:
     return db.scalars(
         select(Run)
@@ -281,7 +294,7 @@ def start_run(
         return AlreadyRunning(existing.id)
 
     limit = max_concurrent_runs()
-    running = active_runs(db)
+    running = runs_holding_a_slot(db)
     if limit > 0 and len(running) >= limit:
         return TooManyRuns(len(running), limit)
 
@@ -352,7 +365,7 @@ def continue_run(
         return AlreadyRunning(existing.id)
 
     limit = max_concurrent_runs()
-    running = active_runs(db)
+    running = runs_holding_a_slot(db)
     if limit > 0 and len(running) >= limit:
         return TooManyRuns(len(running), limit)
 
@@ -372,13 +385,13 @@ def start_conversation(
     *,
     backend: str | None = None,
     executor: str | None = None,
+    seed_message: str | None = None,
 ) -> StartResult:
     """Begin (or report) the project's own conversation.
 
-    Shares `active_runs`/`max_concurrent_runs` with task runs rather than a
-    cap of its own — a conversation held open bills the same subscription
-    window a task run does, so it is not free to leave open, and does not
-    get an exemption from what protects that window.
+    Not checked against `max_concurrent_runs`: the project's chat has a slot
+    of its own, and the one-per-project refusal below is what bounds it. See
+    `runs_holding_a_slot`.
     """
     reap(db)
 
@@ -386,15 +399,10 @@ def start_conversation(
     if existing is not None:
         return AlreadyRunning(existing.id)
 
-    limit = max_concurrent_runs()
-    running = active_runs(db)
-    if limit > 0 and len(running) >= limit:
-        return TooManyRuns(len(running), limit)
-
     # A project conversation starts fresh, so it may move like any other new
     # run. Continuing a *task's* run may not — see `choose_backend`.
     chosen = backend or choose_backend(db, project).backend
-    run = create_conversation(db, project, backend=chosen)
+    run = create_conversation(db, project, backend=chosen, seed_message=seed_message)
     return _launch(db, run, executor)
 
 
