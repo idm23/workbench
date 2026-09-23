@@ -1,0 +1,50 @@
+{#- The chat beside the task tree. Always there to type into; an agent only
+    runs while it has something to answer. See `runs/chat.py` for how the
+    runs of one conversation are read as one thread, and the script at the
+    foot of project_detail.html for how it streams. -#}
+<section class="chat" aria-label="Chat with this project">
+  <header class="chat-head">
+    <span>Chat</span>
+    <span id="chat-live" class="live-dot {{ 'on' if conversation }}">{% if conversation %}live{% endif %}</span>
+    {% if chat %}
+      {# Thinking and tool output are left out of the chat; they are all on
+         the run's own page. #}
+      <a href="/runs/{{ chat[-1].run_id }}">Full log</a>
+    {% endif %}
+  </header>
+
+  <ol class="chat-log" id="chat-log"
+      data-run="{{ conversation.id if conversation else '' }}"
+      data-after="{{ chat_after }}">
+    {% for entry in chat %}
+      {% if entry.started_at is defined %}
+        <li class="chat-session"><time datetime="{{ entry.started_at.isoformat() }}">{{ entry.started_at.strftime('%Y-%m-%d %H:%M UTC') }}</time></li>
+      {% elif entry.kind == 'input' %}
+        <li class="chat-msg mine">{{ entry.text }}</li>
+      {% elif entry.kind == 'text' %}
+        <li class="chat-msg theirs prose">{{ entry.text | markdown }}</li>
+      {% else %}
+        <li class="chat-tool">{{ entry.text }}</li>
+      {% endif %}
+    {% else %}
+      <li class="chat-empty">
+        Ask about this project, or ask for tasks to be added, split or tidied up.
+      </li>
+    {% endfor %}
+    <li class="chat-typing" id="chat-typing" hidden aria-label="The agent is replying"><span></span><span></span><span></span></li>
+  </ol>
+
+  <p class="chat-error msg error" id="chat-error" {{ 'hidden' if not chat_failed }}>
+    {%- if chat_failed %}{{ chat_failed.error or 'The last session failed before replying.' }}{% endif -%}
+  </p>
+
+  {% if checkout %}
+    <form class="chat-compose" id="chat-form" method="post" action="/projects/{{ project.id }}/chat">
+      <textarea name="message" id="chat-message" rows="1" required
+                aria-label="Message" placeholder="Message this project…"></textarea>
+      <button type="submit" class="slim">Send</button>
+    </form>
+  {% else %}
+    <p class="chat-empty">Clone the repository first: the agent works in a checkout.</p>
+  {% endif %}
+</section>

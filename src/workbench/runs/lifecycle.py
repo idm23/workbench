@@ -385,6 +385,7 @@ def start_conversation(
     *,
     backend: str | None = None,
     executor: str | None = None,
+    seed_message: str | None = None,
 ) -> StartResult:
     """Begin (or report) the project's own conversation.
 
@@ -401,7 +402,7 @@ def start_conversation(
     # A project conversation starts fresh, so it may move like any other new
     # run. Continuing a *task's* run may not — see `choose_backend`.
     chosen = backend or choose_backend(db, project).backend
-    run = create_conversation(db, project, backend=chosen)
+    run = create_conversation(db, project, backend=chosen, seed_message=seed_message)
     return _launch(db, run, executor)
 
 

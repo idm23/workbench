@@ -37,6 +37,7 @@ from workbench.agents.prompts import (
     prompt_for,
     review_prompt,
     seeded_continuation_prompt,
+    seeded_conversation_prompt,
 )
 from workbench.agents.protocol import (
     AgentEvent,
@@ -246,7 +247,11 @@ def _prepare_conversation(db: Session, run: Run) -> Prepared | NotPrepared:
         request=AgentRequest(
             worktree=checkout,
             phase=RunPhase.CONVERSATION,
-            prompt=conversation_prompt(project.owner, project.repo),
+            prompt=(
+                seeded_conversation_prompt(project.owner, project.repo, run.seed_message)
+                if run.seed_message
+                else conversation_prompt(project.owner, project.repo)
+            ),
             resume_token=resume_token_for_project(db, project.id, run.backend),
             model=_model_for(run, node),
             endpoint=node.url if node else None,

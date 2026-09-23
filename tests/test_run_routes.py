@@ -18,6 +18,9 @@ from workbench.database.models import (
     Base,
     Project,
     Run,
+    RunEvent,
+    RunEventKind,
+    RunInput,
     RunPhase,
     RunStatus,
     Task,
@@ -1574,35 +1577,108 @@ def test_talking_to_a_missing_project_is_a_404(client, session):
     assert client.post("/projects/9999/conversation").status_code == 404
 
 
-def test_nothing_offers_to_talk_before_the_project_is_cloned(client, session):
+def test_nothing_offers_to_chat_before_the_project_is_cloned(client, session):
     """There is nowhere for the conversation to run yet."""
     project = a_project(session)
 
     page = client.get(f"/projects/{project.id}").text
 
-    assert "Talk to this project" not in page
+    assert f'action="/projects/{project.id}/chat"' not in page
+    assert "Clone the repository first" in page
 
 
-def test_a_cloned_project_offers_to_talk(client, session, cloned):
+def test_a_cloned_project_has_a_chat_to_type_into(client, session, cloned):
     project = a_project(session)
 
     page = client.get(f"/projects/{project.id}").text
 
-    assert f'action="/projects/{project.id}/conversation"' in page
-    assert "Talk to this project" in page
+    assert f'action="/projects/{project.id}/chat"' in page
 
 
-def test_a_project_page_offers_to_continue_an_active_conversation(
+def test_the_first_message_starts_a_session_that_opens_with_it(client, session, cloned, executor):
+    """No generic check-in turn: the agent sees what was typed as the opening."""
+    project = a_project(session)
+
+    response = client.post(
+        f"/projects/{project.id}/chat",
+        data={"message": "What is left to do?"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    run = session.get(Run, response.json()["run"])
+    assert run.project_id == project.id
+    assert run.phase is RunPhase.CONVERSATION
+    assert run.seed_message == "What is left to do?"
+    # First, and written before the runner was launched: the web process is
+    # only certainly the run's one writer until then.
+    first = session.query(RunEvent).filter_by(run_id=run.id).order_by(RunEvent.seq).first()
+    assert first.seq == 1
+    assert first.kind is RunEventKind.INPUT
+    assert first.payload == {"text": "What is left to do?"}
+
+
+def test_a_message_goes_into_the_session_already_running(client, session, cloned, executor):
+    from workbench.runs.store import mark_running
+
+    project = a_project(session)
+    first = client.post(
+        f"/projects/{project.id}/chat",
+        data={"message": "Hello"},
+        headers={"Accept": "application/json"},
+    ).json()["run"]
+    mark_running(session, session.get(Run, first))
+
+    second = client.post(
+        f"/projects/{project.id}/chat",
+        data={"message": "And another thing"},
+        headers={"Accept": "application/json"},
+    ).json()["run"]
+
+    assert second == first
+    assert [row.body for row in session.query(RunInput).filter_by(run_id=first)] == [
+        "And another thing"
+    ]
+
+
+def test_an_empty_message_is_refused(client, session, cloned, executor):
+    project = a_project(session)
+
+    response = client.post(
+        f"/projects/{project.id}/chat",
+        data={"message": "   "},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 409
+    assert session.query(Run).count() == 0
+
+
+def test_the_chat_form_works_without_script(client, session, cloned, executor):
+    project = a_project(session)
+
+    response = client.post(f"/projects/{project.id}/chat", data={"message": "Hello"})
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/projects/{project.id}"
+
+
+def test_the_page_streams_a_running_session_from_where_it_rendered(
     client, session, cloned, executor
 ):
     project = a_project(session)
-    client.post(f"/projects/{project.id}/conversation")
+    run = client.post(
+        f"/projects/{project.id}/chat",
+        data={"message": "Hello"},
+        headers={"Accept": "application/json"},
+    ).json()["run"]
 
     page = client.get(f"/projects/{project.id}").text
+    last = max(e.seq for e in session.query(RunEvent).filter_by(run_id=run))
 
-    assert "Continue conversation" in page
-    assert "/runs/1" in page
-    assert "Talk to this project" not in page
+    assert f'data-run="{run}"' in page
+    assert f'data-after="{last}"' in page
+    assert "Hello" in page
 
 
 def test_a_project_scoped_run_page_renders_without_a_task(client, session, executor):
