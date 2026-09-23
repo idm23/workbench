@@ -84,7 +84,6 @@ class TaskNode:
             return TaskStatus.DONE
         return TaskStatus.ACTIVE
 
-
     @property
     def is_finished(self) -> bool:
         """Done or cancelled, and so is everything under it.
