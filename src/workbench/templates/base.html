@@ -228,6 +228,22 @@
     box-shadow: none;
   }
   button.danger:hover { background: var(--danger-bg); border-color: var(--danger); box-shadow: none; }
+  /* Pressed and waiting for the next page. Every action is a form POST that
+     returns a whole page, and on a phone that gap reads as "did that
+     register?" — see the submit listener at the bottom of this file. */
+  button[aria-busy="true"] {
+    cursor: progress;
+    opacity: .6;
+    transform: none;
+    animation: pressed 1.2s ease-in-out infinite;
+  }
+  @keyframes pressed {
+    0%, 100% { opacity: .65; }
+    50% { opacity: .4; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    button[aria-busy="true"] { animation: none; }
+  }
   button.slim { width: auto; min-height: 2.3rem; padding: .4rem .9rem; font-size: .85rem; border-radius: .55rem; }
   /* A link styled to sit in the same action row as the slim buttons above —
      "View PR" leaves the app, so it is an <a> rather than a form button, but
@@ -723,6 +739,15 @@
   @media (prefers-reduced-motion: reduce) {
     .live-dot.on::before { animation: none; }
   }
+  /* Same-origin navigations animate instead of flashing, so approving a plan
+     reads as a state change rather than a page load. Browsers without it
+     (Firefox, for now) get exactly the old behaviour. Task rows carry their
+     own `view-transition-name` in project_detail.html so they keep their
+     identity across the navigation rather than the whole page cross-fading. */
+  @media (prefers-reduced-motion: no-preference) {
+    @view-transition { navigation: auto; }
+    ::view-transition-group(*) { animation-duration: .18s; }
+  }
 </style>
 </head>
 <body>
@@ -747,11 +772,43 @@
   (function () {
     history.scrollRestoration = "manual";
 
-    document.addEventListener("submit", function () {
+    document.addEventListener("submit", function (event) {
       // The query string is excluded on purpose: `_redirect` appends
       // `?notice=...`/`?error=...` to the same path the form was on, and the
       // saved offset should still be found when that lands back here.
       sessionStorage.setItem("scrollY:" + location.pathname, String(window.scrollY));
+      markBusy(event);
+    });
+
+    // Acknowledge the press now, rather than when the next page arrives.
+    // `aria-busy` rather than `disabled`: the entry list is built *after* the
+    // submit event, and a disabled submitter would drop its own name/value
+    // from it. A second submit of the same form is refused instead, which is
+    // the other thing `disabled` would have bought.
+    function markBusy(event) {
+      var form = event.target;
+      if (event.defaultPrevented) return;
+      if (form.dataset.busy) { event.preventDefault(); return; }
+      form.dataset.busy = "1";
+      var button = event.submitter || form.querySelector('button[type="submit"], button:not([type])');
+      if (button) button.setAttribute("aria-busy", "true");
+      // A navigation that never lands — stopped, or dropped offline — fires
+      // nothing on this page, so give the button back rather than leave a dead
+      // row. Long enough that a slow success does not flicker back first.
+      window.setTimeout(function () { release(form); }, 15000);
+    }
+
+    function release(form) {
+      delete form.dataset.busy;
+      form.querySelectorAll('[aria-busy="true"]').forEach(function (button) {
+        button.removeAttribute("aria-busy");
+      });
+    }
+
+    // Coming back with the back button can restore this page from the
+    // back/forward cache exactly as it was left: mid-press.
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted) document.querySelectorAll("form[data-busy]").forEach(release);
     });
 
     var key = "scrollY:" + location.pathname;
