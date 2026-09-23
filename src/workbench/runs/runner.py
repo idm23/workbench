@@ -51,7 +51,6 @@ from workbench.agents.protocol import (
 from workbench.agents.registry import UnknownBackend, get_backend
 from workbench.config import (
     agent_environment,
-    billing_mode,
     github_token,
     input_idle_seconds,
     local_model_override,
@@ -1103,12 +1102,11 @@ def record(db: Session, run: Run, ending: Ending) -> Run:
 def execute(db: Session, run: Run) -> Run:
     """One run, start to finish, always ending in a recorded outcome."""
     mark_running(db, run)
-    append_event(
-        db,
-        run.id,
-        RunEventKind.NOTICE,
-        {"text": f"Backend {run.backend}, billing {billing_mode()}."},
-    )
+    # An unknown backend spends nothing and says so in a moment, when
+    # `prepare` refuses it by name.
+    backend = get_backend(run.backend)
+    spends = "" if isinstance(backend, UnknownBackend) else f", {backend.billing_notice}"
+    append_event(db, run.id, RunEventKind.NOTICE, {"text": f"Backend {run.backend}{spends}."})
 
     prepared = prepare(db, run)
     if isinstance(prepared, NotPrepared):

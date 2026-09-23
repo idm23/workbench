@@ -720,6 +720,11 @@ class LocalBackend:
     def name(self) -> str:
         return BACKEND_NAME
 
+    @property
+    def billing_notice(self) -> str:
+        """A run spends a GPU and a wall clock, which is the point of having it."""
+        return "spending a GPU and a wall clock, billing nothing"
+
     def credential_status(self) -> CredentialStatus:
         """Whether a run started now would reach a model, and which one.
 

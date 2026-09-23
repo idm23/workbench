@@ -330,3 +330,15 @@ class Backend(Protocol):
         `tests/test_seam.py` asserts that in both directions.
         """
         ...
+
+    @property
+    def billing_notice(self) -> str:
+        """What a run on this backend spends, as a clause for its first notice.
+
+        A backend's question rather than the machine's: `config.billing_mode`
+        says which way a Claude run bills, and quoting it for every backend had
+        a local run announcing a subscription it never touches. The runner
+        writes it as "Backend <name>, <billing_notice>." so it reads as a
+        lowercase clause with no full stop.
+        """
+        ...

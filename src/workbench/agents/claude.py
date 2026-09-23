@@ -58,7 +58,13 @@ from workbench.agents.protocol import (
     CredentialStatus,
     SubtaskProposal,
 )
-from workbench.config import agent_environment, bills_subscription, claude_login_dir, port
+from workbench.config import (
+    agent_database,
+    agent_environment,
+    bills_subscription,
+    claude_login_dir,
+    port,
+)
 from workbench.database.models import RunEventKind, RunPhase
 
 logger = logging.getLogger(__name__)
@@ -359,6 +365,9 @@ def _env_for(request: AgentRequest) -> dict[str, str]:
         "WORKBENCH_PROJECT_ID": str(request.project_id),
         "WORKBENCH_API_BASE": f"http://127.0.0.1:{port()}",
     }
+    # Laid over the runner's environment, which still names the real database
+    # because the runner writes to it. See `agent_database`.
+    env["WORKBENCH_DB"] = str(agent_database(request.worktree))
     if request.login:
         directory = claude_login_dir(request.login)
         if directory is not None:
@@ -735,6 +744,13 @@ class ClaudeBackend:
     @property
     def name(self) -> str:
         return BACKEND_NAME
+
+    @property
+    def billing_notice(self) -> str:
+        """Which account pays is decided by `config.billing_mode`, not here."""
+        if bills_subscription():
+            return "billing a Claude subscription"
+        return "billing the metered API"
 
     def credential_status(self) -> CredentialStatus:
         """Ask the CLI who it would authenticate as. See the protocol's note.

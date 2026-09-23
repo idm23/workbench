@@ -8,7 +8,14 @@ entirely — would move every run onto metered billing with nothing in Workbench
 changing to show it. The first sign would be an invoice.
 """
 
-from workbench.config import agent_environment, billing_mode, bills_subscription
+from pathlib import Path
+
+from workbench.config import (
+    agent_database,
+    agent_environment,
+    billing_mode,
+    bills_subscription,
+)
 
 
 def test_subscription_is_the_default(monkeypatch):
@@ -73,3 +80,39 @@ def test_the_returned_environment_is_a_copy(monkeypatch):
     agent_environment(base)["HOME"] = "/elsewhere"
 
     assert base == {"HOME": "/home/ian"}
+
+
+def test_an_agent_never_sees_this_instances_database(monkeypatch, tmp_path):
+    """The runner writes to the real database; what the agent runs must not (#87).
+
+    Overridden rather than removed: unset, the deployment's own code falls back
+    to `repo_root()`, which is the real database again.
+    """
+    production = tmp_path / "data" / "workbench.db"
+    monkeypatch.setenv("WORKBENCH_DB", str(production))
+    worktree = tmp_path / "data" / "worktrees" / "task-9-thing"
+
+    env = agent_environment({"WORKBENCH_DB": str(production)}, worktree=worktree)
+
+    assert env["WORKBENCH_DB"] != str(production)
+    assert env["WORKBENCH_DB"] == str(agent_database(worktree))
+    assert not Path(env["WORKBENCH_DB"]).is_relative_to(worktree)
+    assert Path(env["WORKBENCH_DB"]).parent.is_dir()
+
+
+def test_the_runner_keeps_the_real_database(monkeypatch, tmp_path):
+    """Without a worktree this is the runner pruning its own environment."""
+    monkeypatch.delenv("WORKBENCH_BILLING", raising=False)
+    production = str(tmp_path / "workbench.db")
+
+    assert agent_environment({"WORKBENCH_DB": production})["WORKBENCH_DB"] == production
+
+
+def test_each_worktree_gets_its_own_scratch_database(monkeypatch, tmp_path):
+    monkeypatch.setenv("WORKBENCH_DB", str(tmp_path / "data" / "workbench.db"))
+
+    first = agent_database(tmp_path / "task-1-one")
+    second = agent_database(tmp_path / "task-2-two")
+
+    assert first != second
+    assert agent_database(tmp_path / "task-1-one") == first
