@@ -102,6 +102,25 @@ as a person produces a working manual test and a unit that is still unpaired.
 The unit is installed and enabled but deliberately not started until pairing has happened:
 a client pointed at a machine that will not accept it restarts every five seconds forever.
 
+### A controller
+
+Also one-time, and also over SSH — the only thing that needs your hands is the controller's
+own pairing button. The installer has already switched the radio on: Raspberry Pi OS ships
+Bluetooth soft-blocked and restores that block at every boot, so `bluetoothctl power on`
+fails with a bare `org.bluez.Error.Failed` until something unblocks it, and nothing says so.
+The doctor now does.
+
+```sh
+bluetoothctl --timeout 60 scan on     # put the controller in pairing mode now
+bluetoothctl devices                  # find it by name, e.g. "Pro Controller"
+bluetoothctl trust <address>          # trusted: it reconnects by itself from now on
+bluetoothctl pair <address>
+bluetoothctl connect <address>
+```
+
+Moonlight passes it to the gaming node, where Sunshine creates a matching virtual pad — a
+Switch Pro Controller arrives as `Sunshine (libvirtualhid) Nintendo Pro Controller`.
+
 ## Installing one
 
 On a fresh Ubuntu Server machine with an NVIDIA card:
@@ -252,6 +271,7 @@ journalctl -u ollama -f
 | A node's `last seen` is hours old | Its deploy timer has stopped; the node re-registers on every tick, so a stale time means the timer, not the model server |
 | Runs fail asking for a model the node hasn't got | `WORKBENCH_LOCAL_MODEL` is set on the head and overrides what the node reports — unset it, or pull that model on the node |
 | A plan is fluent and about the wrong thing, a run replies with nothing, or the model asks whether there has been a user query yet | The model lost its task to a too-small context window. The run's log says so ("dropping the oldest messages to fit"). Raise `WORKBENCH_INFERENCE_CONTEXT_TOKENS` in `/etc/workbench/env` on the node; the next deploy tick rewrites the drop-in and restarts Ollama. `ollama ps` on the node shows the window actually in use |
+| A 1 TB machine reports a few dozen GB free | Ubuntu Server's installer gives `/` a 100 GB logical volume and leaves the rest of the disk unallocated. The doctor names the volume and the command: `sudo lvextend -r -l +100%FREE <volume>`, which grows it and its filesystem while running |
 
 ## The security note worth reading once
 

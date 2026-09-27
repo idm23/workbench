@@ -687,11 +687,66 @@ def test_a_node_that_offers_inference_and_does_not_answer_still_fails(monkeypatc
     assert "none answered" in check.detail
 
 
-def test_steam_installed_passes(monkeypatch):
+@pytest.fixture
+def steam_home(tmp_path, monkeypatch):
+    """Steam installed, for a gaming account whose home is this test's own."""
     monkeypatch.setattr(
-        doctor.shutil, "which", lambda name: "/usr/bin/steam" if name == "steam" else None
+        doctor.shutil, "which", lambda name: "/usr/games/steam" if name == "steam" else None
     )
-    assert doctor.check_steam().state is CheckState.OK
+    monkeypatch.setattr(doctor, "gaming_user", lambda: "ian")
+
+    class Account:
+        pw_dir = str(tmp_path)
+
+    monkeypatch.setattr(doctor.pwd, "getpwnam", lambda name: Account())
+    return tmp_path
+
+
+def test_steam_that_has_never_run_is_not_ready(steam_home):
+    """Installed and green was the whole check once - for the entire time
+    Steam had never run, its first launch a dialog nobody could see."""
+    check = doctor.check_steam()
+
+    assert check.state is CheckState.WARN
+    assert "never run" in check.detail
+    assert check.fix is not None and "workbench-steam" in check.fix
+
+
+def test_steam_nobody_signed_in_to_says_how(steam_home):
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).parent.mkdir(parents=True)
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).write_text("")
+
+    check = doctor.check_steam()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "QR" in check.fix
+
+
+def test_steam_signed_in_is_ready_and_says_as_whom(steam_home):
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).parent.mkdir(parents=True)
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).write_text("")
+    (steam_home / doctor.STEAM_LOGINS).parent.mkdir(parents=True)
+    (steam_home / doctor.STEAM_LOGINS).write_text(
+        '"users"\n{\n\t"76561198085660128"\n\t{\n\t\t"AccountName"\t\t"cmac433"\n'
+        '\t\t"PersonaName"\t\t"newf"\n\t}\n}\n'
+    )
+
+    check = doctor.check_steam()
+
+    assert check.state is CheckState.OK
+    assert "newf" in check.detail
+
+
+def test_a_home_the_doctor_cannot_read_is_unknown_not_missing(steam_home, monkeypatch):
+    """0750 homes are Ubuntu's default, and the doctor often runs as the
+    service account. Not being able to look is not the same as not there."""
+
+    def denied(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(doctor.Path, "exists", denied)
+
+    assert doctor.check_steam().state is CheckState.UNKNOWN
 
 
 def test_steam_missing_warns_with_the_install_command(monkeypatch):
@@ -942,7 +997,10 @@ def test_the_client_audio_check_is_happy_about_hdmi(monkeypatch):
     assert doctor.check_client_audio().state is CheckState.OK
 
 
-def test_the_client_unit_check_reports_whether_it_is_streaming(monkeypatch):
+def test_the_client_unit_check_says_running_and_never_streaming(monkeypatch):
+    """`is-active` knows the process is alive, not that a picture is leaving it.
+    A client sat unpaired for twelve days while this said "streaming now"."""
+
     class Result:
         returncode = 0
         stderr = ""
@@ -958,7 +1016,8 @@ def test_the_client_unit_check_reports_whether_it_is_streaming(monkeypatch):
 
     check = doctor.check_client_unit()
     assert check.state is CheckState.OK
-    assert "streaming now" in check.detail
+    assert "running" in check.detail
+    assert "streaming" not in check.detail
 
 
 def test_an_uninstalled_client_unit_is_a_warning_with_a_fix(monkeypatch):
@@ -1018,3 +1077,167 @@ def test_a_client_with_no_stream_host_says_so(monkeypatch):
     check = doctor.check_stream_host()
     assert check.state is CheckState.WARN
     assert check.fix is not None and "--stream-host" in check.fix
+
+
+def test_a_blanking_display_is_a_warning_with_the_command_that_stops_it(monkeypatch):
+    """The failure it catches looked exactly like a broken client: a solid
+    black stream, ten minutes into a session nobody was touching."""
+    monkeypatch.setattr("workbench.render.display_blanks", lambda: True)
+
+    check = doctor.check_display_never_blanks()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "xset s off s noblank -dpms" in check.fix
+
+
+def test_a_display_that_cannot_be_asked_is_unknown_not_a_warning(monkeypatch):
+    monkeypatch.setattr("workbench.render.display_blanks", lambda: None)
+
+    assert doctor.check_display_never_blanks().state is CheckState.UNKNOWN
+
+
+def _radio(root, name: str, kind: str, soft: str = "0", hard: str = "0"):
+    radio = root / name
+    radio.mkdir()
+    (radio / "type").write_text(f"{kind}\n")
+    (radio / "soft").write_text(f"{soft}\n")
+    (radio / "hard").write_text(f"{hard}\n")
+
+
+def test_a_soft_blocked_bluetooth_radio_warns_with_the_unblock(tmp_path, monkeypatch):
+    """What homebox-node-2 reported, via `rfkill list`, with a controller in
+    hand: Bluetooth and Wi-Fi both soft-blocked, as Raspberry Pi OS ships."""
+    _radio(tmp_path, "rfkill0", "bluetooth", soft="1")
+    _radio(tmp_path, "rfkill1", "wlan", soft="1")
+    monkeypatch.setattr(doctor, "RFKILL_DIR", tmp_path)
+
+    check = doctor.check_bluetooth()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "rfkill unblock bluetooth" in check.fix
+
+
+def test_an_unblocked_bluetooth_radio_passes_whatever_wifi_is_doing(tmp_path, monkeypatch):
+    """Wi-Fi blocked is fine on a client wired to the television's switch."""
+    _radio(tmp_path, "rfkill0", "bluetooth")
+    _radio(tmp_path, "rfkill1", "wlan", soft="1")
+    monkeypatch.setattr(doctor, "RFKILL_DIR", tmp_path)
+
+    assert doctor.check_bluetooth().state is CheckState.OK
+
+
+def test_no_bluetooth_radio_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "RFKILL_DIR", tmp_path / "absent")
+
+    assert doctor.check_bluetooth().state is CheckState.UNKNOWN
+
+
+#: homebox-node-1's own `lsblk` tree: a 1 TB disk whose root volume Ubuntu
+#: Server's installer made 100 GB, leaving ~850 GB that nothing could use.
+NODE_1_LSBLK = {
+    "blockdevices": [
+        {
+            "name": "nvme0n1",
+            "path": "/dev/nvme0n1",
+            "size": 1024209543168,
+            "type": "disk",
+            "mountpoint": None,
+            "children": [
+                {
+                    "name": "nvme0n1p1",
+                    "path": "/dev/nvme0n1p1",
+                    "size": 1127219200,
+                    "type": "part",
+                    "mountpoint": "/boot/efi",
+                },
+                {
+                    "name": "nvme0n1p2",
+                    "path": "/dev/nvme0n1p2",
+                    "size": 2147483648,
+                    "type": "part",
+                    "mountpoint": "/boot",
+                },
+                {
+                    "name": "nvme0n1p3",
+                    "path": "/dev/nvme0n1p3",
+                    "size": 1020932390912,
+                    "type": "part",
+                    "mountpoint": None,
+                    "children": [
+                        {
+                            "name": "ubuntu--vg-ubuntu--lv",
+                            "path": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+                            "size": 107374182400,
+                            "type": "lvm",
+                            "mountpoint": "/",
+                        }
+                    ],
+                },
+            ],
+        }
+    ]
+}
+
+
+def _lsblk(monkeypatch, tree, returncode: int = 0):
+    stdout = json.dumps(tree) if tree is not None else ""
+    result = subprocess.CompletedProcess(["lsblk"], returncode, stdout=stdout, stderr="")
+    monkeypatch.setattr(doctor, "_run", lambda argv, **k: result)
+
+
+def test_a_root_volume_given_a_tenth_of_its_disk_warns_with_the_command(monkeypatch):
+    """Steam said "46 GB free" on a 1 TB disk, and nothing said why."""
+    _lsblk(monkeypatch, NODE_1_LSBLK)
+
+    check = doctor.check_disk_allocated()
+
+    assert check.state is CheckState.WARN
+    assert "851 GB" in check.detail
+    assert check.fix == "sudo lvextend -r -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv"
+
+
+def test_a_root_volume_that_fills_its_partition_passes(monkeypatch):
+    tree = json.loads(json.dumps(NODE_1_LSBLK))
+    partition = tree["blockdevices"][0]["children"][2]
+    partition["children"][0]["size"] = partition["size"] - 4 * 1024**2
+
+    _lsblk(monkeypatch, tree)
+
+    assert doctor.check_disk_allocated().state is CheckState.OK
+
+
+def test_a_root_on_a_plain_partition_has_nothing_held_back(monkeypatch):
+    _lsblk(
+        monkeypatch,
+        {
+            "blockdevices": [
+                {
+                    "name": "mmcblk0",
+                    "size": 64 * 1024**3,
+                    "type": "disk",
+                    "mountpoint": None,
+                    "children": [
+                        {
+                            "name": "mmcblk0p2",
+                            "size": 63 * 1024**3,
+                            "type": "part",
+                            "mountpoint": "/",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert doctor.check_disk_allocated().state is CheckState.OK
+
+
+def test_no_lsblk_is_unknown(monkeypatch):
+    _lsblk(monkeypatch, None, returncode=1)
+
+    assert doctor.check_disk_allocated().state is CheckState.UNKNOWN
+
+
+def test_every_machine_is_asked_about_its_disk():
+    assert doctor.check_disk_allocated in doctor.HEAD_CHECKS
+    assert doctor.check_disk_allocated in doctor.NODE_CHECKS

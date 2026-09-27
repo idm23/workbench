@@ -542,6 +542,13 @@ unit was correctly re-rendered to read `/etc/workbench/env`, and the page still 
 there were no keys, because nobody had a reason to re-run `install.sh`. Anything the
 installer creates that a deploy does not converge is a step waiting to be forgotten.
 
+The fourth was a client node's unit, and it was the most expensive of the four: the
+change to Moonlight Embedded deployed, the unit that still ran `moonlight-qt` did not
+change, and the television stayed black for twelve days while that unit reported
+`active` and the doctor reported "streaming now". `converge_client_unit()` now runs on
+every tick, restarts what it rewrites, and the doctor says *running* — which is all
+`is-active` ever knew.
+
 **Data model**, as built rather than as sketched:
 
 ```

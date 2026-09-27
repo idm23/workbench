@@ -193,10 +193,11 @@ def test_a_node_reregisters_on_every_deploy_tick(monkeypatch):
     assert registered == [1]
 
 
-def test_a_broken_model_server_does_not_fail_a_deploy(monkeypatch, caplog):
+def test_a_broken_model_server_does_not_fail_a_deploy(offering, monkeypatch, caplog):
     """The node is still updated and still reachable. A model server needing
     attention is a thing to say, not a reason to leave a checkout half
     deployed at 3am with nobody watching."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
 
     def explode() -> bool:
         raise RuntimeError("ollama is not installed")
@@ -268,6 +269,7 @@ def test_a_client_node_serves_no_model(offering, monkeypatch):
     machine whose job is to *display* a stream."""
     monkeypatch.setenv("WORKBENCH_ROLE", "node")
     offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
 
     assert is_client_node()
     assert not is_inference_node()
@@ -307,6 +309,7 @@ def test_client_is_a_known_capability(offering, monkeypatch, caplog):
     """A typo is warned about and dropped; `client` must not be one of them."""
     monkeypatch.setenv("WORKBENCH_ROLE", "node")
     offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
 
     with caplog.at_level("WARNING"):
         assert CLIENT in declared_capabilities()
@@ -345,13 +348,14 @@ def test_a_head_gets_no_switch_however_it_is_declared(offering, monkeypatch):
     assert f"{gaming_unit_name()}.service" not in [name for name, _ in install.units()]
 
 
-def test_a_deploy_does_not_take_the_gpu_back_mid_game(monkeypatch, caplog):
+def test_a_deploy_does_not_take_the_gpu_back_mid_game(offering, monkeypatch, caplog):
     """The one thing a five-minute timer must not converge unannounced.
 
     Rewriting the drop-in restarts ollama, which takes the VRAM back from
     underneath whoever is playing. The next idle tick converges it instead —
     deciding from state, which is what these ticks already do.
     """
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
     converged: list[int] = []
     registered: list[int] = []
     monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: True)
@@ -369,7 +373,8 @@ def test_a_deploy_does_not_take_the_gpu_back_mid_game(monkeypatch, caplog):
     assert gaming_unit_name() in caplog.text
 
 
-def test_an_idle_node_converges_normally(monkeypatch):
+def test_an_idle_node_converges_normally(offering, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
     converged: list[int] = []
     monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: False)
     monkeypatch.setattr(
@@ -379,6 +384,102 @@ def test_an_idle_node_converges_normally(monkeypatch):
 
     assert deploy.converge_node() is None
     assert converged == [1]
+
+
+def test_a_client_only_node_never_touches_a_model_server(offering, monkeypatch):
+    """The deploy used to converge the model server on every node, so a
+    client-only Raspberry Pi with no `ollama` would have had Ollama's installer
+    piped into a shell on its first tick. The installer already asked which
+    capabilities were declared; now the deploy does too."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
+    clients: list[int] = []
+    monkeypatch.setattr(
+        "workbench.install_node.install_inference_server",
+        lambda: pytest.fail("a client-only node was handed a model server"),
+    )
+    monkeypatch.setattr(
+        "workbench.install_node.converge_client_unit", lambda: bool(clients.append(1))
+    )
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+
+    assert deploy.converge_node() is None
+    assert clients == [1]
+
+
+def test_an_inference_node_is_not_handed_a_client(offering, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference\n")
+    monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: False)
+    monkeypatch.setattr("workbench.install_node.install_inference_server", lambda: True)
+    monkeypatch.setattr(
+        "workbench.install_node.converge_client_unit",
+        lambda: pytest.fail("a node with no screen converged a client unit"),
+    )
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+
+    assert deploy.converge_node() is None
+
+
+def test_a_client_node_turns_its_bluetooth_on_every_tick(offering, monkeypatch):
+    """So a radio that came back blocked after a reboot is on again within
+    one tick, before anyone reaches for a controller."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("client\n")
+    enabled: list[int] = []
+    monkeypatch.setattr("workbench.install_node.converge_client_unit", lambda: False)
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: bool(enabled.append(1)))
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+
+    assert deploy.converge_node() is None
+    assert enabled == [1]
+
+
+def test_a_broken_client_does_not_fail_a_deploy(offering, monkeypatch, caplog):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
+    registered: list[int] = []
+
+    def explode() -> bool:
+        raise RuntimeError("systemctl exploded")
+
+    monkeypatch.setattr("workbench.install_node.converge_client_unit", explode)
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: registered.append(1))
+
+    with caplog.at_level("WARNING"):
+        assert deploy.converge_node() is None
+
+    assert "systemctl exploded" in caplog.text
+    assert registered == [1]
+
+
+def test_a_gaming_node_converges_its_render_surface(offering, monkeypatch):
+    """So a server that is blanking stops, without anyone logging in."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference,gaming\n")
+    monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: False)
+    monkeypatch.setattr("workbench.install_node.install_inference_server", lambda: True)
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+    converged: list[int] = []
+    monkeypatch.setattr(deploy.render, "converge", lambda: converged.append(1))
+
+    assert deploy.converge_node() is None
+    assert converged == [1]
+
+
+def test_a_node_that_does_not_game_has_no_render_surface_to_converge(offering, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference\n")
+    monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: False)
+    monkeypatch.setattr("workbench.install_node.install_inference_server", lambda: True)
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+    monkeypatch.setattr(
+        deploy.render, "converge", lambda: pytest.fail("no gaming, no render surface")
+    )
+
+    assert deploy.converge_node() is None
 
 
 def test_a_machine_without_systemd_is_never_busy(monkeypatch):

@@ -32,6 +32,20 @@ Section "Monitor"
     Identifier "WorkbenchMonitor"
     HorizSync 30-90
     VertRefresh 50-75
+    Option "DPMS" "false"
+EndSection
+
+# Never blank and never power the "monitor" down. Xorg's defaults blank after ten
+# idle minutes and then switch DPMS off, and a display nobody is sitting at is
+# idle by definition: a stream carries no local input, so the node went black
+# ten minutes into every session that was only being watched. Captured, that
+# is a solid black frame - indistinguishable from a broken client, and it was
+# diagnosed as one first.
+Section "ServerFlags"
+    Option "BlankTime" "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime" "0"
 EndSection
 
 Section "Screen"

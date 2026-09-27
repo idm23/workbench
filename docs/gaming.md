@@ -18,7 +18,9 @@ Everything a plain node already is (see `docs/nodes.md`), plus:
   no monitor. `x11-dummy` is the default: a virtual X11 display plus NvFBC capture, chosen
   for being the deeper community precedent specifically for Sunshine on NVIDIA, not because
   it is the newer or lighter option. See `render.py`'s own docstring before touching this.
-- **Steam and Sunshine themselves.**
+- **Steam and Sunshine themselves**, and Steam actually *running*: `workbench-steam.service`,
+  a unit of the gaming user's own, starts it in Big Picture at boot. Nothing used to — a
+  gaming node installed Steam and never once ran it.
 - **An audio server.** A node has no sound card, so PipeWire starts with no sink and
   Sunshine — which captures a sink's *monitor* — has nothing to record. The installer adds
   PipeWire and a null sink named `workbench-stream` for games to play into.
@@ -94,15 +96,39 @@ instance). `python -m workbench.doctor` reports whether this has happened, readi
 Sunshine's own `sunshine_state.json` — the paired clients are `root.named_devices`, each
 under the name that was typed into Moonlight.
 
+## Signing in to Steam
+
+The other one-time step, and the same shape as pairing: it needs your Steam account, which
+no script can know. It does not need a keyboard. Open a stream — Steam is already on
+screen in Big Picture — choose to sign in with a QR code, and scan it with the Steam app's
+Steam Guard tab. The doctor reports whether this has happened, and as whom.
+
+Two things Steam does on a node that it would never do on a desk, both handled by the unit
+rather than by you:
+
+- **Its first launch asks a question on screen.** Ubuntu's `steam` wrapper shows an
+  "Install / Cancel" dialog acknowledging that Steam is proprietary, before Steam exists
+  at all, and has no flag to skip it. On a machine nobody can click on, Steam simply never
+  ran. The unit puts a small stand-in `zenity` first on its `PATH` that answers exactly that
+  question, by title, and passes every other one to the real zenity.
+- **Big Picture draws black without `-cef-disable-gpu`.** On a laptop with Intel graphics
+  beside the NVIDIA card, Steam's embedded browser drew with the one that has no screen,
+  and Big Picture was a full-screen window of solid black. The unit draws Steam's menus on
+  the CPU instead; games are separate processes and still get the NVIDIA card.
+
+A deploy keeps the unit current and enabled but never restarts Steam, because that would
+end whatever game it is running.
+
 ## Checking it
 
 ```sh
 /srv/workbench/.venv/bin/python -m workbench.doctor
 ```
 
-adds five questions on top of a plain node's: is Steam installed, is Sunshine installed, is
-a render surface actually up, has anything paired with Sunshine, and was the last stream
-encoded on the GPU. None of these fail the doctor's exit code — a gaming node missing Steam
+adds six questions on top of a plain node's: is Steam installed, run and signed in, is
+Sunshine installed, is a render surface actually up, will it stay up rather than blank, has
+anything paired with Sunshine, and was the last stream encoded on the GPU. None of these
+fail the doctor's exit code — a gaming node missing Steam
 still lends its GPU to inference exactly as well as one that was never asked to game.
 
 The pairing check reads Sunshine's own `sunshine_state.json` and reports the client by the
@@ -113,6 +139,9 @@ name you typed into Moonlight, so it says *paired with roth* rather than *1 clie
 | Symptom | Where to look |
 |---|---|
 | The doctor says Steam or Sunshine is missing | Re-run the install command above |
+| A stream goes black about ten minutes in, and stays black | The X server blanked itself: Xorg's defaults blank after ten idle minutes and a stream sends no local input. The config now turns that off and every deploy tick applies it to the running server; by hand, `DISPLAY=:0 xset s off s noblank -dpms` on the node |
+| Steam never appears on the stream, and the doctor says it has never run | `systemctl --user status workbench-steam` as the gaming user. A node installed before the unit existed needs one more `install.sh` to start it; its first launch is also where the wrapper's acceptance dialog used to stop everything |
+| Big Picture is a solid black screen | Steam started without `-cef-disable-gpu` — by hand, most likely. Stop it and `systemctl --user start workbench-steam` as the gaming user |
 | A stream connects but shows nothing | `systemctl status workbench-x11` on the node — a system unit, so no `--user`/`-M` needed; no render surface means nothing to capture |
 | Sunshine's prep command does not flip the switch | `systemctl status workbench-gaming` on the node (also a system unit); confirm the polkit rule was granted (`ls /etc/polkit-1/rules.d/`) |
 | The switch flips but inference never comes back | `journalctl -u ollama`; `python -m workbench.gaming stop` by hand reports the same thing Sunshine's `undo` command would |

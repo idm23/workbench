@@ -1171,24 +1171,80 @@ def _gaming_install_fix() -> str:
     return f"sudo ./install.sh --role=node --capabilities=inference,gaming --gaming-user={player}"
 
 
-def check_steam() -> Check:
-    """Whether Steam is installed on a gaming node.
+#: What Steam's own bootstrap leaves behind once it has actually run, relative
+#: to the gaming account's home. Ubuntu's wrapper installs into
+#: `debian-installation` and links `~/.steam/steam` to it.
+STEAM_BOOTSTRAPPED = Path(".steam/steam/ubuntu12_32/steam")
 
-    A warning rather than a failure, matching `check_gpu`'s reasoning: a
-    gaming node missing Steam still lends its GPU to inference perfectly well,
-    it simply cannot stream a game yet.
+#: Written by Steam when somebody signs in, naming each account it remembers.
+STEAM_LOGINS = Path(".steam/steam/config/loginusers.vdf")
+
+
+def check_steam() -> Check:
+    """Whether Steam is ready to play on: installed, has run, and is signed in.
+
+    "Installed" alone was the whole check once, and it was green for the entire
+    time Steam had never run at all - the package was there, and its first
+    launch was a dialog on a screen nobody could see. The three states after
+    installation are different problems with different fixes, so they are told
+    apart.
+
+    A warning at worst, matching `check_gpu`'s reasoning: a gaming node without
+    a working Steam still lends its GPU to inference perfectly well.
     """
     key = "steam"
-    title = "Steam is installed"
+    title = "Steam is ready"
 
-    if shutil.which("steam") is not None:
-        return Check(key=key, title=title, state=CheckState.OK, detail="Steam is on this machine.")
+    if shutil.which("steam") is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="Steam is not installed, so there is nothing here for Sunshine to stream.",
+            fix=_gaming_install_fix(),
+        )
+
+    player = gaming_user()
+    ran = False
+    try:
+        home = Path(pwd.getpwnam(player).pw_dir) if player else None
+        ran = home is not None and (home / STEAM_BOOTSTRAPPED).exists()
+        logins = (home / STEAM_LOGINS).read_text(errors="replace") if ran and home else ""
+    except KeyError, PermissionError:
+        # Mode 0750 homes are Ubuntu's default, and the doctor often runs as
+        # the service account: not being able to look is not a missing Steam.
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Steam is installed; the gaming account's home could not be read from here.",
+        )
+    except OSError:
+        logins = ""
+
+    if not ran:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="Steam is installed but has never run, so there is nothing to stream yet.",
+            fix=f"sudo -iu {player or '<the person>'} systemctl --user start workbench-steam",
+        )
+
+    names = re.findall(r'"PersonaName"\s+"([^"]*)"', logins)
+    if not names:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="Steam is running but nobody has signed in.",
+            fix="Open a stream and scan Steam's sign-in QR code with the Steam app's Guard tab.",
+        )
     return Check(
         key=key,
         title=title,
-        state=CheckState.WARN,
-        detail="Steam is not installed, so there is nothing here for Sunshine to stream.",
-        fix=_gaming_install_fix(),
+        state=CheckState.OK,
+        detail=f"Signed in as {', '.join(names)}.",
     )
 
 
@@ -1241,6 +1297,45 @@ def check_render_session() -> Check:
         title=title,
         state=CheckState.WARN,
         detail="No render surface is running, so a stream would have nothing to show.",
+    )
+
+
+def check_display_never_blanks() -> Check:
+    """Whether the render surface will go black on its own.
+
+    Asked of the running server, not read from its configuration: the two
+    disagree for exactly as long as a server that predates the configuration
+    keeps running. Xorg's defaults blank after ten idle minutes and then power
+    the "monitor" off, and a stream carries no local input - so a node went
+    black ten minutes into a session that was only being watched, and the
+    black frame looked exactly like a broken client.
+    """
+    from workbench import render
+
+    key = "display-never-blanks"
+    title = "The render surface never blanks"
+
+    blanks = render.display_blanks()
+    if blanks is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="The X server could not be asked (not running, or no xset).",
+        )
+    if not blanks:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail="Screen saver and DPMS are off.",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="The X server will blank after idling, and a stream of it will show black.",
+        fix="DISPLAY=:0 " + " ".join(render.XSET_NEVER_BLANK),
     )
 
 
@@ -1489,13 +1584,16 @@ def check_client_unit() -> Check:
             fix="sudo ./install.sh --role=node --capabilities=client",
         )
 
+    # "Running", never "streaming": `is-active` knows the process is alive and
+    # nothing about whether a picture is leaving it. This said "streaming now"
+    # for twelve days about a client that had never connected.
     active = _run(["systemctl", "is-active", CLIENT_UNIT])
     running = active is not None and active.stdout.strip() == "active"
     return Check(
         key=key,
         title=title,
         state=CheckState.OK,
-        detail=("Enabled and streaming now." if running else "Enabled, not streaming right now."),
+        detail=("Enabled and running." if running else "Enabled, not running right now."),
     )
 
 
@@ -1552,6 +1650,7 @@ GAMING_CHECKS = (
     check_steam,
     check_sunshine,
     check_render_session,
+    check_display_never_blanks,
     check_sunshine_paired,
     check_stream_encoder,
 )
@@ -1615,17 +1714,152 @@ def check_fan_control() -> Check:
 
 #: Asked only of a node declared for `client` - the television's end of the
 #: link `GAMING_CHECKS` describes from the other side.
+#: Where the kernel reports each radio's block state. See `enable_bluetooth`
+#: in the node installer for why a client node's radio arrives blocked.
+RFKILL_DIR = Path("/sys/class/rfkill")
+
+
+def check_bluetooth() -> Check:
+    """Whether a controller could pair with this client at all.
+
+    Read from sysfs rather than `rfkill` or `bluetoothctl`, so it answers the
+    same whoever runs it. Raspberry Pi OS soft-blocks the radio by default and
+    restores the block at every boot, which surfaced only as `bluetoothctl
+    power on` failing with a generic error while a controller waited.
+    """
+    key = "bluetooth"
+    title = "Bluetooth is on, for a controller"
+
+    try:
+        radios = [
+            radio
+            for radio in RFKILL_DIR.iterdir()
+            if (radio / "type").read_text().strip() == "bluetooth"
+        ]
+    except OSError:
+        radios = []
+    if not radios:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="No Bluetooth radio is visible here.",
+        )
+
+    blocked = [
+        radio.name
+        for radio in radios
+        if (radio / "soft").read_text().strip() != "0"
+        or (radio / "hard").read_text().strip() != "0"
+    ]
+    if blocked:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="The Bluetooth radio is blocked, so no controller can pair with this client.",
+            fix="sudo rfkill unblock bluetooth && bluetoothctl power on",
+        )
+    return Check(key=key, title=title, state=CheckState.OK, detail="The radio is unblocked.")
+
+
 CLIENT_CHECKS = (
     check_client_installed,
     check_stream_host,
     check_client_unit,
     check_client_audio,
+    check_bluetooth,
     check_fan_control,
 )
 
 
 #: Every check, in the order a person reads them: what this machine is, then
 #: whether the agent can work, then whether the outside world can be reached.
+#: How much disk may sit unallocated beneath `/` before it is worth a line.
+#: Enough to ignore the few gigabytes an installer rounds away, far below what
+#: Ubuntu Server's default leaves: it gives the root volume 100 GB and holds
+#: the rest back, which on a 1 TB node was 850 GB that Steam reported as
+#: "46 GB free" and that nothing anywhere mentioned.
+UNALLOCATED_WARN_BYTES = 20 * 1024**3
+
+
+def _unallocated_beneath_root(tree: dict) -> tuple[str, int, int] | None:
+    """(root volume, its partition's size, bytes no volume uses), or None.
+
+    None when `/` is not a logical volume, which is the common answer on a
+    plain partition and never a problem. Read from `lsblk`'s tree rather than
+    `vgs`, because `vgs` needs root and the doctor usually is not.
+    """
+
+    def walk(node: dict):
+        for child in node.get("children", []):
+            yield node, child
+            yield from walk(child)
+
+    for device in tree.get("blockdevices", []):
+        for parent, child in walk(device):
+            if child.get("mountpoint") == "/" and child.get("type") == "lvm":
+                used = sum(
+                    int(c.get("size") or 0)
+                    for c in parent.get("children", [])
+                    if c.get("type") == "lvm"
+                )
+                size = int(parent.get("size") or 0)
+                return child.get("path") or child.get("name", ""), size, max(0, size - used)
+    return None
+
+
+def check_disk_allocated() -> Check:
+    """Whether `/` was given the disk it sits on.
+
+    Reported rather than fixed, like the GPU driver: growing a filesystem is
+    safe online but cannot be undone for ext4, so it is a decision with the
+    exact command attached rather than something a deploy tick does.
+    """
+    key = "disk-allocated"
+    title = "The root filesystem has the disk"
+
+    probe = _run(["lsblk", "-b", "-J", "-o", "NAME,PATH,SIZE,TYPE,MOUNTPOINT"])
+    try:
+        tree = json.loads(probe.stdout) if probe is not None and probe.returncode == 0 else None
+    except ValueError:
+        tree = None
+    if tree is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="lsblk could not describe the disks here.",
+        )
+
+    found = _unallocated_beneath_root(tree)
+    if found is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail="/ is not on LVM; nothing is held back.",
+        )
+    volume, size, unallocated = found
+    if unallocated < UNALLOCATED_WARN_BYTES:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail=f"{volume} uses its {size / 1024**3:.0f} GB partition.",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail=(
+            f"{unallocated / 1024**3:.0f} GB of a {size / 1024**3:.0f} GB partition is "
+            f"unallocated beneath /, so it is unusable until {volume} is grown."
+        ),
+        fix=f"sudo lvextend -r -l +100%FREE {volume}",
+    )
+
+
 HEAD_CHECKS = (
     check_deployment,
     check_home_directory,
@@ -1638,6 +1872,7 @@ HEAD_CHECKS = (
     check_github_token_works,
     check_notification_keys,
     check_tailscale_serve,
+    check_disk_allocated,
 )
 
 #: What a node is asked instead. Most of the list above is about work a node
@@ -1652,6 +1887,7 @@ NODE_CHECKS = (
     check_deployment,
     check_home_directory,
     check_head,
+    check_disk_allocated,
 )
 
 #: Asked only of a node declared for `inference`. These used to be in
