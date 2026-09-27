@@ -687,11 +687,66 @@ def test_a_node_that_offers_inference_and_does_not_answer_still_fails(monkeypatc
     assert "none answered" in check.detail
 
 
-def test_steam_installed_passes(monkeypatch):
+@pytest.fixture
+def steam_home(tmp_path, monkeypatch):
+    """Steam installed, for a gaming account whose home is this test's own."""
     monkeypatch.setattr(
-        doctor.shutil, "which", lambda name: "/usr/bin/steam" if name == "steam" else None
+        doctor.shutil, "which", lambda name: "/usr/games/steam" if name == "steam" else None
     )
-    assert doctor.check_steam().state is CheckState.OK
+    monkeypatch.setattr(doctor, "gaming_user", lambda: "ian")
+
+    class Account:
+        pw_dir = str(tmp_path)
+
+    monkeypatch.setattr(doctor.pwd, "getpwnam", lambda name: Account())
+    return tmp_path
+
+
+def test_steam_that_has_never_run_is_not_ready(steam_home):
+    """Installed and green was the whole check once - for the entire time
+    Steam had never run, its first launch a dialog nobody could see."""
+    check = doctor.check_steam()
+
+    assert check.state is CheckState.WARN
+    assert "never run" in check.detail
+    assert check.fix is not None and "workbench-steam" in check.fix
+
+
+def test_steam_nobody_signed_in_to_says_how(steam_home):
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).parent.mkdir(parents=True)
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).write_text("")
+
+    check = doctor.check_steam()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "QR" in check.fix
+
+
+def test_steam_signed_in_is_ready_and_says_as_whom(steam_home):
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).parent.mkdir(parents=True)
+    (steam_home / doctor.STEAM_BOOTSTRAPPED).write_text("")
+    (steam_home / doctor.STEAM_LOGINS).parent.mkdir(parents=True)
+    (steam_home / doctor.STEAM_LOGINS).write_text(
+        '"users"\n{\n\t"76561198085660128"\n\t{\n\t\t"AccountName"\t\t"cmac433"\n'
+        '\t\t"PersonaName"\t\t"newf"\n\t}\n}\n'
+    )
+
+    check = doctor.check_steam()
+
+    assert check.state is CheckState.OK
+    assert "newf" in check.detail
+
+
+def test_a_home_the_doctor_cannot_read_is_unknown_not_missing(steam_home, monkeypatch):
+    """0750 homes are Ubuntu's default, and the doctor often runs as the
+    service account. Not being able to look is not the same as not there."""
+
+    def denied(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(doctor.Path, "exists", denied)
+
+    assert doctor.check_steam().state is CheckState.UNKNOWN
 
 
 def test_steam_missing_warns_with_the_install_command(monkeypatch):

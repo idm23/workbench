@@ -1171,24 +1171,80 @@ def _gaming_install_fix() -> str:
     return f"sudo ./install.sh --role=node --capabilities=inference,gaming --gaming-user={player}"
 
 
-def check_steam() -> Check:
-    """Whether Steam is installed on a gaming node.
+#: What Steam's own bootstrap leaves behind once it has actually run, relative
+#: to the gaming account's home. Ubuntu's wrapper installs into
+#: `debian-installation` and links `~/.steam/steam` to it.
+STEAM_BOOTSTRAPPED = Path(".steam/steam/ubuntu12_32/steam")
 
-    A warning rather than a failure, matching `check_gpu`'s reasoning: a
-    gaming node missing Steam still lends its GPU to inference perfectly well,
-    it simply cannot stream a game yet.
+#: Written by Steam when somebody signs in, naming each account it remembers.
+STEAM_LOGINS = Path(".steam/steam/config/loginusers.vdf")
+
+
+def check_steam() -> Check:
+    """Whether Steam is ready to play on: installed, has run, and is signed in.
+
+    "Installed" alone was the whole check once, and it was green for the entire
+    time Steam had never run at all - the package was there, and its first
+    launch was a dialog on a screen nobody could see. The three states after
+    installation are different problems with different fixes, so they are told
+    apart.
+
+    A warning at worst, matching `check_gpu`'s reasoning: a gaming node without
+    a working Steam still lends its GPU to inference perfectly well.
     """
     key = "steam"
-    title = "Steam is installed"
+    title = "Steam is ready"
 
-    if shutil.which("steam") is not None:
-        return Check(key=key, title=title, state=CheckState.OK, detail="Steam is on this machine.")
+    if shutil.which("steam") is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="Steam is not installed, so there is nothing here for Sunshine to stream.",
+            fix=_gaming_install_fix(),
+        )
+
+    player = gaming_user()
+    ran = False
+    try:
+        home = Path(pwd.getpwnam(player).pw_dir) if player else None
+        ran = home is not None and (home / STEAM_BOOTSTRAPPED).exists()
+        logins = (home / STEAM_LOGINS).read_text(errors="replace") if ran and home else ""
+    except KeyError, PermissionError:
+        # Mode 0750 homes are Ubuntu's default, and the doctor often runs as
+        # the service account: not being able to look is not a missing Steam.
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="Steam is installed; the gaming account's home could not be read from here.",
+        )
+    except OSError:
+        logins = ""
+
+    if not ran:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="Steam is installed but has never run, so there is nothing to stream yet.",
+            fix=f"sudo -iu {player or '<the person>'} systemctl --user start workbench-steam",
+        )
+
+    names = re.findall(r'"PersonaName"\s+"([^"]*)"', logins)
+    if not names:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="Steam is running but nobody has signed in.",
+            fix="Open a stream and scan Steam's sign-in QR code with the Steam app's Guard tab.",
+        )
     return Check(
         key=key,
         title=title,
-        state=CheckState.WARN,
-        detail="Steam is not installed, so there is nothing here for Sunshine to stream.",
-        fix=_gaming_install_fix(),
+        state=CheckState.OK,
+        detail=f"Signed in as {', '.join(names)}.",
     )
 
 

@@ -1191,9 +1191,22 @@ def test_install_gaming_runs_every_step_in_order(monkeypatch):
         "configure_sunshine_prep_command",
         lambda: order.append("prep-cmd") or True,
     )
+    monkeypatch.setattr(
+        install_node,
+        "converge_steam_session",
+        lambda *, start=False: order.append(f"steam-session start={start}") or True,
+    )
 
     assert install_node.install_gaming() is True
-    assert order == ["rule", "render", "steam", "sunshine", "audio", "prep-cmd"]
+    assert order == [
+        "rule",
+        "render",
+        "steam",
+        "sunshine",
+        "audio",
+        "prep-cmd",
+        "steam-session start=True",
+    ]
 
 
 @pytest.fixture
@@ -1255,3 +1268,100 @@ def test_a_client_without_moonlight_embedded_keeps_its_old_unit(client_unit, mon
     assert target.read_text() == old
     assert commands == []
     assert "Moonlight Embedded is not installed" in caplog.text
+
+
+@pytest.fixture
+def steam_session(tmp_path, monkeypatch):
+    """A gaming account whose home is this test's own, and a record of every
+    `systemctl --user` call made on its behalf."""
+    real = pwd.getpwuid(os.getuid())
+    account = pwd.struct_passwd(
+        (real.pw_name, real.pw_passwd, real.pw_uid, real.pw_gid, "", str(tmp_path), "/bin/sh")
+    )
+    monkeypatch.setattr(install_node, "gaming_user", lambda: real.pw_name)
+    monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: account)
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: f"/usr/games/{name}")
+    calls: list[list[str]] = []
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda argv, *a, **k: calls.append(argv) or Ok()
+    )
+    return tmp_path, calls
+
+
+def test_steam_runs_in_big_picture_with_its_menus_on_the_cpu(steam_session):
+    """Big Picture drew a full-screen black window on a laptop with Intel
+    graphics beside the NVIDIA card: Steam's browser picked the one with no
+    screen. `-cef-disable-gpu` is what made it draw."""
+    home, _ = steam_session
+
+    install_node.converge_steam_session()
+
+    unit = (home / ".config/systemd/user" / install_node.STEAM_UNIT_NAME).read_text()
+    assert "ExecStart=/usr/games/steam -gamepadui -cef-disable-gpu" in unit
+    assert "WantedBy=default.target" in unit
+    # The first-run answer is first on the PATH, or it answers nothing.
+    assert f"Environment=PATH={home / install_node.STEAM_ANSWER_DIR}:" in unit
+
+
+def test_the_first_run_answer_says_yes_to_steam_and_nothing_else(steam_session):
+    """Run for real. It must accept the wrapper's "Steam installer" question -
+    the wall that stopped Steam ever running on a machine nobody can click on -
+    and must hand every other question to the real zenity."""
+    import subprocess
+
+    home, _ = steam_session
+    install_node.converge_steam_session()
+    script = home / install_node.STEAM_ANSWER_DIR / "zenity"
+
+    accepted = subprocess.run(
+        ["sh", str(script), "--question", "--title=Steam installer", "--ok-label=Install"],
+        check=False,
+    )
+    assert accepted.returncode == 0
+    assert "exec /usr/bin/zenity" in script.read_text()
+    assert os.access(script, os.X_OK)
+
+
+def test_a_deploy_enables_steam_and_never_restarts_it(steam_session):
+    """Restarting Steam ends whatever game it is running, and the gaming
+    switch cannot say whether one is: the first real game here ran with it
+    off. A deploy converges the unit for the next boot and touches nothing
+    running."""
+    _, calls = steam_session
+
+    assert install_node.converge_steam_session() is True
+
+    verbs = [argv[2] for argv in calls]
+    assert "enable" in verbs
+    assert not any(v in ("start", "restart", "try-restart") for v in verbs)
+    assert ["systemctl", "--user", "enable", install_node.STEAM_UNIT_NAME] in calls
+
+
+def test_the_installer_starts_steam(steam_session):
+    _, calls = steam_session
+
+    install_node.converge_steam_session(start=True)
+
+    assert ["systemctl", "--user", "enable", "--now", install_node.STEAM_UNIT_NAME] in calls
+
+
+@pytest.mark.usefixtures("steam_session")
+def test_an_unchanged_steam_unit_is_not_rewritten():
+    install_node.converge_steam_session()
+
+    assert install_node.converge_steam_session() is False
+
+
+def test_no_steam_means_no_steam_unit(steam_session, monkeypatch):
+    home, calls = steam_session
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+
+    assert install_node.converge_steam_session() is False
+    assert calls == []
+    assert not (home / ".config").exists()
