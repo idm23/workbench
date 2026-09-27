@@ -39,6 +39,7 @@ are X clients, not the server, and that split needs nothing this module owns.
 import logging
 import os
 import pwd
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -88,25 +89,105 @@ def _ensure_xorg_installed() -> bool:
     unlike the NVIDIA driver itself, which a gaming node already has by the
     time `install_gaming()` runs.
     """
-    if shutil.which("Xorg") is not None:
+    missing = [
+        package
+        for binary, package in (("Xorg", "xserver-xorg-core"), ("xset", "x11-xserver-utils"))
+        if shutil.which(binary) is None
+    ]
+    if not missing:
         return True
-    info("installing xserver-xorg-core")
+    info(f"installing {' '.join(missing)}")
     try:
-        run(["apt-get", "install", "-y", "xserver-xorg-core"], privileged=True, stream=True)
+        run(["apt-get", "install", "-y", *missing], privileged=True, stream=True)
     except InstallError as error:
-        warn(f"could not install xserver-xorg-core: {error}")
+        warn(f"could not install {' '.join(missing)}: {error}")
         return False
     return True
 
 
-def _write_xorg_conf() -> None:
+def _write_xorg_conf() -> bool:
+    """Render the X server's configuration. Returns whether it changed."""
     rendered = render_unit("xorg-dummy.conf.template")
     if X11_CONF_PATH.is_file() and X11_CONF_PATH.read_text() == rendered:
         info("Xorg configuration already up to date")
-        return
+        return False
     X11_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
     write_privileged(X11_CONF_PATH, rendered, staged_as="xorg-dummy.conf.staged")
     info(f"wrote {X11_CONF_PATH}")
+    return True
+
+
+#: The display every client of the render surface is pointed at. See
+#: `_write_display_environment`, which hands the same answer to the gaming
+#: account's own services.
+DISPLAY = ":0"
+
+#: What stops a running server blanking, for a server that started before its
+#: configuration said so. The configuration is what holds across a restart;
+#: this is what makes it true now, without one.
+XSET_NEVER_BLANK = ("xset", "s", "off", "s", "noblank", "-dpms")
+
+
+def _xset(*args: str) -> subprocess.CompletedProcess[str] | None:
+    """Run `xset` against the render surface, or None if it cannot be run."""
+    if shutil.which("xset") is None:
+        return None
+    try:
+        return subprocess.run(
+            list(args),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+            env={**os.environ, "DISPLAY": DISPLAY},
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+
+
+def stop_blanking() -> bool:
+    """Tell the running X server never to blank. Returns whether it answered.
+
+    Applied live rather than by restarting the server, because a restart ends
+    every client of it - Steam, Sunshine's capture, whatever is on screen - and
+    a deploy tick doing that unannounced would be the worst thing it could do
+    on a node somebody is playing on.
+    """
+    result = _xset(*XSET_NEVER_BLANK)
+    return result is not None and result.returncode == 0
+
+
+def display_blanks() -> bool | None:
+    """Whether the render surface will go black on its own, for the doctor.
+
+    Asks the server rather than reading the configuration, because the two
+    differ for as long as a server that predates the configuration is running
+    - which is exactly the case that sent a node black. `None` when the server
+    cannot be asked at all.
+    """
+    result = _xset("xset", "q")
+    if result is None or result.returncode != 0:
+        return None
+    timeout = re.search(r"timeout:\s+(\d+)", result.stdout)
+    saver_on = timeout is not None and timeout.group(1) != "0"
+    return saver_on or "DPMS is Enabled" in result.stdout
+
+
+def converge() -> None:
+    """Keep a gaming node's render surface as the repo says, from a deploy tick.
+
+    Only the part that can change without ending a session: the configuration
+    file, and the running server's blanking. The unit and the server itself
+    are the installer's, because restarting them ends every game on screen.
+    Applied on every tick rather than only when the file changed, so a server
+    that blanked for any reason - an earlier start, somebody's `xset` - comes
+    back on its own.
+    """
+    if render_backend() == GAMESCOPE or not systemd_is_running():
+        return
+    _write_xorg_conf()
+    if render_session_is_up():
+        stop_blanking()
 
 
 def _write_x11_unit() -> bool:
@@ -178,6 +259,8 @@ def _install_x11_dummy() -> bool:
         run(["systemctl", "daemon-reload"], privileged=True)
 
     started = _enable_system_unit()
+    if started:
+        stop_blanking()
 
     # Nothing about the server itself needs the gaming account — but anything
     # that connects to it as a client (Sunshine, today) does, and nothing sets

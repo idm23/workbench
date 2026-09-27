@@ -208,6 +208,7 @@ def test_install_x11_dummy_sets_display_for_the_gaming_user(monkeypatch, tmp_pat
     monkeypatch.setattr(render, "_write_xorg_conf", lambda: None)
     monkeypatch.setattr(render, "_write_x11_unit", lambda: False)
     monkeypatch.setattr(render, "_enable_system_unit", lambda: True)
+    monkeypatch.setattr(render, "stop_blanking", lambda: True)
     monkeypatch.setattr(render, "gaming_user", lambda: real.pw_name)
     monkeypatch.setattr(render.pwd, "getpwnam", lambda name: fake_account)
     monkeypatch.setattr(render.os, "chown", lambda *a, **k: None)
@@ -232,3 +233,105 @@ def test_install_x11_dummy_skips_display_setup_with_no_gaming_user(monkeypatch):
     )
 
     assert render._install_x11_dummy() is True
+
+
+def test_the_xorg_conf_never_blanks_the_display():
+    """Xorg's defaults blank after ten idle minutes and then power the monitor
+    down, and a stream carries no local input - so the node went black ten
+    minutes into every session somebody was only watching."""
+    conf = render.render_unit("xorg-dummy.conf.template")
+
+    for flag in ("BlankTime", "StandbyTime", "SuspendTime", "OffTime"):
+        assert f'Option "{flag}" "0"' in conf
+    assert 'Option "DPMS" "false"' in conf
+
+
+class _Xset:
+    def __init__(self, stdout: str, returncode: int = 0):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+XSET_BLANKING = """Screen Saver:
+  prefer blanking:  yes    allow exposures:  yes
+  timeout:  600    cycle:  600
+DPMS (Display Power Management Signaling):
+  Standby: 600    Suspend: 600    Off: 600
+  DPMS is Enabled
+  Monitor is Off
+"""
+
+XSET_NEVER = """Screen Saver:
+  prefer blanking:  no    allow exposures:  yes
+  timeout:  0    cycle:  600
+DPMS (Display Power Management Signaling):
+  Server does not have the DPMS Extension
+"""
+
+
+def test_a_server_with_its_defaults_is_reported_as_blanking(monkeypatch):
+    """What homebox-node-1 answered while its stream was solid black."""
+    monkeypatch.setattr(render, "_xset", lambda *args: _Xset(XSET_BLANKING))
+    assert render.display_blanks() is True
+
+
+def test_a_server_told_never_to_blank_is_reported_as_such(monkeypatch):
+    monkeypatch.setattr(render, "_xset", lambda *args: _Xset(XSET_NEVER))
+    assert render.display_blanks() is False
+
+
+def test_dpms_alone_still_counts_as_blanking(monkeypatch):
+    """The screen saver off is not enough: DPMS powering the monitor down
+    captures as the same black frame."""
+    monkeypatch.setattr(
+        render,
+        "_xset",
+        lambda *args: _Xset("timeout:  0    cycle:  600\n  DPMS is Enabled\n"),
+    )
+    assert render.display_blanks() is True
+
+
+def test_a_server_that_cannot_be_asked_is_unknown(monkeypatch):
+    monkeypatch.setattr(render, "_xset", lambda *args: None)
+    assert render.display_blanks() is None
+
+
+def test_converging_applies_no_blanking_to_a_running_server(monkeypatch):
+    """Live, and on every tick: the configuration only takes effect at the
+    server's next start, and restarting it would end whatever is on screen."""
+    applied = []
+    monkeypatch.setattr(render, "render_backend", lambda: X11_DUMMY)
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render, "_write_xorg_conf", lambda: False)
+    monkeypatch.setattr(render, "render_session_is_up", lambda: True)
+    monkeypatch.setattr(render, "_xset", lambda *args: applied.append(args) or _Xset(""))
+    monkeypatch.setattr(
+        render, "run", lambda *a, **k: pytest.fail("converging must never restart the server")
+    )
+
+    render.converge()
+
+    assert applied == [render.XSET_NEVER_BLANK]
+
+
+def test_converging_leaves_a_stopped_server_alone(monkeypatch):
+    monkeypatch.setattr(render, "render_backend", lambda: X11_DUMMY)
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render, "_write_xorg_conf", lambda: False)
+    monkeypatch.setattr(render, "render_session_is_up", lambda: False)
+    monkeypatch.setattr(render, "_xset", lambda *args: pytest.fail("nobody to tell"))
+
+    render.converge()
+
+
+def test_a_node_without_xset_is_given_it(monkeypatch):
+    """The doctor's question and the live fix both need `xset`, which a
+    minimal server image does not have even when Xorg is installed."""
+    installed = []
+    monkeypatch.setattr(
+        render.shutil, "which", lambda name: "/usr/bin/Xorg" if name == "Xorg" else None
+    )
+    monkeypatch.setattr(render, "run", lambda argv, **k: installed.append(argv))
+
+    assert render._ensure_xorg_installed() is True
+    assert installed == [["apt-get", "install", "-y", "x11-xserver-utils"]]

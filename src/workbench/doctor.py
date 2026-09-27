@@ -1244,6 +1244,45 @@ def check_render_session() -> Check:
     )
 
 
+def check_display_never_blanks() -> Check:
+    """Whether the render surface will go black on its own.
+
+    Asked of the running server, not read from its configuration: the two
+    disagree for exactly as long as a server that predates the configuration
+    keeps running. Xorg's defaults blank after ten idle minutes and then power
+    the "monitor" off, and a stream carries no local input - so a node went
+    black ten minutes into a session that was only being watched, and the
+    black frame looked exactly like a broken client.
+    """
+    from workbench import render
+
+    key = "display-never-blanks"
+    title = "The render surface never blanks"
+
+    blanks = render.display_blanks()
+    if blanks is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="The X server could not be asked (not running, or no xset).",
+        )
+    if not blanks:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail="Screen saver and DPMS are off.",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail="The X server will blank after idling, and a stream of it will show black.",
+        fix="DISPLAY=:0 " + " ".join(render.XSET_NEVER_BLANK),
+    )
+
+
 def _sunshine_config_dir() -> Path | None:
     """Where the gaming user's Sunshine state lives, or None if there is no
     gaming user to ask about."""
@@ -1555,6 +1594,7 @@ GAMING_CHECKS = (
     check_steam,
     check_sunshine,
     check_render_session,
+    check_display_never_blanks,
     check_sunshine_paired,
     check_stream_encoder,
 )

@@ -36,7 +36,7 @@ from pathlib import Path
 # attribute at call time so that a test patching `workbench.install.x` is
 # actually patching what this calls — with names bound at import, it would not
 # be, and the first thing to notice would be a unit test shelling out to sudo.
-from workbench import install
+from workbench import install, render
 from workbench.config import (
     data_dir,
     database_path,
@@ -45,6 +45,7 @@ from workbench.config import (
     gaming_unit_name,
     host,
     is_client_node,
+    is_gaming_node,
     is_inference_node,
     is_node,
     port,
@@ -450,6 +451,12 @@ def converge_node() -> DeployFailed | None:
             # Same rule as the model server: a client that needs attention is
             # a thing to say, and the node is still updated either way.
             logger.warning("Could not converge the client unit: %s", error)
+
+    if is_gaming_node():
+        try:
+            render.converge()
+        except Exception as error:
+            logger.warning("Could not converge the render surface: %s", error)
 
     try:
         # Every tick, not only the ones that pulled something. This is what
