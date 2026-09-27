@@ -457,6 +457,10 @@ def converge_node() -> DeployFailed | None:
             render.converge()
         except Exception as error:
             logger.warning("Could not converge the render surface: %s", error)
+        try:
+            install_node.converge_steam_session()
+        except Exception as error:
+            logger.warning("Could not converge Steam's unit: %s", error)
 
     try:
         # Every tick, not only the ones that pulled something. This is what

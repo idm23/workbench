@@ -819,6 +819,118 @@ def install_steam() -> bool:
     return True
 
 
+#: Steam as a unit of the gaming account's own, because nothing else started
+#: it. A gaming node installed Steam and then never once ran it, so the first
+#: person to open a stream found no Steam at all - and running it by hand found
+#: the two things below, neither of which any page reported.
+STEAM_UNIT_NAME = "workbench-steam.service"
+
+#: Big Picture, because the only screen a gaming node has is a television and
+#: the only input is a controller. `-cef-disable-gpu` because Big Picture on
+#: this project's node drew a full-screen window of solid black: the laptop has
+#: Intel graphics with no screen attached beside the NVIDIA card the render
+#: surface runs on, and Steam's embedded browser drew with the wrong one.
+#: Drawing its menus on the CPU is invisible at a menu's workload, and games
+#: are separate processes that still get the NVIDIA card.
+STEAM_ARGS = ("-gamepadui", "-cef-disable-gpu")
+
+#: Where the first-run answer lives, under the gaming account's home.
+STEAM_ANSWER_DIR = Path(".local/lib/workbench/steam-first-run")
+
+#: Ubuntu's `steam` wrapper asks one question before Steam exists at all - a
+#: zenity "Install / Cancel" dialog acknowledging that Steam is proprietary -
+#: and has no flag to skip it. On a machine with no screen that dialog is not a
+#: step, it is a wall: Steam never ran, and nothing said why. So the unit puts
+#: this first on its PATH. It answers exactly that question, by its title, and
+#: hands every other zenity call to the real one - a node that asked to play
+#: has already said yes to Steam, and nothing else should be answered for it.
+STEAM_ANSWER_SCRIPT = """\
+#!/bin/sh
+# Written by Workbench's node installer. Answers the Steam wrapper's first-run
+# acceptance on a machine nobody can click on; everything else goes to zenity.
+case "$*" in
+  *"--title=Steam installer"*) exit 0 ;;
+esac
+exec /usr/bin/zenity "$@"
+"""
+
+
+def _steam_unit(account: pwd.struct_passwd) -> str:
+    answers = Path(account.pw_dir) / STEAM_ANSWER_DIR
+    return f"""\
+# Rendered by install.sh — do not edit; re-run the installer instead.
+[Unit]
+Description=Workbench: Steam in Big Picture, on the render surface
+
+[Service]
+Type=simple
+# DISPLAY comes from environment.d, written by the render backend.
+Environment=PATH={answers}:/usr/local/bin:/usr/bin:/bin:/usr/games
+ExecStart=/usr/games/steam {" ".join(STEAM_ARGS)}
+# on-failure: quitting Steam from its own menu exits cleanly and is a choice.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _write_owned(target: Path, content: str, account: pwd.struct_passwd, mode: int) -> bool:
+    """Write a file under an account's home, as that account's. Returns whether it changed."""
+    if target.is_file() and target.read_text() == content:
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    target.chmod(mode)
+    path = target
+    home = Path(account.pw_dir)
+    while path != home and home in path.parents:
+        os.chown(path, account.pw_uid, account.pw_gid)
+        path = path.parent
+    return True
+
+
+def converge_steam_session(*, start: bool = False) -> bool:
+    """Keep the gaming account's Steam unit as the repo says. Returns whether it changed.
+
+    Called by the installer with `start=True`, and by every deploy tick without:
+    a deploy rewrites and enables the unit so the next boot runs the right
+    thing, and never restarts it. Restarting Steam ends whatever game it is
+    running, and the gaming switch cannot be trusted to say whether one is -
+    a resumed Sunshine session never fires its prep command, and the first real
+    stream here ran a game with the switch off.
+    """
+    player = gaming_user()
+    if not player or shutil.which("steam") is None:
+        return False
+    try:
+        account = pwd.getpwnam(player)
+    except KeyError:
+        warn(f"'{player}' is not a real account; Steam's unit was not written.")
+        return False
+
+    home = Path(account.pw_dir)
+    answered = _write_owned(home / STEAM_ANSWER_DIR / "zenity", STEAM_ANSWER_SCRIPT, account, 0o755)
+    unit = home / ".config/systemd/user" / STEAM_UNIT_NAME
+    changed = _write_owned(unit, _steam_unit(account), account, 0o644) or answered
+    if changed:
+        info(f"wrote {unit}")
+
+    env = {"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"}
+    run_as_account(["systemctl", "--user", "daemon-reload"], account, extra_env=env)
+    verb = ["enable", "--now"] if start else ["enable"]
+    result = run_as_account(["systemctl", "--user", *verb, STEAM_UNIT_NAME], account, extra_env=env)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        warn(f"could not enable {STEAM_UNIT_NAME} for '{player}': {detail}")
+    elif start and changed:
+        run_as_account(
+            ["systemctl", "--user", "try-restart", STEAM_UNIT_NAME], account, extra_env=env
+        )
+    return changed
+
+
 def install_sunshine() -> bool:
     """Put Sunshine on the machine, and give the gaming user what it needs.
 
@@ -1471,7 +1583,8 @@ def install_gaming() -> bool:
 
     In order: the switch's authorisation (existing), a render surface for
     Steam and Sunshine to use, Steam, Sunshine, an audio server for the stream
-    to carry, and Sunshine's own wiring back into the switch. Each step is
+    to carry, Sunshine's own wiring back into the switch, and then Steam
+    actually running - which, until it had a unit, nothing ever did. Each step is
     independent and degrades honestly — "Steam installed, Sunshine did not" is
     a real, reportable state, not a reason to abort the rest of the install.
 
@@ -1489,6 +1602,9 @@ def install_gaming() -> bool:
     install_sunshine()
     install_audio()
     configure_sunshine_prep_command()
+    # After the render surface and the account's environment, which it needs
+    # to have somewhere to draw.
+    converge_steam_session(start=True)
     return True
 
 
