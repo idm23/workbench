@@ -1155,6 +1155,7 @@ def test_a_client_with_no_stream_host_writes_no_unit(monkeypatch, caplog):
     monkeypatch.setattr(install_node, "stream_host", lambda: None)
     monkeypatch.setattr(install_node, "build_moonlight", lambda account: True)
     monkeypatch.setattr(install_node, "prefer_hdmi_audio", lambda account: True)
+    monkeypatch.setattr(install_node, "enable_bluetooth", lambda: True)
 
     class Ok:
         returncode = 0
@@ -1365,3 +1366,52 @@ def test_no_steam_means_no_steam_unit(steam_session, monkeypatch):
     assert install_node.converge_steam_session() is False
     assert calls == []
     assert not (home / ".config").exists()
+
+
+def test_a_client_unblocks_bluetooth_and_powers_it_on(monkeypatch):
+    """Raspberry Pi OS ships the radio soft-blocked and systemd restores the
+    block every boot, so `bluetoothctl power on` failed with a controller in
+    hand and nothing saying why."""
+    ran: list[list[str]] = []
+    powered: list[list[str]] = []
+    monkeypatch.setattr(install_node, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: ran.append(argv))
+
+    class Ok:
+        returncode = 0
+        stdout = "Changing power on succeeded"
+        stderr = ""
+
+    monkeypatch.setattr(
+        install_node.subprocess, "run", lambda argv, **k: powered.append(argv) or Ok()
+    )
+
+    assert install_node.enable_bluetooth() is True
+    assert ran == [["rfkill", "unblock", "bluetooth"]]
+    assert powered == [["bluetoothctl", "power", "on"]]
+
+
+def test_a_radio_that_will_not_power_on_is_said_out_loud(monkeypatch, caplog):
+    monkeypatch.setattr(install_node, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: f"/usr/sbin/{name}")
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: None)
+
+    class Failed:
+        returncode = 1
+        stdout = "Failed to set power on: org.bluez.Error.Failed"
+        stderr = ""
+
+    monkeypatch.setattr(install_node.subprocess, "run", lambda argv, **k: Failed())
+
+    with caplog.at_level("WARNING"):
+        assert install_node.enable_bluetooth() is False
+    assert "org.bluez.Error.Failed" in caplog.text
+
+
+def test_no_rfkill_means_nothing_to_unblock(monkeypatch):
+    monkeypatch.setattr(install_node, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+    monkeypatch.setattr(install_node, "run", lambda *a, **k: pytest.fail("nothing to run"))
+
+    assert install_node.enable_bluetooth() is False

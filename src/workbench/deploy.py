@@ -451,6 +451,10 @@ def converge_node() -> DeployFailed | None:
             # Same rule as the model server: a client that needs attention is
             # a thing to say, and the node is still updated either way.
             logger.warning("Could not converge the client unit: %s", error)
+        try:
+            install_node.enable_bluetooth()
+        except Exception as error:
+            logger.warning("Could not enable Bluetooth: %s", error)
 
     if is_gaming_node():
         try:

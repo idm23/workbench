@@ -1714,11 +1714,61 @@ def check_fan_control() -> Check:
 
 #: Asked only of a node declared for `client` - the television's end of the
 #: link `GAMING_CHECKS` describes from the other side.
+#: Where the kernel reports each radio's block state. See `enable_bluetooth`
+#: in the node installer for why a client node's radio arrives blocked.
+RFKILL_DIR = Path("/sys/class/rfkill")
+
+
+def check_bluetooth() -> Check:
+    """Whether a controller could pair with this client at all.
+
+    Read from sysfs rather than `rfkill` or `bluetoothctl`, so it answers the
+    same whoever runs it. Raspberry Pi OS soft-blocks the radio by default and
+    restores the block at every boot, which surfaced only as `bluetoothctl
+    power on` failing with a generic error while a controller waited.
+    """
+    key = "bluetooth"
+    title = "Bluetooth is on, for a controller"
+
+    try:
+        radios = [
+            radio
+            for radio in RFKILL_DIR.iterdir()
+            if (radio / "type").read_text().strip() == "bluetooth"
+        ]
+    except OSError:
+        radios = []
+    if not radios:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="No Bluetooth radio is visible here.",
+        )
+
+    blocked = [
+        radio.name
+        for radio in radios
+        if (radio / "soft").read_text().strip() != "0"
+        or (radio / "hard").read_text().strip() != "0"
+    ]
+    if blocked:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="The Bluetooth radio is blocked, so no controller can pair with this client.",
+            fix="sudo rfkill unblock bluetooth && bluetoothctl power on",
+        )
+    return Check(key=key, title=title, state=CheckState.OK, detail="The radio is unblocked.")
+
+
 CLIENT_CHECKS = (
     check_client_installed,
     check_stream_host,
     check_client_unit,
     check_client_audio,
+    check_bluetooth,
     check_fan_control,
 )
 

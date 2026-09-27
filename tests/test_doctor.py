@@ -1094,3 +1094,39 @@ def test_a_display_that_cannot_be_asked_is_unknown_not_a_warning(monkeypatch):
     monkeypatch.setattr("workbench.render.display_blanks", lambda: None)
 
     assert doctor.check_display_never_blanks().state is CheckState.UNKNOWN
+
+
+def _radio(root, name: str, kind: str, soft: str = "0", hard: str = "0"):
+    radio = root / name
+    radio.mkdir()
+    (radio / "type").write_text(f"{kind}\n")
+    (radio / "soft").write_text(f"{soft}\n")
+    (radio / "hard").write_text(f"{hard}\n")
+
+
+def test_a_soft_blocked_bluetooth_radio_warns_with_the_unblock(tmp_path, monkeypatch):
+    """What homebox-node-2 reported, via `rfkill list`, with a controller in
+    hand: Bluetooth and Wi-Fi both soft-blocked, as Raspberry Pi OS ships."""
+    _radio(tmp_path, "rfkill0", "bluetooth", soft="1")
+    _radio(tmp_path, "rfkill1", "wlan", soft="1")
+    monkeypatch.setattr(doctor, "RFKILL_DIR", tmp_path)
+
+    check = doctor.check_bluetooth()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "rfkill unblock bluetooth" in check.fix
+
+
+def test_an_unblocked_bluetooth_radio_passes_whatever_wifi_is_doing(tmp_path, monkeypatch):
+    """Wi-Fi blocked is fine on a client wired to the television's switch."""
+    _radio(tmp_path, "rfkill0", "bluetooth")
+    _radio(tmp_path, "rfkill1", "wlan", soft="1")
+    monkeypatch.setattr(doctor, "RFKILL_DIR", tmp_path)
+
+    assert doctor.check_bluetooth().state is CheckState.OK
+
+
+def test_no_bluetooth_radio_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "RFKILL_DIR", tmp_path / "absent")
+
+    assert doctor.check_bluetooth().state is CheckState.UNKNOWN
