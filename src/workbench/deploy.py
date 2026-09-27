@@ -44,6 +44,8 @@ from workbench.config import (
     ensure_data_dir,
     gaming_unit_name,
     host,
+    is_client_node,
+    is_inference_node,
     is_node,
     port,
     repo_root,
@@ -393,18 +395,13 @@ def gpu_is_busy_elsewhere() -> bool:
     return probe.returncode == 0
 
 
-def converge_node() -> DeployFailed | None:
-    """Bring a node back in line with what the repo says, and say it is alive.
+def _converge_model_server() -> None:
+    """Rewrite the model server's drop-in if it drifted, unless a game has the GPU.
 
-    The same convergence rule the units follow: decide from state rather than
-    from what this tick happened to pull, so a drop-in edited by hand comes
-    back and a changed template takes effect without anyone logging in.
-
-    What it deliberately does *not* do is pull a model. A changed
-    `WORKBENCH_LOCAL_MODEL` means gigabytes over a home connection, and a timer
-    that starts that unattended at 3am is a surprise rather than a deploy — the
-    doctor reports the missing model instead, which is the same split as the
-    GPU driver.
+    Only ever asked of an inference node. It used to run on every node, which
+    on a client-only Raspberry Pi meant piping Ollama's installer into a shell
+    on the first tick that found no `ollama` - the installer had learned to ask
+    which capabilities a node declared, and the deploy had not.
     """
     from workbench import install_node
 
@@ -426,6 +423,33 @@ def converge_node() -> DeployFailed | None:
             # reachable; a model server that needs attention is a thing to say,
             # not a reason to leave the checkout half-deployed.
             logger.warning("Could not converge the model server: %s", error)
+
+
+def converge_node() -> DeployFailed | None:
+    """Bring a node back in line with what the repo says, and say it is alive.
+
+    The same convergence rule the units follow: decide from state rather than
+    from what this tick happened to pull, so a drop-in edited by hand comes
+    back and a changed template takes effect without anyone logging in.
+
+    What it deliberately does *not* do is pull a model. A changed
+    `WORKBENCH_LOCAL_MODEL` means gigabytes over a home connection, and a timer
+    that starts that unattended at 3am is a surprise rather than a deploy — the
+    doctor reports the missing model instead, which is the same split as the
+    GPU driver.
+    """
+    from workbench import install_node
+
+    if is_inference_node():
+        _converge_model_server()
+
+    if is_client_node():
+        try:
+            install_node.converge_client_unit()
+        except Exception as error:
+            # Same rule as the model server: a client that needs attention is
+            # a thing to say, and the node is still updated either way.
+            logger.warning("Could not converge the client unit: %s", error)
 
     try:
         # Every tick, not only the ones that pulled something. This is what

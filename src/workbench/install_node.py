@@ -1419,11 +1419,50 @@ def install_client() -> bool:
         info("Re-run with --stream-host <the machine to stream from>.")
         return False
 
-    target = SYSTEMD_DIR / CLIENT_UNIT_NAME
-    write_privileged(target, _client_unit(host, account), staged_as="workbench-client")
-    run(["systemctl", "daemon-reload"], privileged=True)
+    converge_client_unit()
     run(["systemctl", "enable", CLIENT_UNIT_NAME], privileged=True)
     info(f"installed {CLIENT_UNIT_NAME}, streaming from {host}")
+    return True
+
+
+def converge_client_unit() -> bool:
+    """Bring the client unit in line with the template. Returns whether it changed.
+
+    Called by the installer and by every deploy tick, because only the first
+    used to write it. A client node took the change to Moonlight Embedded in a
+    deploy, kept the unit that ran `moonlight-qt`, and spent twelve days
+    `active` with that client sitting unpaired on a black screen. Nothing
+    looked wrong: the unit was enabled and running, just running the old thing.
+
+    A changed unit is restarted, not merely reloaded, for the same reason: a
+    reload rewrites what systemd *would* run and leaves the process it is
+    running alone. `try-restart` rather than `restart`, so a unit somebody
+    stopped on purpose stays stopped. That does interrupt a stream in progress,
+    which is acceptable only because it happens when the template changes and
+    never otherwise.
+
+    Nothing is written when the unit would name a binary this machine does not
+    have. A node installed before Moonlight Embedded existed would otherwise
+    trade an idle client for one restarting every five seconds forever; the
+    installer builds the binary, and a deploy should not pretend to.
+    """
+    host = stream_host()
+    if not host or not systemd_is_running():
+        return False
+    if shutil.which("moonlight") is None:
+        warn("Moonlight Embedded is not installed, so the client unit was left alone.")
+        info("Re-run ./install.sh --role=node to build it.")
+        return False
+
+    target = SYSTEMD_DIR / CLIENT_UNIT_NAME
+    rendered = _client_unit(host, _service_passwd())
+    if target.is_file() and target.read_text() == rendered:
+        return False
+
+    write_privileged(target, rendered, staged_as="workbench-client")
+    run(["systemctl", "daemon-reload"], privileged=True)
+    run(["systemctl", "try-restart", CLIENT_UNIT_NAME], privileged=True)
+    info(f"wrote {target}")
     return True
 
 

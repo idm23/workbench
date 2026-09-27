@@ -942,7 +942,10 @@ def test_the_client_audio_check_is_happy_about_hdmi(monkeypatch):
     assert doctor.check_client_audio().state is CheckState.OK
 
 
-def test_the_client_unit_check_reports_whether_it_is_streaming(monkeypatch):
+def test_the_client_unit_check_says_running_and_never_streaming(monkeypatch):
+    """`is-active` knows the process is alive, not that a picture is leaving it.
+    A client sat unpaired for twelve days while this said "streaming now"."""
+
     class Result:
         returncode = 0
         stderr = ""
@@ -958,7 +961,8 @@ def test_the_client_unit_check_reports_whether_it_is_streaming(monkeypatch):
 
     check = doctor.check_client_unit()
     assert check.state is CheckState.OK
-    assert "streaming now" in check.detail
+    assert "running" in check.detail
+    assert "streaming" not in check.detail
 
 
 def test_an_uninstalled_client_unit_is_a_warning_with_a_fix(monkeypatch):

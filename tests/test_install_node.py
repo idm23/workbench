@@ -1194,3 +1194,64 @@ def test_install_gaming_runs_every_step_in_order(monkeypatch):
 
     assert install_node.install_gaming() is True
     assert order == ["rule", "render", "steam", "sunshine", "audio", "prep-cmd"]
+
+
+@pytest.fixture
+def client_unit(tmp_path, monkeypatch):
+    """A client node whose unit lives in this test's own systemd directory."""
+    monkeypatch.setattr(install_node, "SYSTEMD_DIR", tmp_path)
+    monkeypatch.setattr(install_node, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(install_node, "stream_host", lambda: "192.168.1.155")
+    monkeypatch.setattr(install_node, "_service_passwd", lambda: pwd.getpwuid(os.getuid()))
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    monkeypatch.setattr(
+        install_node,
+        "write_privileged",
+        lambda target, content, **k: target.write_text(content),
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(install_node, "run", lambda argv, **k: commands.append(argv))
+    return tmp_path / install_node.CLIENT_UNIT_NAME, commands
+
+
+def test_a_stale_client_unit_is_rewritten_and_restarted(client_unit):
+    """The Pi that ran `moonlight-qt` for twelve days after the change to
+    Moonlight Embedded had deployed: the deploy never rewrote the unit, and a
+    reload alone would have left the old process running anyway."""
+    target, commands = client_unit
+    target.write_text("ExecStart=/usr/bin/moonlight-qt stream 192.168.1.155 Desktop\n")
+
+    assert install_node.converge_client_unit() is True
+
+    assert "/usr/local/bin/moonlight stream 192.168.1.155" in target.read_text()
+    assert ["systemctl", "daemon-reload"] in commands
+    # try-restart: a client somebody stopped on purpose stays stopped.
+    assert ["systemctl", "try-restart", install_node.CLIENT_UNIT_NAME] in commands
+
+
+def test_a_current_client_unit_is_left_alone(client_unit):
+    """Every deploy tick asks, so an unchanged unit must cost nothing - and
+    above all must not restart a stream somebody is watching."""
+    _, commands = client_unit
+    install_node.converge_client_unit()
+    commands.clear()
+
+    assert install_node.converge_client_unit() is False
+    assert commands == []
+
+
+def test_a_client_without_moonlight_embedded_keeps_its_old_unit(client_unit, monkeypatch, caplog):
+    """A node installed before Moonlight Embedded existed. Pointing its unit at
+    a binary it does not have trades an idle client for one restarting every
+    five seconds; the installer builds it, and a deploy must not pretend to."""
+    target, commands = client_unit
+    old = "ExecStart=/usr/bin/moonlight-qt stream 192.168.1.155 Desktop\n"
+    target.write_text(old)
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+
+    with caplog.at_level("WARNING"):
+        assert install_node.converge_client_unit() is False
+
+    assert target.read_text() == old
+    assert commands == []
+    assert "Moonlight Embedded is not installed" in caplog.text
