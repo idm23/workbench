@@ -702,6 +702,16 @@ def steam_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+def test_steam_off_the_path_is_still_found(steam_home, monkeypatch):
+    """A doctor run from a unit has no `/usr/games` on its PATH."""
+    wrapper = steam_home / "steam"
+    wrapper.write_text("")
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor, "STEAM_WRAPPER", wrapper)
+
+    assert "not installed" not in doctor.check_steam().detail
+
+
 def test_steam_that_has_never_run_is_not_ready(steam_home):
     """Installed and green was the whole check once - for the entire time
     Steam had never run, its first launch a dialog nobody could see."""
@@ -749,8 +759,9 @@ def test_a_home_the_doctor_cannot_read_is_unknown_not_missing(steam_home, monkey
     assert doctor.check_steam().state is CheckState.UNKNOWN
 
 
-def test_steam_missing_warns_with_the_install_command(monkeypatch):
+def test_steam_missing_warns_with_the_install_command(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor, "STEAM_WRAPPER", tmp_path / "no-steam-here")
     monkeypatch.setattr(doctor, "gaming_user", lambda: "ian")
 
     check = doctor.check_steam()
