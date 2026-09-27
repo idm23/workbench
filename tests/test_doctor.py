@@ -1130,3 +1130,114 @@ def test_no_bluetooth_radio_is_unknown(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "RFKILL_DIR", tmp_path / "absent")
 
     assert doctor.check_bluetooth().state is CheckState.UNKNOWN
+
+
+#: homebox-node-1's own `lsblk` tree: a 1 TB disk whose root volume Ubuntu
+#: Server's installer made 100 GB, leaving ~850 GB that nothing could use.
+NODE_1_LSBLK = {
+    "blockdevices": [
+        {
+            "name": "nvme0n1",
+            "path": "/dev/nvme0n1",
+            "size": 1024209543168,
+            "type": "disk",
+            "mountpoint": None,
+            "children": [
+                {
+                    "name": "nvme0n1p1",
+                    "path": "/dev/nvme0n1p1",
+                    "size": 1127219200,
+                    "type": "part",
+                    "mountpoint": "/boot/efi",
+                },
+                {
+                    "name": "nvme0n1p2",
+                    "path": "/dev/nvme0n1p2",
+                    "size": 2147483648,
+                    "type": "part",
+                    "mountpoint": "/boot",
+                },
+                {
+                    "name": "nvme0n1p3",
+                    "path": "/dev/nvme0n1p3",
+                    "size": 1020932390912,
+                    "type": "part",
+                    "mountpoint": None,
+                    "children": [
+                        {
+                            "name": "ubuntu--vg-ubuntu--lv",
+                            "path": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+                            "size": 107374182400,
+                            "type": "lvm",
+                            "mountpoint": "/",
+                        }
+                    ],
+                },
+            ],
+        }
+    ]
+}
+
+
+def _lsblk(monkeypatch, tree, returncode: int = 0):
+    stdout = json.dumps(tree) if tree is not None else ""
+    result = subprocess.CompletedProcess(["lsblk"], returncode, stdout=stdout, stderr="")
+    monkeypatch.setattr(doctor, "_run", lambda argv, **k: result)
+
+
+def test_a_root_volume_given_a_tenth_of_its_disk_warns_with_the_command(monkeypatch):
+    """Steam said "46 GB free" on a 1 TB disk, and nothing said why."""
+    _lsblk(monkeypatch, NODE_1_LSBLK)
+
+    check = doctor.check_disk_allocated()
+
+    assert check.state is CheckState.WARN
+    assert "851 GB" in check.detail
+    assert check.fix == "sudo lvextend -r -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv"
+
+
+def test_a_root_volume_that_fills_its_partition_passes(monkeypatch):
+    tree = json.loads(json.dumps(NODE_1_LSBLK))
+    partition = tree["blockdevices"][0]["children"][2]
+    partition["children"][0]["size"] = partition["size"] - 4 * 1024**2
+
+    _lsblk(monkeypatch, tree)
+
+    assert doctor.check_disk_allocated().state is CheckState.OK
+
+
+def test_a_root_on_a_plain_partition_has_nothing_held_back(monkeypatch):
+    _lsblk(
+        monkeypatch,
+        {
+            "blockdevices": [
+                {
+                    "name": "mmcblk0",
+                    "size": 64 * 1024**3,
+                    "type": "disk",
+                    "mountpoint": None,
+                    "children": [
+                        {
+                            "name": "mmcblk0p2",
+                            "size": 63 * 1024**3,
+                            "type": "part",
+                            "mountpoint": "/",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert doctor.check_disk_allocated().state is CheckState.OK
+
+
+def test_no_lsblk_is_unknown(monkeypatch):
+    _lsblk(monkeypatch, None, returncode=1)
+
+    assert doctor.check_disk_allocated().state is CheckState.UNKNOWN
+
+
+def test_every_machine_is_asked_about_its_disk():
+    assert doctor.check_disk_allocated in doctor.HEAD_CHECKS
+    assert doctor.check_disk_allocated in doctor.NODE_CHECKS
