@@ -590,6 +590,17 @@ def _gaming_user_argument() -> str | None:
 #: about its own dependencies that a hand-rolled unpack would get wrong.
 STEAM_PACKAGE = "steam-installer"
 
+#: Where that package puts the `steam` command. Asked by path, never by
+#: `shutil.which`: `/usr/games` is on a login shell's PATH and on neither a
+#: systemd service's default PATH nor sudo's `secure_path`, so the deployer and
+#: the installer - the only two callers - both concluded Steam was missing on a
+#: machine it was installed on, and skipped its unit without a word.
+STEAM_BINARY = Path("/usr/games/steam")
+
+
+def steam_installed() -> bool:
+    return STEAM_BINARY.exists() or shutil.which("steam") is not None
+
 
 def _nvidia_i386_gl_package() -> str | None:
     """The i386 package Steam actually needs to match this machine's driver.
@@ -782,7 +793,7 @@ def install_steam() -> bool:
     only here, inside `is_gaming_node()`, and logged rather than silent: this
     is not something every node pays for, only ones that asked to play.
     """
-    if shutil.which("steam") is not None:
+    if steam_installed():
         info("Steam already installed")
         return True
 
@@ -866,7 +877,7 @@ Description=Workbench: Steam in Big Picture, on the render surface
 Type=simple
 # DISPLAY comes from environment.d, written by the render backend.
 Environment=PATH={answers}:/usr/local/bin:/usr/bin:/bin:/usr/games
-ExecStart=/usr/games/steam {" ".join(STEAM_ARGS)}
+ExecStart={STEAM_BINARY} {" ".join(STEAM_ARGS)}
 # on-failure: quitting Steam from its own menu exits cleanly and is a choice.
 Restart=on-failure
 RestartSec=10
@@ -902,7 +913,7 @@ def converge_steam_session(*, start: bool = False) -> bool:
     stream here ran a game with the switch off.
     """
     player = gaming_user()
-    if not player or shutil.which("steam") is None:
+    if not player or not steam_installed():
         return False
     try:
         account = pwd.getpwnam(player)
