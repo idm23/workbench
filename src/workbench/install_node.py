@@ -1434,6 +1434,38 @@ dtoverlay=gpio-fan,gpiopin={pin},temp={temp}
 {FAN_BLOCK_END}"""
 
 
+def enable_bluetooth() -> bool:
+    """Unblock and power on the radio a controller pairs over. Returns whether it is on.
+
+    Raspberry Pi OS ships with Bluetooth soft-blocked, and systemd restores that
+    block at every boot. A client node therefore came up with a working adapter
+    that `bluetoothctl power on` could only answer with `org.bluez.Error.Failed`
+    - found with a controller in hand and nothing on the node reporting why.
+    `rfkill unblock` is what systemd then saves and restores instead, so this
+    holds across reboots once it has run.
+
+    Pairing a controller stays a person's step (see docs/gaming.md): it needs
+    the controller held in pairing mode, which no script can do.
+    """
+    # Root's PATH has /usr/sbin, where rfkill lives, and both callers are root.
+    if not systemd_is_running() or shutil.which("rfkill") is None:
+        return False
+    try:
+        run(["rfkill", "unblock", "bluetooth"], privileged=True)
+    except InstallError as error:
+        warn(f"could not unblock Bluetooth: {error}")
+        return False
+    if shutil.which("bluetoothctl") is None:
+        return False
+    powered = subprocess.run(
+        ["bluetoothctl", "power", "on"], capture_output=True, text=True, check=False, timeout=15
+    )
+    if powered.returncode != 0:
+        warn(f"Bluetooth did not power on: {(powered.stderr or powered.stdout).strip()}")
+        return False
+    return True
+
+
 def configure_fan() -> bool:
     """Put this machine's fan under thermal control, if one was declared.
 
@@ -1524,6 +1556,7 @@ def install_client() -> bool:
         prefer_hdmi_audio(account)
 
     configure_fan()
+    enable_bluetooth()
 
     host = stream_host()
     if not host:

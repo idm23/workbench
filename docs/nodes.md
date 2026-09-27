@@ -102,6 +102,25 @@ as a person produces a working manual test and a unit that is still unpaired.
 The unit is installed and enabled but deliberately not started until pairing has happened:
 a client pointed at a machine that will not accept it restarts every five seconds forever.
 
+### A controller
+
+Also one-time, and also over SSH — the only thing that needs your hands is the controller's
+own pairing button. The installer has already switched the radio on: Raspberry Pi OS ships
+Bluetooth soft-blocked and restores that block at every boot, so `bluetoothctl power on`
+fails with a bare `org.bluez.Error.Failed` until something unblocks it, and nothing says so.
+The doctor now does.
+
+```sh
+bluetoothctl --timeout 60 scan on     # put the controller in pairing mode now
+bluetoothctl devices                  # find it by name, e.g. "Pro Controller"
+bluetoothctl trust <address>          # trusted: it reconnects by itself from now on
+bluetoothctl pair <address>
+bluetoothctl connect <address>
+```
+
+Moonlight passes it to the gaming node, where Sunshine creates a matching virtual pad — a
+Switch Pro Controller arrives as `Sunshine (libvirtualhid) Nintendo Pro Controller`.
+
 ## Installing one
 
 On a fresh Ubuntu Server machine with an NVIDIA card:

@@ -269,6 +269,7 @@ def test_a_client_node_serves_no_model(offering, monkeypatch):
     machine whose job is to *display* a stream."""
     monkeypatch.setenv("WORKBENCH_ROLE", "node")
     offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
 
     assert is_client_node()
     assert not is_inference_node()
@@ -308,6 +309,7 @@ def test_client_is_a_known_capability(offering, monkeypatch, caplog):
     """A typo is warned about and dropped; `client` must not be one of them."""
     monkeypatch.setenv("WORKBENCH_ROLE", "node")
     offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
 
     with caplog.at_level("WARNING"):
         assert CLIENT in declared_capabilities()
@@ -391,6 +393,7 @@ def test_a_client_only_node_never_touches_a_model_server(offering, monkeypatch):
     capabilities were declared; now the deploy does too."""
     monkeypatch.setenv("WORKBENCH_ROLE", "node")
     offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
     clients: list[int] = []
     monkeypatch.setattr(
         "workbench.install_node.install_inference_server",
@@ -419,9 +422,24 @@ def test_an_inference_node_is_not_handed_a_client(offering, monkeypatch):
     assert deploy.converge_node() is None
 
 
+def test_a_client_node_turns_its_bluetooth_on_every_tick(offering, monkeypatch):
+    """So a radio that came back blocked after a reboot is on again within
+    one tick, before anyone reaches for a controller."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("client\n")
+    enabled: list[int] = []
+    monkeypatch.setattr("workbench.install_node.converge_client_unit", lambda: False)
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: bool(enabled.append(1)))
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+
+    assert deploy.converge_node() is None
+    assert enabled == [1]
+
+
 def test_a_broken_client_does_not_fail_a_deploy(offering, monkeypatch, caplog):
     monkeypatch.setenv("WORKBENCH_ROLE", "node")
     offering.write_text("client\n")
+    monkeypatch.setattr("workbench.install_node.enable_bluetooth", lambda: True)
     registered: list[int] = []
 
     def explode() -> bool:
