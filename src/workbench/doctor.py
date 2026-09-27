@@ -1489,13 +1489,16 @@ def check_client_unit() -> Check:
             fix="sudo ./install.sh --role=node --capabilities=client",
         )
 
+    # "Running", never "streaming": `is-active` knows the process is alive and
+    # nothing about whether a picture is leaving it. This said "streaming now"
+    # for twelve days about a client that had never connected.
     active = _run(["systemctl", "is-active", CLIENT_UNIT])
     running = active is not None and active.stdout.strip() == "active"
     return Check(
         key=key,
         title=title,
         state=CheckState.OK,
-        detail=("Enabled and streaming now." if running else "Enabled, not streaming right now."),
+        detail=("Enabled and running." if running else "Enabled, not running right now."),
     )
 
 
