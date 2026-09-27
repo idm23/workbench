@@ -18,6 +18,13 @@ from workbench import install_node
 from workbench.install import InstallError
 
 
+@pytest.fixture(autouse=True)
+def no_steam_on_disk(tmp_path, monkeypatch):
+    """Whether Steam is installed is asked of the disk as well as PATH, so a
+    test machine that happens to have Steam must not change any answer here."""
+    monkeypatch.setattr(install_node, "STEAM_BINARY", tmp_path / "no-steam-here")
+
+
 def test_the_drop_in_binds_every_interface(monkeypatch):
     """The head reaches its node over the LAN and, failing that, the tailnet.
     OLLAMA_HOST takes one address, so binding both means binding all."""
@@ -1304,7 +1311,7 @@ def test_steam_runs_in_big_picture_with_its_menus_on_the_cpu(steam_session):
     install_node.converge_steam_session()
 
     unit = (home / ".config/systemd/user" / install_node.STEAM_UNIT_NAME).read_text()
-    assert "ExecStart=/usr/games/steam -gamepadui -cef-disable-gpu" in unit
+    assert f"ExecStart={install_node.STEAM_BINARY} -gamepadui -cef-disable-gpu" in unit
     assert "WantedBy=default.target" in unit
     # The first-run answer is first on the PATH, or it answers nothing.
     assert f"Environment=PATH={home / install_node.STEAM_ANSWER_DIR}:" in unit
@@ -1415,3 +1422,21 @@ def test_no_rfkill_means_nothing_to_unblock(monkeypatch):
     monkeypatch.setattr(install_node, "run", lambda *a, **k: pytest.fail("nothing to run"))
 
     assert install_node.enable_bluetooth() is False
+
+
+def test_steam_is_found_where_the_deployer_cannot_see_it(steam_session, tmp_path, monkeypatch):
+    """What happened on homebox-node-1: `/usr/games` is on neither a systemd
+    service's PATH nor sudo's, so the deploy looked for `steam`, did not find
+    it, and skipped the unit without a word on a machine where it was
+    installed."""
+    home, _ = steam_session
+    wrapper = tmp_path / "games" / "steam"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(install_node, "STEAM_BINARY", wrapper)
+    monkeypatch.setattr(install_node.shutil, "which", lambda name: None)
+
+    assert install_node.converge_steam_session() is True
+
+    unit = (home / ".config/systemd/user" / install_node.STEAM_UNIT_NAME).read_text()
+    assert f"ExecStart={wrapper} -gamepadui -cef-disable-gpu" in unit

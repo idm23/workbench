@@ -1176,6 +1176,10 @@ def _gaming_install_fix() -> str:
 #: `debian-installation` and links `~/.steam/steam` to it.
 STEAM_BOOTSTRAPPED = Path(".steam/steam/ubuntu12_32/steam")
 
+#: Where Ubuntu's package puts `steam`. Named here rather than imported from
+#: the node installer, so the doctor stays importable where it never ran.
+STEAM_WRAPPER = Path("/usr/games/steam")
+
 #: Written by Steam when somebody signs in, naming each account it remembers.
 STEAM_LOGINS = Path(".steam/steam/config/loginusers.vdf")
 
@@ -1195,7 +1199,8 @@ def check_steam() -> Check:
     key = "steam"
     title = "Steam is ready"
 
-    if shutil.which("steam") is None:
+    # By path as well as PATH: see `install_node.STEAM_BINARY` for why.
+    if shutil.which("steam") is None and not STEAM_WRAPPER.exists():
         return Check(
             key=key,
             title=title,
