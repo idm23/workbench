@@ -1775,6 +1775,91 @@ CLIENT_CHECKS = (
 
 #: Every check, in the order a person reads them: what this machine is, then
 #: whether the agent can work, then whether the outside world can be reached.
+#: How much disk may sit unallocated beneath `/` before it is worth a line.
+#: Enough to ignore the few gigabytes an installer rounds away, far below what
+#: Ubuntu Server's default leaves: it gives the root volume 100 GB and holds
+#: the rest back, which on a 1 TB node was 850 GB that Steam reported as
+#: "46 GB free" and that nothing anywhere mentioned.
+UNALLOCATED_WARN_BYTES = 20 * 1024**3
+
+
+def _unallocated_beneath_root(tree: dict) -> tuple[str, int, int] | None:
+    """(root volume, its partition's size, bytes no volume uses), or None.
+
+    None when `/` is not a logical volume, which is the common answer on a
+    plain partition and never a problem. Read from `lsblk`'s tree rather than
+    `vgs`, because `vgs` needs root and the doctor usually is not.
+    """
+
+    def walk(node: dict):
+        for child in node.get("children", []):
+            yield node, child
+            yield from walk(child)
+
+    for device in tree.get("blockdevices", []):
+        for parent, child in walk(device):
+            if child.get("mountpoint") == "/" and child.get("type") == "lvm":
+                used = sum(
+                    int(c.get("size") or 0)
+                    for c in parent.get("children", [])
+                    if c.get("type") == "lvm"
+                )
+                size = int(parent.get("size") or 0)
+                return child.get("path") or child.get("name", ""), size, max(0, size - used)
+    return None
+
+
+def check_disk_allocated() -> Check:
+    """Whether `/` was given the disk it sits on.
+
+    Reported rather than fixed, like the GPU driver: growing a filesystem is
+    safe online but cannot be undone for ext4, so it is a decision with the
+    exact command attached rather than something a deploy tick does.
+    """
+    key = "disk-allocated"
+    title = "The root filesystem has the disk"
+
+    probe = _run(["lsblk", "-b", "-J", "-o", "NAME,PATH,SIZE,TYPE,MOUNTPOINT"])
+    try:
+        tree = json.loads(probe.stdout) if probe is not None and probe.returncode == 0 else None
+    except ValueError:
+        tree = None
+    if tree is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="lsblk could not describe the disks here.",
+        )
+
+    found = _unallocated_beneath_root(tree)
+    if found is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail="/ is not on LVM; nothing is held back.",
+        )
+    volume, size, unallocated = found
+    if unallocated < UNALLOCATED_WARN_BYTES:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail=f"{volume} uses its {size / 1024**3:.0f} GB partition.",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.WARN,
+        detail=(
+            f"{unallocated / 1024**3:.0f} GB of a {size / 1024**3:.0f} GB partition is "
+            f"unallocated beneath /, so it is unusable until {volume} is grown."
+        ),
+        fix=f"sudo lvextend -r -l +100%FREE {volume}",
+    )
+
+
 HEAD_CHECKS = (
     check_deployment,
     check_home_directory,
@@ -1787,6 +1872,7 @@ HEAD_CHECKS = (
     check_github_token_works,
     check_notification_keys,
     check_tailscale_serve,
+    check_disk_allocated,
 )
 
 #: What a node is asked instead. Most of the list above is about work a node
@@ -1801,6 +1887,7 @@ NODE_CHECKS = (
     check_deployment,
     check_home_directory,
     check_head,
+    check_disk_allocated,
 )
 
 #: Asked only of a node declared for `inference`. These used to be in
