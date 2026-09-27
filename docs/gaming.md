@@ -100,9 +100,9 @@ under the name that was typed into Moonlight.
 /srv/workbench/.venv/bin/python -m workbench.doctor
 ```
 
-adds five questions on top of a plain node's: is Steam installed, is Sunshine installed, is
-a render surface actually up, has anything paired with Sunshine, and was the last stream
-encoded on the GPU. None of these fail the doctor's exit code — a gaming node missing Steam
+adds six questions on top of a plain node's: is Steam installed, is Sunshine installed, is
+a render surface actually up, will it stay up rather than blank, has anything paired with
+Sunshine, and was the last stream encoded on the GPU. None of these fail the doctor's exit code — a gaming node missing Steam
 still lends its GPU to inference exactly as well as one that was never asked to game.
 
 The pairing check reads Sunshine's own `sunshine_state.json` and reports the client by the
@@ -113,6 +113,7 @@ name you typed into Moonlight, so it says *paired with roth* rather than *1 clie
 | Symptom | Where to look |
 |---|---|
 | The doctor says Steam or Sunshine is missing | Re-run the install command above |
+| A stream goes black about ten minutes in, and stays black | The X server blanked itself: Xorg's defaults blank after ten idle minutes and a stream sends no local input. The config now turns that off and every deploy tick applies it to the running server; by hand, `DISPLAY=:0 xset s off s noblank -dpms` on the node |
 | A stream connects but shows nothing | `systemctl status workbench-x11` on the node — a system unit, so no `--user`/`-M` needed; no render surface means nothing to capture |
 | Sunshine's prep command does not flip the switch | `systemctl status workbench-gaming` on the node (also a system unit); confirm the polkit rule was granted (`ls /etc/polkit-1/rules.d/`) |
 | The switch flips but inference never comes back | `journalctl -u ollama`; `python -m workbench.gaming stop` by hand reports the same thing Sunshine's `undo` command would |

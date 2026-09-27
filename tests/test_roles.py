@@ -437,6 +437,33 @@ def test_a_broken_client_does_not_fail_a_deploy(offering, monkeypatch, caplog):
     assert registered == [1]
 
 
+def test_a_gaming_node_converges_its_render_surface(offering, monkeypatch):
+    """So a server that is blanking stops, without anyone logging in."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference,gaming\n")
+    monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: False)
+    monkeypatch.setattr("workbench.install_node.install_inference_server", lambda: True)
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+    converged: list[int] = []
+    monkeypatch.setattr(deploy.render, "converge", lambda: converged.append(1))
+
+    assert deploy.converge_node() is None
+    assert converged == [1]
+
+
+def test_a_node_that_does_not_game_has_no_render_surface_to_converge(offering, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    offering.write_text("inference\n")
+    monkeypatch.setattr(deploy, "gpu_is_busy_elsewhere", lambda: False)
+    monkeypatch.setattr("workbench.install_node.install_inference_server", lambda: True)
+    monkeypatch.setattr("workbench.install_node.register_with_head", lambda: None)
+    monkeypatch.setattr(
+        deploy.render, "converge", lambda: pytest.fail("no gaming, no render surface")
+    )
+
+    assert deploy.converge_node() is None
+
+
 def test_a_machine_without_systemd_is_never_busy(monkeypatch):
     """The container the fresh-install test runs in, and any laptop checkout."""
     monkeypatch.setattr("workbench.install.systemd_is_running", lambda: False)

@@ -1022,3 +1022,20 @@ def test_a_client_with_no_stream_host_says_so(monkeypatch):
     check = doctor.check_stream_host()
     assert check.state is CheckState.WARN
     assert check.fix is not None and "--stream-host" in check.fix
+
+
+def test_a_blanking_display_is_a_warning_with_the_command_that_stops_it(monkeypatch):
+    """The failure it catches looked exactly like a broken client: a solid
+    black stream, ten minutes into a session nobody was touching."""
+    monkeypatch.setattr("workbench.render.display_blanks", lambda: True)
+
+    check = doctor.check_display_never_blanks()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None and "xset s off s noblank -dpms" in check.fix
+
+
+def test_a_display_that_cannot_be_asked_is_unknown_not_a_warning(monkeypatch):
+    monkeypatch.setattr("workbench.render.display_blanks", lambda: None)
+
+    assert doctor.check_display_never_blanks().state is CheckState.UNKNOWN
