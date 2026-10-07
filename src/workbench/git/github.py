@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from workbench.config import github_token_setting
+
 API_ROOT = "https://api.github.com"
 TIMEOUT_SECONDS = 5.0
 
@@ -96,6 +98,12 @@ class RepoLookupUnavailable:
 
 type RepoLookup = RepoMetadata | RepoNotFound | RepoLookupUnavailable
 
+_ANONYMOUS_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    # GitHub rejects requests without a User-Agent.
+    "User-Agent": "workbench",
+}
+
 
 def parse_repo_reference(raw: str) -> ParsedReference:
     """Turn user input into an owner/repo pair.
@@ -120,21 +128,20 @@ def parse_repo_reference(raw: str) -> ParsedReference:
     )
 
 
-def fetch_repo_metadata(ref: RepoRef) -> RepoLookup:
+def fetch_repo_metadata(ref: RepoRef, token: str | None = None) -> RepoLookup:
     """Look the repository up on GitHub.
 
-    Rate limiting is an expected outcome rather than an exceptional one: this
-    is unauthenticated and capped at 60 requests an hour, so it is reported as
-    RepoLookupUnavailable and left to the caller to decide about.
+    With a `token` this sees whatever the token can, which is what makes a
+    private repository addable at all: anonymously, GitHub answers a private
+    repository with exactly the 404 it gives one that does not exist, so the
+    two cannot be told apart without asking as someone. Without one it still
+    works for public repositories, at 60 requests an hour, and rate limiting
+    is reported as RepoLookupUnavailable and left to the caller to decide about.
     """
     try:
         response = httpx.get(
             f"{API_ROOT}/repos/{ref.owner}/{ref.repo}",
-            headers={
-                "Accept": "application/vnd.github+json",
-                # GitHub rejects requests without a User-Agent.
-                "User-Agent": "workbench",
-            },
+            headers=_headers(token) if token else _ANONYMOUS_HEADERS,
             timeout=TIMEOUT_SECONDS,
             follow_redirects=True,
         )
@@ -142,18 +149,34 @@ def fetch_repo_metadata(ref: RepoRef) -> RepoLookup:
         return RepoLookupUnavailable(f"Could not reach GitHub to look up {ref.slug}.")
 
     if response.status_code == 404:
+        own = github_token_setting(ref.owner)
+        hint = (
+            "or it is private and the token has not been granted it. A fine-grained token "
+            f"reaches one owner's repositories, so {ref.owner}'s may need its own, in {own}."
+            if token
+            else f"or it is private, which needs {own} or WORKBENCH_GITHUB_TOKEN to see."
+        )
         return RepoNotFound(
             slug=ref.slug,
             message=(
-                f"GitHub has no repository {ref.slug}. Check the spelling — "
-                "or it may be private, which this cannot see yet."
+                f"GitHub has no repository {ref.slug} that this can see. "
+                f"Check the spelling — {hint}"
             ),
+        )
+
+    if response.status_code == 401:
+        # Not a verdict on the repository: a bad token says nothing about
+        # whether it exists, so the caller may still save the project.
+        return RepoLookupUnavailable(
+            f"GitHub refused the token looking up {ref.slug} — "
+            f"{github_token_setting(ref.owner)} if set, else WORKBENCH_GITHUB_TOKEN. "
+            "It has expired or been revoked."
         )
 
     if response.status_code != 200:
         return RepoLookupUnavailable(
-            f"GitHub returned {response.status_code} for {ref.slug} "
-            "(most likely the unauthenticated rate limit)."
+            f"GitHub returned {response.status_code} for {ref.slug}"
+            + ("." if token else " (most likely the unauthenticated rate limit).")
         )
 
     payload = response.json()

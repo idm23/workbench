@@ -250,7 +250,7 @@ def _publishes(
     monkeypatch.setattr(runner_module, "has_commits", lambda *_: commits)
     monkeypatch.setattr(runner_module, "push_branch", push_branch)
     monkeypatch.setattr(runner_module, "open_pull_request", open_pull_request)
-    monkeypatch.setattr(runner_module, "github_token", lambda: token)
+    monkeypatch.setattr(runner_module, "github_token", lambda owner=None: token)
     return calls
 
 

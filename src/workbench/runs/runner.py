@@ -53,6 +53,7 @@ from workbench.agents.registry import UnknownBackend, get_backend
 from workbench.config import (
     agent_environment,
     github_token,
+    github_token_setting,
     input_idle_seconds,
     local_model_override,
 )
@@ -666,14 +667,14 @@ def _publish(
         )
         return None
 
-    token = github_token()
+    token = github_token(task.project.owner)
     if token is None:
         _notice(
             db,
             run,
-            f"Pushed {branch}, but no pull request was opened: WORKBENCH_GITHUB_TOKEN is not "
-            "set in /etc/workbench/env, and opening one needs the API rather than the "
-            "deploy key.",
+            f"Pushed {branch}, but no pull request was opened: neither "
+            f"{github_token_setting(task.project.owner)} nor WORKBENCH_GITHUB_TOKEN is set "
+            "in /etc/workbench/env, and opening one needs the API rather than the deploy key.",
         )
         return None
 

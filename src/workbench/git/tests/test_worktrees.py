@@ -19,6 +19,7 @@ from workbench.git.worktrees import (
     Synced,
     SyncRefused,
     WorktreeReady,
+    _explain_refusal,
     branch_name,
     clone_path_for,
     diffstat,
@@ -28,6 +29,7 @@ from workbench.git.worktrees import (
     fetch_checkout,
     has_commits,
     local_checkout,
+    network_environment,
     remove_worktree,
     run_setup_command,
     slugify,
@@ -253,6 +255,128 @@ def test_fetch_checkout_is_a_no_op_without_a_remote(repo):
     assert isinstance(fetch_checkout(repo), GitOk)
 
 
+# --- Reading a private repository ------------------------------------------
+#
+# A private repository is cloned over HTTPS with WORKBENCH_GITHUB_TOKEN, given
+# to git through a credential helper that exists only in the environment of
+# the one command that needs it. These ask git itself what it would send,
+# with `git credential fill` — the same lookup a clone makes after GitHub says
+# 401 — so the helper's quoting is proven against a real git rather than read.
+
+
+def _credential_for(url: str, env: dict[str, str]) -> str:
+    """What git would hand GitHub for `url`, or its complaint if nothing."""
+    answered = subprocess.run(
+        ["git", "credential", "fill"],
+        input=f"url={url}\n\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    return answered.stdout + answered.stderr
+
+
+def test_a_configured_token_is_what_git_sends_to_github(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN", "github_pat_abc")
+
+    answered = _credential_for("https://github.com/idm23/private", network_environment())
+
+    assert "username=x-access-token" in answered
+    assert "password=github_pat_abc" in answered
+
+
+def test_the_token_is_never_offered_to_anywhere_but_github(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN", "github_pat_abc")
+
+    answered = _credential_for("https://example.com/someone/repo", network_environment())
+
+    assert "github_pat_abc" not in answered
+
+
+def test_without_a_token_git_refuses_rather_than_prompting(monkeypatch):
+    """A clone from a web request has nobody to type a password; a prompt is
+    a hang until the timeout."""
+    monkeypatch.delenv("WORKBENCH_GITHUB_TOKEN", raising=False)
+    env = network_environment()
+
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" not in env
+
+
+def test_the_token_stays_out_of_the_clones_own_config(monkeypatch, cloned_repo):
+    """An agent works beside the clone, and must not inherit the credential
+    just by running `git fetch` there."""
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN", "github_pat_abc")
+    _, checkout = cloned_repo
+
+    assert isinstance(fetch_checkout(checkout), GitOk)
+
+    config = (checkout / ".git" / "config").read_text()
+    assert "github_pat_abc" not in config
+    assert "credential" not in config
+
+
+def test_a_private_clone_without_a_token_names_the_setting(monkeypatch):
+    monkeypatch.delenv("WORKBENCH_GITHUB_TOKEN", raising=False)
+    refused = GitFailed(
+        "git clone failed (exit 128).",
+        stderr="fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    )
+
+    explained = _explain_refusal(refused, "Pivot-Robots")
+
+    assert "private" in explained.message
+    assert "WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS" in explained.message
+
+
+def test_a_shared_token_refused_by_another_owner_names_that_owners_setting(monkeypatch):
+    """The likeliest reason the shared token cannot read an organisation's
+    repository is that it was minted for a different owner, and no amount of
+    re-granting fixes that."""
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN", "github_pat_abc")
+    monkeypatch.delenv("WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS", raising=False)
+    refused = GitFailed("git clone failed (exit 128).", stderr="fatal: Authentication failed")
+
+    explained = _explain_refusal(refused, "Pivot-Robots")
+
+    assert "WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS" in explained.message
+
+
+def test_a_clone_that_failed_for_another_reason_is_left_alone():
+    refused = GitFailed("git clone failed (exit 128).", stderr="fatal: No space left on device")
+
+    assert _explain_refusal(refused, "idm23") == refused
+
+
+def test_an_owner_with_its_own_token_is_read_with_that_token(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN", "github_pat_shared")
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS", "github_pat_pivot")
+
+    pivot = _credential_for(
+        "https://github.com/Pivot-Robots/pivot", network_environment("Pivot-Robots")
+    )
+    other = _credential_for("https://github.com/idm23/workbench", network_environment("idm23"))
+
+    assert "password=github_pat_pivot" in pivot
+    assert "password=github_pat_shared" in other
+
+
+def test_a_fetch_finds_the_owner_from_the_clones_origin(monkeypatch, cloned_repo):
+    """Nothing passes an owner to a fetch; the clone already knows whose it is."""
+    from workbench.git import worktrees
+
+    _, checkout = cloned_repo
+    subprocess.run(
+        ("git", "remote", "set-url", "origin", "https://github.com/Pivot-Robots/pivot"),
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+    )
+
+    assert worktrees._origin_owner(checkout) == "Pivot-Robots"
+
+
 # --- Syncing a worktree with its origin -------------------------------------
 #
 # A branch is set once, when `ensure_worktree` first creates it, and nothing
@@ -475,6 +599,33 @@ def test_an_ssh_remote_is_left_exactly_as_it_is(cloned_repo):
 
     assert isinstance(ensure_push_remote(checkout), GitOk)
     assert _remote(checkout, "push") == "git@github.com:someone/other.git"
+
+
+def test_an_owner_with_its_own_token_pushes_over_https(monkeypatch, https_checkout):
+    """The machine's SSH key belongs to one owner's repositories. An owner
+    with its own token is reached entirely through it, push included."""
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN_IDM23", "github_pat_abc")
+    subprocess.run(
+        ("git", "remote", "set-url", "--push", "origin", "git@github.com:idm23/workbench.git"),
+        cwd=https_checkout,
+        check=True,
+        capture_output=True,
+    )
+
+    assert isinstance(ensure_push_remote(https_checkout), GitOk)
+
+    assert _remote(https_checkout, "push") == "https://github.com/idm23/workbench"
+    assert "github_pat_abc" not in (https_checkout / ".git" / "config").read_text()
+
+
+def test_the_shared_token_alone_leaves_pushing_on_ssh(monkeypatch, https_checkout):
+    """Unchanged for every project that worked before per-owner tokens."""
+    monkeypatch.setenv("WORKBENCH_GITHUB_TOKEN", "github_pat_abc")
+    monkeypatch.delenv("WORKBENCH_GITHUB_TOKEN_IDM23", raising=False)
+
+    ensure_push_remote(https_checkout)
+
+    assert _remote(https_checkout, "push") == "git@github.com:idm23/workbench.git"
 
 
 def test_a_remote_that_is_not_github_is_refused_rather_than_guessed_at(cloned_repo):

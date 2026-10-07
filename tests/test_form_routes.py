@@ -119,7 +119,7 @@ def test_a_duplicate_name_is_refused(client, session):
 def test_adding_a_project_with_metadata(client, session, monkeypatch):
     monkeypatch.setattr(
         "workbench.app.fetch_repo_metadata",
-        lambda ref: RepoMetadata(description="A tool.", default_branch="main"),
+        lambda ref, token: RepoMetadata(description="A tool.", default_branch="main"),
     )
     user = a_user(session)
 
@@ -145,7 +145,9 @@ def test_an_invalid_reference_is_refused_without_a_network_call(client, session)
 def test_a_repo_github_reports_missing_is_refused(client, session, monkeypatch):
     monkeypatch.setattr(
         "workbench.app.fetch_repo_metadata",
-        lambda ref: RepoNotFound(slug="octocat/hello", message="octocat/hello was not found."),
+        lambda ref, token: RepoNotFound(
+            slug="octocat/hello", message="octocat/hello was not found."
+        ),
     )
     user = a_user(session)
 
@@ -158,7 +160,7 @@ def test_a_repo_github_reports_missing_is_refused(client, session, monkeypatch):
 def test_an_unavailable_lookup_still_saves_the_project(client, session, monkeypatch):
     monkeypatch.setattr(
         "workbench.app.fetch_repo_metadata",
-        lambda ref: RepoLookupUnavailable(message="GitHub is rate-limiting us."),
+        lambda ref, token: RepoLookupUnavailable(message="GitHub is rate-limiting us."),
     )
     user = a_user(session)
 
@@ -174,7 +176,7 @@ def test_an_unavailable_lookup_still_saves_the_project(client, session, monkeypa
 def test_a_duplicate_project_is_refused(client, session, monkeypatch):
     monkeypatch.setattr(
         "workbench.app.fetch_repo_metadata",
-        lambda ref: RepoMetadata(description=None, default_branch=None),
+        lambda ref, token: RepoMetadata(description=None, default_branch=None),
     )
     user = a_user(session)
 
