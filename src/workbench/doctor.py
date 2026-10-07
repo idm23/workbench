@@ -51,6 +51,7 @@ from pathlib import Path
 import httpx
 
 from workbench.config import (
+    GITHUB_TOKEN_SETTING,
     default_agent_backend,
     deployment_root,
     fan_gpio,
@@ -656,7 +657,8 @@ def check_github_token() -> Check:
                 f"No WORKBENCH_GITHUB_TOKEN in {ENV_FILE}. Runs will commit and push, "
                 "then stop without opening a pull request.\n"
                 "          Mint a fine-grained token for "
-                f"{_repository_slug()} with Contents: Read and write,\n"
+                f"{_repository_slug()} and every private project, with Contents: Read and "
+                "write,\n"
                 "          Pull requests: Read and write, and Commit statuses: Read and "
                 "write, at\n"
                 "          https://github.com/settings/personal-access-tokens/new"
@@ -800,6 +802,118 @@ def _token_expiry(key: str, title: str, header: str | None) -> Check:
     return Check(
         key=key, title=title, state=CheckState.OK, detail=f"{accepted} It expires on {when}."
     )
+
+
+def configured_owner_tokens() -> dict[str, str] | TokenUnreadable:
+    """Every `WORKBENCH_GITHUB_TOKEN_<OWNER>`, by setting name, as a unit
+    would see them. The same reading rule as `configured_setting`, for
+    settings whose names are not known in advance."""
+    prefix = f"{GITHUB_TOKEN_SETTING}_"
+    found = {
+        name: value.strip()
+        for name, value in os.environ.items()
+        if name.startswith(prefix) and value.strip()
+    }
+    if not ENV_FILE.exists():
+        return found
+
+    try:
+        content = ENV_FILE.read_text()
+    except OSError as error:
+        if found:
+            return found
+        return TokenUnreadable(f"{ENV_FILE} could not be read: {error.strerror}.")
+
+    for line in content.splitlines():
+        name, separator, value = line.strip().partition("=")
+        name = name.strip()
+        value = value.strip().strip("\"'")
+        if separator and name.startswith(prefix) and value:
+            found.setdefault(name, value)
+    return found
+
+
+def check_owner_github_tokens() -> Check:
+    """Whether GitHub accepts each owner's own token, and for how long.
+
+    A project in an organisation is reached entirely through its owner's
+    token — cloned, pushed and opened as a pull request — so one that lapses
+    stops that project's runs at the first fetch. The same clock the shared
+    token has, and the same reason to watch it: nothing else will.
+
+    Asked of `/user`, which any valid token may read whatever it was scoped
+    to, because this check does not know which repositories each was minted
+    for. Whether a token reaches a given repository is answered, by name, the
+    first time a project tries.
+    """
+    key = "github-owner-tokens"
+    title = "GitHub accepts each owner's token"
+    tokens = configured_owner_tokens()
+
+    if isinstance(tokens, TokenUnreadable):
+        return Check(key=key, title=title, state=CheckState.UNKNOWN, detail=tokens.message)
+    if not tokens:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail="None configured: every project uses WORKBENCH_GITHUB_TOKEN.",
+        )
+
+    results: list[tuple[str, Check]] = []
+    for name, token in sorted(tokens.items()):
+        try:
+            response = httpx.get(
+                "https://api.github.com/user",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": "workbench",
+                },
+                timeout=NETWORK_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError as error:
+            results.append(
+                (name, Check(key, title, CheckState.UNKNOWN, f"Could not reach GitHub: {error}"))
+            )
+            continue
+        if response.status_code == 401:
+            results.append(
+                (
+                    name,
+                    Check(
+                        key,
+                        title,
+                        CheckState.FAIL,
+                        "GitHub refused it: expired or revoked. "
+                        "https://github.com/settings/personal-access-tokens",
+                    ),
+                )
+            )
+            continue
+        if response.status_code != 200:
+            results.append(
+                (
+                    name,
+                    Check(
+                        key, title, CheckState.UNKNOWN, f"GitHub returned {response.status_code}."
+                    ),
+                )
+            )
+            continue
+        results.append(
+            (
+                name,
+                _token_expiry(
+                    key, title, response.headers.get("github-authentication-token-expiration")
+                ),
+            )
+        )
+
+    order = (CheckState.OK, CheckState.UNKNOWN, CheckState.WARN, CheckState.FAIL)
+    worst = max((check.state for _, check in results), key=order.index)
+    detail = "\n          ".join(f"{name}: {check.detail}" for name, check in results)
+    return Check(key=key, title=title, state=worst, detail=detail)
 
 
 def check_tailscale_serve() -> Check:
@@ -1875,6 +1989,7 @@ HEAD_CHECKS = (
     check_deploy_key,
     check_github_token,
     check_github_token_works,
+    check_owner_github_tokens,
     check_notification_keys,
     check_tailscale_serve,
     check_disk_allocated,
@@ -1933,7 +2048,9 @@ def checks_for_this_machine() -> tuple[Callable[[], Check], ...]:
 #: all is answerable from the filesystem, and it needs to be, because the page
 #: banner probes with `--offline` — a machine that cannot open pull requests
 #: should say so on every page, not only to whoever thinks to run the doctor.
-NETWORK_CHECKS = frozenset({"deploy-key", "github-token-works", "inference-node"})
+NETWORK_CHECKS = frozenset(
+    {"deploy-key", "github-token-works", "github-owner-tokens", "inference-node"}
+)
 
 
 def run_checks(*, network: bool = True) -> list[Check]:
