@@ -164,6 +164,32 @@ Repository permissions:
 
 Everything else stays *No access*.
 
+**The same token is how a private project gets in.** Adding a project looks it up through the
+API, and cloning and fetching go over HTTPS. Both happen anonymously for a public repository,
+and both fail on a private one, because GitHub answers an anonymous request for a private
+repository with the same 404 as for a missing one. So add each private project's repository to
+this token's *Repository access*, with the same Contents permission, and Workbench sends the
+token whenever it reads from GitHub. Fetching a public repository still sends nothing, so a
+token that has expired breaks private projects and nothing else.
+
+**A project owned by someone else needs its own token.** A fine-grained token is minted for
+one *resource owner* and cannot see another's repositories, however they are shared with you.
+For a project in an organisation, mint one with that organisation as the resource owner —
+an organisation may require an admin to approve it — granting the project's repository
+**Contents: Read and write** and **Pull requests: Read and write**, and add it under a name
+derived from the owner:
+
+```sh
+sudo tee -a /etc/workbench/env >/dev/null <<'EOF'
+WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS=github_pat_...
+EOF
+sudo systemctl restart workbench
+```
+
+That owner's projects then use it for everything, pushing included — over HTTPS, so the
+service account's SSH key needs no access to them. `python -m workbench.doctor` checks that
+GitHub accepts each one and warns before it expires.
+
 Commit statuses is the one staging acceptance needs; the other two are what let a run open its
 own pull request. That was deferred once, and this file said to add them "when that lands, not
 now" long after it had landed — so a correctly followed runbook produced a token that pushed

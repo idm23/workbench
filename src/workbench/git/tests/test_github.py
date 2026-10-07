@@ -1,9 +1,9 @@
 """Reference parsing, and opening a pull request.
 
 The parser is the fiddly part and runs on every add, so it is worth pinning
-down. The repository *lookup* is still not mocked: it is a read, on a page
-someone is watching, and at this size maintaining a fake costs more than it
-catches.
+down. The repository *lookup* is mocked only to prove which credential it asks
+with: it is a read, on a page someone is watching, and beyond that a fake costs
+more than it catches.
 
 Opening a pull request is mocked, and the difference is worth stating. It is a
 write, it happens at the very end of a run in a detached process nobody is
@@ -26,6 +26,9 @@ from workbench.git.github import (
     InvalidReference,
     PullRequestFailed,
     PullRequestOpened,
+    RepoLookupUnavailable,
+    RepoMetadata,
+    RepoNotFound,
     RepoRef,
     open_pull_request,
     parse_repo_reference,
@@ -269,3 +272,49 @@ def test_a_created_pull_request_without_a_url_is_not_reported_as_opened(monkeypa
     _answers(monkeypatch, post=_Response(201, {}))
 
     assert isinstance(_open(), PullRequestFailed)
+
+
+# --- Looking a repository up --------------------------------------------------
+#
+# Mocked for the one thing that cannot be checked against a real repository
+# without a real secret: that a configured token is actually sent. Anonymously,
+# GitHub answers a private repository with the same 404 as a missing one, so
+# a lookup that dropped the token would refuse every private project as a typo.
+
+
+def test_a_lookup_with_a_token_asks_as_that_token(monkeypatch):
+    seen = _answers(monkeypatch, get=_Response(200, {"default_branch": "main"}))
+
+    result = github.fetch_repo_metadata(REF, "github_pat_abc")
+
+    assert isinstance(result, RepoMetadata)
+    assert seen["get"]["headers"]["Authorization"] == "Bearer github_pat_abc"
+
+
+def test_a_lookup_without_a_token_stays_anonymous(monkeypatch):
+    seen = _answers(monkeypatch, get=_Response(200, {}))
+
+    github.fetch_repo_metadata(REF)
+
+    assert "Authorization" not in seen["get"]["headers"]
+
+
+def test_an_anonymous_404_names_the_token_a_private_repository_needs(monkeypatch):
+    _answers(monkeypatch, get=_Response(404))
+
+    result = github.fetch_repo_metadata(REF)
+
+    assert isinstance(result, RepoNotFound)
+    assert "private" in result.message
+    assert "WORKBENCH_GITHUB_TOKEN" in result.message
+
+
+def test_a_refused_token_is_not_a_verdict_on_the_repository(monkeypatch):
+    """A 401 is about the token. Calling it "not found" would refuse a project
+    that exists, over a credential that has nothing to do with whether it does."""
+    _answers(monkeypatch, get=_Response(401))
+
+    result = github.fetch_repo_metadata(REF, "github_pat_expired")
+
+    assert isinstance(result, RepoLookupUnavailable)
+    assert "WORKBENCH_GITHUB_TOKEN" in result.message

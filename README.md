@@ -299,7 +299,13 @@ setting again.
   this repository with **Contents: Read and write**, **Pull requests: Read and write**, and
   **Commit statuses: Read and write**. The last is what reports staging acceptance; the first two
   are what let a run open its pull request. `python -m workbench.doctor` says whether it is
-  installed, whether GitHub still accepts it, and when it expires.
+  installed, whether GitHub still accepts it, and when it expires. **To work on a private
+  project, add that repository to the same token** — Workbench looks it up and clones it with
+  this token, so nothing else needs to sign in. A fine-grained token only reaches one owner's
+  repositories, so a project in an organisation needs a token of that organisation's as
+  `WORKBENCH_GITHUB_TOKEN_<OWNER>` — e.g. `WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS` — with
+  **Contents** and **Pull requests: Read and write**. That project then pushes with the token
+  too, so it needs no deploy key.
 
 Requiring `staging-acceptance` on `main` is what enforces that a commit was actually tested on
 staging; `Only staging may merge into main` enforces that it came from staging at all — a hotfix

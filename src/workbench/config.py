@@ -6,6 +6,7 @@ that installing on a new machine needs no configuration step.
 
 import logging
 import os
+import re
 import shutil
 import socket
 from collections.abc import Mapping
@@ -896,15 +897,45 @@ def notifications_configured() -> bool:
     return bool(vapid_private_key() and vapid_public_key())
 
 
-def github_token() -> str | None:
-    """A fine-grained PAT, if one has been configured.
+#: The setting every per-owner token's name starts with. See `github_token`.
+GITHUB_TOKEN_SETTING = "WORKBENCH_GITHUB_TOKEN"
 
-    Optional by design: without it the app still manages tasks and the deployer
-    still fetches a public repository. Only reporting the staging result back
-    to GitHub needs it — which is what branch protection on `main` waits for,
-    so a missing token stalls promotion rather than breaking anything.
+
+def github_token_setting(owner: str) -> str:
+    """The setting that holds `owner`'s own token: `Pivot-Robots` reads
+    `WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS`.
+
+    Uppercased, with anything that cannot appear in a variable name made an
+    underscore, so it can be written in `/etc/workbench/env` as it reads.
     """
-    token = os.environ.get("WORKBENCH_GITHUB_TOKEN", "").strip()
+    return f"{GITHUB_TOKEN_SETTING}_{re.sub(r'[^A-Z0-9]', '_', owner.upper())}"
+
+
+def owner_github_token(owner: str) -> str | None:
+    """`owner`'s own token, and only that — never the shared one."""
+    token = os.environ.get(github_token_setting(owner), "").strip()
+    return token or None
+
+
+def github_token(owner: str | None = None) -> str | None:
+    """The token to reach GitHub with, for a repository of `owner`.
+
+    Optional by design: without one the app still manages tasks and the
+    deployer still fetches a public repository. Reporting the staging result,
+    opening pull requests and reading private repositories all need it.
+
+    Per owner because a fine-grained token can only ever reach repositories
+    of the one account or organisation it was minted for. So a project in an
+    organisation cannot share the token Workbench's own repository uses, and
+    `WORKBENCH_GITHUB_TOKEN_<OWNER>` is that owner's. Anything without one
+    falls back to `WORKBENCH_GITHUB_TOKEN`, which is how every project was
+    reached before there was a second owner.
+    """
+    if owner is not None:
+        own = owner_github_token(owner)
+        if own:
+            return own
+    token = os.environ.get(GITHUB_TOKEN_SETTING, "").strip()
     return token or None
 
 
