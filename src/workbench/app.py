@@ -39,6 +39,7 @@ from workbench.agents.registry import can_review
 from workbench.api import router as api_router
 from workbench.config import (
     default_agent_backend,
+    github_token,
     instance,
     systemd_available,
     vapid_public_key,
@@ -420,7 +421,7 @@ def add_project(db: DbSession, user_id: int, reference: Annotated[str, Form()]) 
     if isinstance(ref, InvalidReference):
         return _redirect(target, error=ref.message)
 
-    lookup = fetch_repo_metadata(ref)
+    lookup = fetch_repo_metadata(ref, github_token(ref.owner))
     if isinstance(lookup, RepoNotFound):
         return _redirect(target, error=lookup.message)
 

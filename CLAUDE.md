@@ -917,6 +917,28 @@ question below rather than guessed at.
   agent session transcripts live in the service user's home and are on neither GitHub
   nor the SQLite file.
 
+- **A private project is read with the pull request token, not a second login.** The
+  lookup and every clone or fetch go anonymously for a public repository. For a private one
+  that cannot work: GitHub answers an anonymous request for it with the same 404 as for a
+  repository that does not exist. `WORKBENCH_GITHUB_TOKEN` already holds Contents: Read, so
+  the API lookup sends it, and git gets it through a credential helper that exists only in
+  the `GIT_CONFIG_*` environment of the one command, never in the clone's config. A helper
+  rather than a header, because git asks a helper only after a 401: public repositories
+  still fetch anonymously, and an expired token breaks nothing that worked before. And
+  never in the clone's config, because the clone is the directory an agent works beside.
+  `gh auth login` was the obvious alternative. It lost because it would be a third credential
+  for a job this one already has the permission for.
+- **A token per owner, because a fine-grained token cannot span two.** It is minted for one
+  account or organisation and reaches only its repositories, so a project in an organisation
+  (`Pivot-Robots/pivot`, the first) cannot share Workbench's own token.
+  `WORKBENCH_GITHUB_TOKEN_<OWNER>` (uppercased, other characters made `_`) is that owner's,
+  and the shared one is the fallback for everything without one. **An owner with its own token
+  is reached entirely through it, push included:** its clones push over HTTPS rather than with
+  the deploy key. The account has one SSH key, and GitHub lets a deploy key belong to one
+  repository, so the alternative was asking a second organisation for a key per repository.
+  Owners without one push over SSH exactly as before. That asymmetry is deliberate: switching
+  every project to the token would break any whose shared token was never granted Contents:
+  write, on a machine nobody is watching. The doctor checks each owner's token and its expiry.
 ## Deploying is automatic, and pull-based
 
 **Merging to `main` is the deployment.** `workbench-deploy.timer` fires every five minutes;

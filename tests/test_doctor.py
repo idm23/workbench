@@ -1252,3 +1252,40 @@ def test_no_lsblk_is_unknown(monkeypatch):
 def test_every_machine_is_asked_about_its_disk():
     assert doctor.check_disk_allocated in doctor.HEAD_CHECKS
     assert doctor.check_disk_allocated in doctor.NODE_CHECKS
+
+
+# --- Per-owner tokens ---------------------------------------------------------
+#
+# A project in an organisation is reached entirely through its owner's token,
+# so a lapsed one stops that project at its first fetch. The same clock as the
+# shared token, watched the same way.
+
+
+def test_no_owner_tokens_is_not_a_problem(monkeypatch, tmp_path):
+    env_file(monkeypatch, tmp_path, "WORKBENCH_GITHUB_TOKEN=github_pat_abc\n")
+
+    assert doctor.check_owner_github_tokens().state is CheckState.OK
+
+
+def test_an_owner_token_only_in_the_env_file_is_checked(monkeypatch, tmp_path):
+    env_file(monkeypatch, tmp_path, "WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS=github_pat_pivot\n")
+    github_answers(monkeypatch, FakeResponse(401))
+
+    check = doctor.check_owner_github_tokens()
+
+    assert check.state is CheckState.FAIL
+    assert "WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS" in check.detail
+    assert "github_pat_pivot" not in check.detail
+
+
+def test_an_owner_token_close_to_expiry_warns(monkeypatch, tmp_path):
+    env_file(monkeypatch, tmp_path, "WORKBENCH_GITHUB_TOKEN_PIVOT_ROBOTS=github_pat_pivot\n")
+    soon = (datetime.now(UTC) + timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    github_answers(monkeypatch, FakeResponse(200, {"github-authentication-token-expiration": soon}))
+
+    assert doctor.check_owner_github_tokens().state is CheckState.WARN
+
+
+def test_owner_tokens_are_skipped_offline():
+    """The page banner probes offline, and this one needs GitHub."""
+    assert "github-owner-tokens" in doctor.NETWORK_CHECKS

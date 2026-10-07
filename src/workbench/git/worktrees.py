@@ -12,13 +12,22 @@ network) and none of them deserve a traceback.
 """
 
 import logging
+import os
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from workbench.config import agent_database_dir, agent_environment, repos_dir, worktrees_dir
+from workbench.config import (
+    agent_database_dir,
+    agent_environment,
+    github_token,
+    github_token_setting,
+    owner_github_token,
+    repos_dir,
+    worktrees_dir,
+)
 from workbench.git.github import InvalidReference, parse_repo_reference
 
 logger = logging.getLogger(__name__)
@@ -52,13 +61,69 @@ class GitFailed:
 type GitResult = GitOk | GitFailed
 
 
+#: The credential helper GitHub's HTTPS remotes are given. A shell function
+#: rather than the token itself, so the secret never appears in a config value
+#: or on a command line — `/proc/<pid>/cmdline` is readable by every account
+#: on the machine, a process's environment only by its own.
+_TOKEN_HELPER = (
+    '!f() { test "$1" = get && '
+    "printf 'username=x-access-token\\npassword=%s\\n' \"$WORKBENCH_GIT_TOKEN\"; }; f"
+)
+
+
+def network_environment(
+    owner: str | None = None, base: dict[str, str] | None = None
+) -> dict[str, str]:
+    """The environment for a git command that talks to GitHub.
+
+    Never prompts: a clone run from a web request has nobody to type a
+    password, and a prompt with no terminal is a hang until the timeout
+    rather than an answer.
+
+    With a token configured for `owner` — see `config.github_token` — HTTPS
+    to github.com also authenticates as it — the token the doctor already asks for with
+    Contents: Read, which is what makes a private project clonable. Supplied
+    through a credential helper rather than a header, because git only asks a
+    helper after GitHub says 401: a public repository is still fetched
+    anonymously, so a token that has expired breaks private projects and
+    nothing else. The empty helper first resets any the account has
+    configured, so a storing helper never writes the token to disk.
+
+    Set through `GIT_CONFIG_*` for this one process, never in the clone's own
+    config. The clone is the directory an agent works beside, and an agent
+    running `git fetch` there should get exactly what it got before.
+    """
+    env = dict(os.environ if base is None else base)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    token = github_token(owner)
+    if token:
+        env["WORKBENCH_GIT_TOKEN"] = token
+        env["GIT_CONFIG_COUNT"] = "2"
+        env["GIT_CONFIG_KEY_0"] = "credential.https://github.com.helper"
+        env["GIT_CONFIG_VALUE_0"] = ""
+        env["GIT_CONFIG_KEY_1"] = "credential.https://github.com.helper"
+        env["GIT_CONFIG_VALUE_1"] = _TOKEN_HELPER
+    return env
+
+
 def _run_git(
-    args: list[str], cwd: Path | None = None, timeout: int = LOCAL_TIMEOUT_SECONDS
+    args: list[str],
+    cwd: Path | None = None,
+    *,
+    network: bool = False,
+    owner: str | None = None,
 ) -> GitResult:
     """Run git, capturing both streams and never raising.
 
     `check=False` throughout: a non-zero exit is data here, not an exception.
+    `network` is for the commands that talk to GitHub: they get the longer
+    timeout and the credentials together, so one cannot be had without the
+    other. Whose credentials is `owner`'s, read from `cwd`'s origin when not
+    given — only a clone, which has no origin yet, has to say.
     """
+    timeout = NETWORK_TIMEOUT_SECONDS if network else LOCAL_TIMEOUT_SECONDS
+    if network and owner is None and cwd is not None:
+        owner = _origin_owner(cwd)
     try:
         completed = subprocess.run(
             ["git", *args],
@@ -67,6 +132,7 @@ def _run_git(
             text=True,
             timeout=timeout,
             check=False,
+            env=network_environment(owner) if network else None,
         )
     except FileNotFoundError:
         return GitFailed("git is not installed on this machine.")
@@ -79,6 +145,15 @@ def _run_git(
             stderr=completed.stderr.strip(),
         )
     return GitOk(completed.stdout.strip())
+
+
+def _origin_owner(cwd: Path) -> str | None:
+    """Who owns the GitHub repository `cwd`'s origin points at, if anyone."""
+    url = _run_git(["remote", "get-url", "origin"], cwd=cwd)
+    if isinstance(url, GitFailed):
+        return None
+    ref = parse_repo_reference(url.stdout)
+    return None if isinstance(ref, InvalidReference) else ref.owner
 
 
 def slugify(text: str, limit: int = 40) -> str:
@@ -148,7 +223,7 @@ def fetch_checkout(repo: Path) -> GitResult:
     current. Safe to call on a repository with no remote at all: git treats
     `fetch --all` with nothing configured as a no-op rather than an error.
     """
-    return _run_git(["fetch", "--all", "--prune"], cwd=repo, timeout=NETWORK_TIMEOUT_SECONDS)
+    return _run_git(["fetch", "--all", "--prune"], cwd=repo, network=True)
 
 
 def clone_project(clone_url: str, owner: str, repo: str) -> CloneResult:
@@ -168,11 +243,47 @@ def clone_project(clone_url: str, owner: str, repo: str) -> CloneResult:
     target.parent.mkdir(parents=True, exist_ok=True)
     result = _run_git(
         ["clone", clone_url, str(target)],
-        timeout=NETWORK_TIMEOUT_SECONDS,
+        network=True,
+        owner=owner,
     )
     if isinstance(result, GitFailed):
-        return result
+        return _explain_refusal(result, owner)
     return Cloned(target)
+
+
+#: What git says when GitHub wanted credentials it was not given, or refused
+#: the ones it was. Matched on the text, because the exit code is 128 for
+#: every failure from a typo to a full disk.
+_AUTH_REFUSALS = ("terminal prompts disabled", "Authentication failed", "could not read Username")
+
+
+def _explain_refusal(failed: GitFailed, owner: str) -> GitFailed:
+    """Name the setting when a clone failed for want of a credential.
+
+    git's own words — "could not read Username: terminal prompts disabled" —
+    are accurate and say nothing about what to do, and on a private
+    repository they are what every clone ends in until a token is configured.
+    """
+    if not any(phrase in failed.stderr for phrase in _AUTH_REFUSALS):
+        return failed
+    own = github_token_setting(owner)
+    if owner_github_token(owner):
+        hint = (
+            f"GitHub refused {own} for this repository: it has expired, or was not "
+            "granted Contents: Read on it."
+        )
+    elif github_token():
+        hint = (
+            "GitHub refused WORKBENCH_GITHUB_TOKEN for this repository: it has expired, or "
+            "was not granted Contents: Read on it. A fine-grained token only reaches one "
+            f"owner's repositories, so one of {owner}'s goes in {own}."
+        )
+    else:
+        hint = (
+            f"The repository is private, and reading one needs {own} (or "
+            "WORKBENCH_GITHUB_TOKEN) with Contents: Read on it, in /etc/workbench/env."
+        )
+    return GitFailed(f"{failed.message} {hint}", stderr=failed.stderr)
 
 
 @dataclass(frozen=True)
@@ -460,16 +571,20 @@ def ensure_push_remote(worktree: Path) -> GitResult:
 
     Called on the way into every push rather than at clone time, because the
     clones that need it most already exist and nothing re-clones them.
-    Idempotent, and a no-op once the URL is already SSH.
+    Idempotent, and a no-op once the URL is already the right one.
+
+    **Except for an owner with a token of its own, which pushes over HTTPS
+    with it.** The account has one SSH key, and GitHub lets a deploy key
+    belong to one repository; the reason an owner has its own token at all
+    is that it is not the owner the rest of the machine was set up for. So
+    for that owner the token is the whole route — read, push and pull
+    request — and nobody has to give a second organisation an SSH key.
     """
     current = _run_git(["remote", "get-url", "--push", "origin"], cwd=worktree)
     if isinstance(current, GitFailed):
         return current
 
     url = current.stdout.strip()
-    if url.startswith("git@"):
-        return GitOk(url)
-
     ref = parse_repo_reference(url)
     if isinstance(ref, InvalidReference):
         # Not GitHub, or a form nothing here understands. Left exactly as it
@@ -477,7 +592,10 @@ def ensure_push_remote(worktree: Path) -> GitResult:
         # meant it to.
         return GitFailed(f"Cannot push: {url!r} is not a GitHub remote this can authenticate to.")
 
-    return _run_git(["remote", "set-url", "--push", "origin", ref.ssh_url], cwd=worktree)
+    wanted = ref.url if owner_github_token(ref.owner) else ref.ssh_url
+    if url == wanted:
+        return GitOk(url)
+    return _run_git(["remote", "set-url", "--push", "origin", wanted], cwd=worktree)
 
 
 def push_branch(worktree: Path, branch: str) -> GitResult:
@@ -501,7 +619,7 @@ def push_branch(worktree: Path, branch: str) -> GitResult:
     return _run_git(
         ["push", "--set-upstream", "origin", branch],
         cwd=worktree,
-        timeout=NETWORK_TIMEOUT_SECONDS,
+        network=True,
     )
 
 
