@@ -30,6 +30,7 @@ from workbench.runs.store import (
     finish_run,
     record_launch,
 )
+from workbench.tasks.origin import InvalidOrigin, resolve_origin
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,79 @@ def start_run(
     if picked.reason:
         append_event(db, run.id, RunEventKind.NOTICE, {"text": picked.reason})
     return _launch(db, run, executor)
+
+
+@dataclass(frozen=True)
+class InvalidRunRequest:
+    """The request itself was not one `start_run` could even attempt.
+
+    Distinct from `StartResult`'s other refusals, which are about the state of
+    the world right now (too many runs, one already going) rather than about
+    whether this particular request made sense at all — a parent task, an
+    origin that names nothing, an agent nobody has heard of.
+    """
+
+    message: str
+
+
+def request_run(
+    db: Session,
+    task: Task,
+    phase: RunPhase,
+    *,
+    origin: str | None = None,
+    agent: str | None = None,
+) -> StartResult | InvalidRunRequest:
+    """Resolve a fresh run request exactly as the task tree's own Plan and
+    Execute buttons do, then hand off to `start_run`.
+
+    Shared by the HTML form (`app.start_task_run`) and the JSON API — and
+    through that, by the project chat's own way of starting one — so a
+    refusal reads identically whichever door a request came through, and the
+    two cannot quietly drift into checking different things.
+
+    `agent` is a fresh choice (`backend` or `backend:login`), not the
+    project's own default, so an unknown backend is refused here rather than
+    silently falling back to it — exactly as the HTML form's own picker
+    works. Passing no agent at all picks up wherever the task's last attempt
+    left off, the same way Retry and re-plan do from the task tree, rather
+    than reverting to the project's default.
+    """
+    if task.children:
+        # A task with children describes work rather than being work, so an
+        # agent pointed at one has no single thing to do.
+        return InvalidRunRequest("Break this into a sub-task and run that instead.")
+
+    if task.worktree_path is None:
+        # Nothing to choose once a worktree already exists — its branch is
+        # fixed, and every run after the first only ever resumes it.
+        resolved = resolve_origin(task, origin)
+        if isinstance(resolved, InvalidOrigin):
+            return InvalidRunRequest(resolved.message)
+        task.origin_ref = origin or None
+        db.commit()
+
+    backend: str | None
+    login: str | None
+    seed: str | None = None
+    if agent:
+        backend, _, login = agent.partition(":")
+        if backend not in available_backends():
+            return InvalidRunRequest(f"There is no agent backend called {backend!r}.")
+        login = login or None
+    elif task.runs:
+        last = task.runs[-1]
+        backend, login = last.backend, last.login
+        if last.phase is phase:
+            # And with what it was handed. For a run executing another
+            # agent's approved plan, the seed *is* the plan, and a retry that
+            # starts a fresh session would otherwise be left with the task and
+            # no plan.
+            seed = last.seed_message
+    else:
+        backend, login = None, None
+
+    return start_run(db, task, phase, backend=backend, login=login, seed_message=seed)
 
 
 @dataclass(frozen=True)
