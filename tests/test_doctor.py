@@ -223,6 +223,7 @@ def test_no_named_login_yet_fails_the_remote_control_login_check(monkeypatch, tm
     check = doctor.check_remote_control_login()
 
     assert check.state is CheckState.FAIL
+    assert check.fix is not None
     assert "doctor --login" in check.fix
 
 

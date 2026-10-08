@@ -1,109 +1,73 @@
-"""Tests for the :mod:`workbench.remote_control` utility and its associated
-systemd unit deployment helper.
+"""The remote-control wrapper and its unit's own convergence, without a real
+pty or a real systemd.
 
-The original implementation includes a small ``main()`` function that resolves
-the Claude CLI binary, spawns it via a pseudo‑terminal so the CLI can do its
-interactive bootstrap, and translates the ``pty.spawn`` ``os.wait``-style status
-into an exit code suitable for ``systemd``.
+`workbench.remote_control.main` is the thing `ExecStart=` actually runs — see
+that module for why it exists rather than invoking the CLI directly. These
+pin the three things worth getting wrong: no CLI found, an ordinary exit, and
+a signal-terminated child folding into the same plain non-zero rather than
+something more precise nobody asked for.
 
-These tests exercise the control flow that is left untested in the
-application: returning the correct exit status in three scenarios and
-verifying that :func:`converge_remote_control_unit` triggers a ``try-restart``
-only when its unit changed.
-
-The tests use ``pytest`` monkeypatch to replace external dependencies such
-as the real ``pty.spawn`` and the configuration helper that determines the
-unit name.
+`install.converge_remote_control_unit` is the deploy-time half: restart only
+when the unit's own name is in the `changed` set it was handed, never on an
+unrelated change elsewhere in the app — see the function's own docstring for
+why that restraint matters for a unit that may be a person's live session.
 """
 
-import os
-from types import SimpleNamespace
-
-import pytest
-
-from workbench import remote_control, install, config
+from workbench import install, remote_control
 
 
-# ---------------------------------------------------------------------------
-# Tests for remote_control.main()
-# ---------------------------------------------------------------------------
-
-def _status(exit_code: int) -> int:
-    """Return a raw ``os.wait()`` status code for the given *exit_code*.
-
-    ``pty.spawn`` returns an integer where the high byte holds the exit code
-    and the low byte holds the signal. This helper produces that value.
-    """
-    return exit_code << 8
+def waitstatus(*, exit_code: int | None = None, signal: int | None = None) -> int:
+    """A raw `os.wait()`-style status, encoded the way the kernel actually
+    does it — exit code in the high byte, signal number in the low seven bits
+    — so these tests exercise the real `os.WIFEXITED`/`os.WEXITSTATUS` rather
+    than a stand-in for them."""
+    if signal is not None:
+        return signal
+    return (exit_code or 0) << 8
 
 
-@pytest.mark.parametrize(
-    "argv,spawn_return,expected",
-    [
-        (None, None, 1),  # no CLI found
-        (['fakecli', '--remote-control'], _status(0), 0),  # normal exit
-        (['fakecli', '--remote-control'], _status(2), 2),  # non‑zero exit
-    ],
-)
-def test_remote_control_main(monkeypatch, argv, spawn_return, expected):
-    """Verify that :func:`remote_control.main` returns the right exit status.
+def test_main_fails_without_a_cli(monkeypatch):
+    monkeypatch.setattr(remote_control, "remote_control_argv", lambda: None)
 
-    The test patches :func:`remote_control.remote_control_argv` and
-    :func:`pty.spawn` directly and asserts that the resulting exit code is
-    as expected.  ``configure_console_logging`` is replaced with a no‑op to
-    avoid side effects on the test logger.
-    """
-
-    # Stub out the configuration helpers
-    monkeypatch.setattr(remote_control, "remote_control_argv", lambda: argv)
-    monkeypatch.setattr(remote_control, "configure_console_logging", lambda: None)
-
-    # Replace pty.spawn – it may not be called when argv is None.
-    def fake_spawn(_argv):
-        if spawn_return is None:
-            raise RuntimeError("pty.spawn should not have been called")
-        return spawn_return
-
-    # Patch status helpers to interpret our synthetic status values.
-    monkeypatch.setattr(os, "WIFEXITED", lambda status: (status & 0x7f) == 0)
-    monkeypatch.setattr(os, "WEXITSTATUS", lambda status: status >> 8)
-
-    # Replace the pty.spawn call used by the module.
-    monkeypatch.setattr("pty.spawn", fake_spawn)
-
-    # Run main and verify the outcome
-    rc = remote_control.main()
-    assert rc == expected
+    assert remote_control.main() == 1
 
 
-# ---------------------------------------------------------------------------
-# Tests for install.converge_remote_control_unit
-# ---------------------------------------------------------------------------
+def test_main_returns_the_wrapped_commands_exit_code(monkeypatch):
+    monkeypatch.setattr(
+        remote_control, "remote_control_argv", lambda: ["claude", "--remote-control"]
+    )
+    monkeypatch.setattr(remote_control.pty, "spawn", lambda argv: waitstatus(exit_code=2))
 
-def test_converge_remote_control_unit_triggers_restart(monkeypatch):
-    """If the unit changed, :func:`converge_remote_control_unit` should
-    issue a ``systemctl try-restart``.
-    """
-
-    # Replace the run function and capture its arguments
-    run_calls = []
-    monkeypatch.setattr(install, "run", lambda argv, **kw: run_calls.append(argv))
-    monkeypatch.setattr(install, "info", lambda *_, **__: None)
-
-    # Force a known unit name
-    monkeypatch.setattr(config, "remote_control_unit_name", lambda: "wry-remote")
-    unit = "wry-remote.service"
-    changed = {unit, "other.service"}
-    install.converge_remote_control_unit(changed)
-    assert run_calls == [["systemctl", "try-restart", unit]]
+    assert remote_control.main() == 2
 
 
-def test_converge_remote_control_unit_no_change(monkeypatch):
-    """If the unit did not change the function should do nothing."""
+def test_main_folds_a_signal_into_a_plain_nonzero_exit(monkeypatch):
+    """`pty.spawn`'s status is `os.wait`-shaped, not a plain exit code — a
+    child killed by a signal is not `WIFEXITED`, and `Restart=always` only
+    needs "did it exit", so this is reported as 1 rather than guessed at."""
+    monkeypatch.setattr(
+        remote_control, "remote_control_argv", lambda: ["claude", "--remote-control"]
+    )
+    monkeypatch.setattr(remote_control.pty, "spawn", lambda argv: waitstatus(signal=9))
 
-    run_calls: list = []
-    monkeypatch.setattr(install, "run", lambda argv, **kw: run_calls.append(argv))
-    monkeypatch.setattr(install, "info", lambda *_, **__: None)
-    monkeypatch.setattr(config, "remote_control_unit_name", lambda: "wry-remote")
+    assert remote_control.main() == 1
+
+
+def test_converge_remote_control_unit_restarts_only_its_own_unit(monkeypatch):
+    monkeypatch.setattr(install, "remote_control_unit_name", lambda: "workbench-remote-control")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(install, "run", lambda argv, **_kwargs: calls.append(argv))
+
+    install.converge_remote_control_unit({"workbench-remote-control.service", "other.service"})
+
+    assert calls == [["systemctl", "try-restart", "workbench-remote-control.service"]]
+
+
+def test_converge_remote_control_unit_leaves_an_unchanged_unit_alone(monkeypatch):
+    monkeypatch.setattr(install, "remote_control_unit_name", lambda: "workbench-remote-control")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(install, "run", lambda argv, **_kwargs: calls.append(argv))
+
     install.converge_remote_control_unit({"other.service"})
-    assert run_calls == []
+
+    assert calls == []
