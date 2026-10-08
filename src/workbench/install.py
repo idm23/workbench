@@ -63,6 +63,9 @@ from workbench.config import (
     is_gaming_node,
     is_node,
     port,
+    remote_control_login_dir,
+    remote_control_unit_name,
+    remote_control_workspace,
     render_backend_marker,
     repo_root,
     role_marker,
@@ -135,6 +138,13 @@ def units() -> tuple[tuple[str, str], ...]:
         # `workbench-run@<run id>.service`. One per run, so each gets its own
         # cgroup and survives the app restarting under it.
         (f"{run_unit_prefix()}@.service", "workbench-run@.service.template"),
+        # Head-only, like the app itself: a node holds no database and
+        # executes no runs, and has nothing of its own for a standing session
+        # to work on. Enabled and started the same way the app is, in
+        # `install_service` — not left on demand the way the run template and
+        # the gaming switch are, because the whole point is that it is already
+        # running before anyone reaches for it.
+        (f"{remote_control_unit_name()}.service", "workbench-remote-control.service.template"),
     )
 
 
@@ -1008,6 +1018,35 @@ def ensure_agent_state_dir(account: pwd.struct_passwd) -> None:
     info(f"agent state directory ready at {target}")
 
 
+def ensure_remote_control_workspace(account: pwd.struct_passwd) -> None:
+    """Create the directory the standing remote-control session works in.
+
+    Same reasoning as `ensure_agent_state_dir`, and the same shape: a
+    directory absent when `workbench-remote-control.service` starts can never
+    be created by anything inside it, because that unit runs under
+    ProtectSystem=strict too.
+    """
+    target = Path(account.pw_dir) / "remote-control"
+    if target.is_dir():
+        run(["chown", f"{account.pw_uid}:{account.pw_gid}", str(target)], privileged=True)
+    else:
+        run(
+            [
+                "install",
+                "-d",
+                "-o",
+                str(account.pw_uid),
+                "-g",
+                str(account.pw_gid),
+                "-m",
+                "0700",
+                str(target),
+            ],
+            privileged=True,
+        )
+    info(f"remote-control workspace ready at {target}")
+
+
 def ensure_agent_identity(account: pwd.struct_passwd) -> None:
     """Give the account what it needs to commit and to push.
 
@@ -1117,6 +1156,11 @@ def render_unit(template_name: str) -> str:
         # Empty on a machine nobody plays games on. The gaming rule is the only
         # template that reads it, and it is not rendered there.
         "__GAMING_USER__": gaming_user() or "",
+        "__REMOTE_CONTROL_WORKSPACE__": str(remote_control_workspace()),
+        # Not `claude_login_dir`, which answers None for a login that does not
+        # exist yet — the unit has to name this path before anyone has signed
+        # in, the same way the doctor's fix command does.
+        "__REMOTE_CONTROL_LOGIN_DIR__": str(remote_control_login_dir()),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
@@ -1181,6 +1225,27 @@ def install_units() -> set[str]:
         info(f"restarted {timer} to pick up its new schedule")
 
     return changed
+
+
+def converge_remote_control_unit(changed: set[str]) -> None:
+    """Restart the standing session, but only when its own unit changed.
+
+    Unlike `workbench.service`, which the deployer restarts on every tick that
+    moves the checkout forward, this one may be a person's live conversation —
+    restarting it just because *something else* in the app changed would
+    interrupt it for no reason connected to this unit at all. `try-restart`
+    rather than `restart`, so stopping it by hand (to free the login for the
+    one-time first-run setup, say) is not silently undone by the next deploy.
+
+    Mirrors `install_node.converge_client_unit`, which taught this project the
+    same lesson from the other end: a changed unit that nobody restarts is a
+    unit still running the thing it was *before* the change.
+    """
+    unit = f"{remote_control_unit_name()}.service"
+    if unit not in changed:
+        return
+    run(["systemctl", "try-restart", unit], privileged=True)
+    info(f"restarted {unit} to pick up its own change")
 
 
 #: Where polkit reads local authorisation rules.
@@ -1291,6 +1356,17 @@ def install_service() -> None:
     run(["systemctl", "enable", "--quiet", service_name()], privileged=True)
     run(["systemctl", "restart", service_name()], privileged=True)
     info(f"service enabled and started as user '{service_user()}'")
+
+    # Enabled and started unconditionally, same as the app above — the whole
+    # point is that this is already running rather than something started by
+    # hand. On a fresh install, with no named login yet, it starts and sits at
+    # the CLI's own first-run setup screen: `active`, and not yet useful,
+    # which is exactly the gap the doctor's remote-control check exists to
+    # catch rather than something worth delaying the enable over.
+    remote_control_service = f"{remote_control_unit_name()}.service"
+    run(["systemctl", "enable", "--quiet", remote_control_service], privileged=True)
+    run(["systemctl", "restart", remote_control_service], privileged=True)
+    info("remote-control session enabled and started")
 
     enable_deploy_timer()
 

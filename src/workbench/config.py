@@ -805,6 +805,51 @@ def claude_login_dir(name: str) -> Path | None:
     return path if path.is_dir() else None
 
 
+def remote_control_login_name() -> str:
+    """Which named login the standing remote-control session signs in as.
+
+    Deliberately never the default login runs bill against. The default
+    identifies *what a run bills to*; this identifies *who answers when a
+    person remote-controls into this machine directly* — conflating the two
+    would mean every run and every direct session show up as the same
+    account, which is exactly the split named logins already exist to avoid
+    for project runs.
+    """
+    return os.environ.get("WORKBENCH_REMOTE_CONTROL_LOGIN", "").strip() or "remote-control"
+
+
+def remote_control_login_dir() -> Path:
+    """Where the standing session's own login lives, whether or not it has
+    been signed in yet.
+
+    Unlike `claude_login_dir`, this does not return `None` for a login that
+    does not exist: a unit template and a doctor fix command both need this
+    path *before* anyone has signed in, to say where the sign-in should go.
+    """
+    return claude_logins_dir() / remote_control_login_name()
+
+
+def remote_control_unit_name() -> str:
+    """The standing remote-control session's unit, without `.service`."""
+    return f"{service_name()}-remote-control"
+
+
+def remote_control_workspace() -> Path:
+    """Where the standing session works, and the only thing besides its own
+    login it may write to.
+
+    Deliberately not `repo_root()` or any task's worktree. This session is not
+    scoped to one project the way a run is, and giving it the live checkout's
+    `data/` — which is where the real database lives — would be exactly the
+    mistake `agent_database` exists to prevent for runs, just reached a
+    different way. A directory of its own, beside `.claude` and
+    `.claude-logins` rather than inside the checkout, keeps it in the one
+    place on this machine that already holds agent state rather than
+    deployment state.
+    """
+    return agent_home() / "remote-control"
+
+
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""
     return f"{service_name()}-deploy"
