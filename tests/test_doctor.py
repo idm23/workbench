@@ -151,6 +151,140 @@ def test_a_login_past_renewing_fails_rather_than_warns(monkeypatch):
     assert check.fix == "/opt/claude auth login --claudeai"
 
 
+# --- The standing remote-control session --------------------------------------
+#
+# Two checks, not one, because the two questions genuinely disagree: a unit
+# can be `active` while sitting at the CLI's own first-run setup screen with
+# no login behind it, which is "alive" by every measure systemd has and
+# useless by the one that matters.
+
+
+def test_the_remote_control_unit_check_says_running(monkeypatch):
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(
+        doctor,
+        "_run",
+        lambda argv, *a, **k: Result("active\n" if "is-active" in argv else "enabled\n"),
+    )
+
+    check = doctor.check_remote_control_unit()
+
+    assert check.state is CheckState.OK
+    assert "running" in check.detail
+
+
+def test_an_uninstalled_remote_control_unit_is_a_warning_with_a_fix(monkeypatch):
+    class Missing:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(doctor, "_run", lambda *a, **k: Missing())
+
+    check = doctor.check_remote_control_unit()
+
+    assert check.state is CheckState.WARN
+    assert check.fix is not None
+
+
+def test_an_enabled_but_not_running_remote_control_unit_fails(monkeypatch):
+    """Unlike the client unit, which is only ever active while someone is
+    streaming, this one's entire point is to already be running — so "enabled
+    but not active" is a real problem, not an ordinary idle state."""
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(
+        doctor,
+        "_run",
+        lambda argv, *a, **k: Result("inactive\n" if "is-active" in argv else "enabled\n"),
+    )
+
+    check = doctor.check_remote_control_unit()
+
+    assert check.state is CheckState.FAIL
+    assert check.fix is not None
+
+
+def test_no_named_login_yet_fails_the_remote_control_login_check(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "remote_control_login_dir", lambda: tmp_path / "nonexistent")
+
+    check = doctor.check_remote_control_login()
+
+    assert check.state is CheckState.FAIL
+    assert "doctor --login" in check.fix
+
+
+def test_a_working_remote_control_login_passes(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "remote_control_login_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "workbench.agents.claude.named_login_credential_status",
+        lambda _dir: CredentialStatus(
+            backend="claude",
+            logged_in=True,
+            method=CREDENTIAL_SUBSCRIPTION,
+            account="someone@example.com",
+            detail="Signed in as someone@example.com, billing a Claude subscription.",
+        ),
+    )
+
+    check = doctor.check_remote_control_login()
+
+    assert check.state is CheckState.OK
+    assert check.fix is None
+
+
+def test_a_remote_control_login_about_to_stop_renewing_warns(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "remote_control_login_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "workbench.agents.claude.named_login_credential_status",
+        lambda _dir: CredentialStatus(
+            backend="claude",
+            logged_in=True,
+            method=CREDENTIAL_SUBSCRIPTION,
+            account="someone@example.com",
+            detail="Signed in as someone@example.com, billing a Claude subscription.",
+            renewable_until=datetime.now(UTC) + timedelta(days=2),
+        ),
+    )
+
+    check = doctor.check_remote_control_login()
+
+    assert check.state is CheckState.WARN
+    assert "2 days" in check.detail
+    assert check.fix is not None
+
+
+def test_a_lapsed_remote_control_login_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "remote_control_login_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "workbench.agents.claude.named_login_credential_status",
+        lambda _dir: CredentialStatus(
+            backend="claude",
+            logged_in=False,
+            method=CREDENTIAL_SUBSCRIPTION,
+            account="someone@example.com",
+            detail="The subscription login expired and can no longer renew itself.",
+        ),
+    )
+
+    check = doctor.check_remote_control_login()
+
+    assert check.state is CheckState.FAIL
+    assert check.fix is not None
+
+
 # --- Tailscale ----------------------------------------------------------------
 
 
