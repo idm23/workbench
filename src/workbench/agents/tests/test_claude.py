@@ -638,8 +638,9 @@ def test_the_outcome_skill_files_exist():
     assert "workbench-outcome" in skill_md.read_text()
 
 
-def test_a_conversation_loads_the_tasks_skill_not_the_outcome_one(monkeypatch):
-    """It has no single task to call finished or failed."""
+def test_a_conversation_loads_the_tasks_and_runs_skills_not_the_outcome_one(monkeypatch):
+    """It has no single task to call finished or failed, but it can start one
+    on a task when the person actually asks — see `workbench-runs`."""
     captured: dict[str, Any] = {}
     monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
@@ -648,7 +649,7 @@ def test_a_conversation_loads_the_tasks_skill_not_the_outcome_one(monkeypatch):
     assert captured["options"].plugins == [
         {"type": "local", "path": str(backend_module._PLUGIN_DIR)}
     ]
-    assert captured["options"].skills == ["workbench-tasks"]
+    assert captured["options"].skills == ["workbench-tasks", "workbench-runs"]
 
 
 def test_a_conversation_does_not_set_a_structured_output_schema(monkeypatch):
@@ -685,6 +686,13 @@ def test_the_tasks_skill_files_exist():
 
     assert skill_md.is_file()
     assert "workbench-tasks" in skill_md.read_text()
+
+
+def test_the_runs_skill_files_exist():
+    skill_md = backend_module._PLUGIN_DIR / "skills" / "workbench-runs" / "SKILL.md"
+
+    assert skill_md.is_file()
+    assert "workbench-runs" in skill_md.read_text()
 
 
 # --- Outcomes --------------------------------------------------------------

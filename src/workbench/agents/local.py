@@ -403,7 +403,15 @@ def system_prompt(phase: RunPhase) -> str:
             f"{common}\n"
             "\n"
             "This is a conversation. Answer what is asked, then stop and wait for "
-            "the next message rather than inventing more work."
+            "the next message rather than inventing more work.\n"
+            "\n"
+            "You can start a plan or execute run on a task with start_run — the "
+            "same action as the Plan/Execute buttons in the task tree. Only call "
+            "it when the person you are talking with has just asked you to, for "
+            "that specific task, right now. Never decide on your own to start one, "
+            "and never start more than the one task they named. A run you start "
+            "keeps going after this conversation does; nothing here shows what it "
+            "reports, so check back by reading the task again if you are asked."
         )
     return (
         f"{common}\n"

@@ -63,6 +63,10 @@ MAX_COMMAND_TIMEOUT_SECONDS = 600
 #: happy path a few milliseconds.
 OUTCOME_TIMEOUT_SECONDS = 10
 
+#: How long starting a run may take. The endpoint only writes a row and
+#: hands off to an executor, so this is generous rather than tuned.
+START_RUN_TIMEOUT_SECONDS = 10
+
 
 @dataclass(frozen=True)
 class ToolContext:
@@ -1010,6 +1014,63 @@ def _report(context: ToolContext, payload: dict[str, Any]) -> ToolResult:
     return ToolResult(f"Recorded outcome: {payload['outcome']}.")
 
 
+def _start_run(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
+    """Press Plan or Execute on a task, through the same API the task tree's
+    own buttons post to.
+
+    Only ever call this when the person in *this* conversation has just
+    asked for it, for *this* task — never as a batch decision to work
+    through several tasks unattended. That bound lives in the tool's own
+    description, which is what the model actually reads; it is restated here
+    because the consequence of ignoring it (a concurrency slot spent, maybe
+    a pull request opened) is real enough to say twice.
+
+    Reached through Workbench's own JSON API rather than by importing
+    `runs.lifecycle` directly, for the same reason `_report` is: this module
+    runs in the runner's process, and the API is the one seam already proven
+    to carry a decision like this one durably across a crash.
+    """
+    try:
+        task_id = int(args.get("task_id"))
+    except (TypeError, ValueError):
+        return ToolResult("`task_id` must be the task's id, a number.", is_error=True)
+
+    phase = str(args.get("phase") or "").strip()
+    if phase not in ("plan", "execute"):
+        return ToolResult("`phase` must be 'plan' or 'execute'.", is_error=True)
+
+    payload: dict[str, Any] = {"phase": phase}
+    if origin := args.get("origin"):
+        payload["origin"] = str(origin)
+    if agent := args.get("agent"):
+        payload["agent"] = str(agent)
+
+    try:
+        response = httpx.post(
+            f"{context.api_base}/api/tasks/{task_id}/runs",
+            json=payload,
+            timeout=START_RUN_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        return ToolResult(f"Could not reach Workbench to start the run: {exc}", is_error=True)
+
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            detail = None
+        return ToolResult(
+            str(detail or f"Could not start the run ({response.status_code})."), is_error=True
+        )
+
+    started = response.json()
+    return ToolResult(
+        f"Started run {started['id']} ({started['phase']}) on task {task_id}; "
+        f"status {started['status']}. It runs on its own; nothing here will show "
+        "what it reports — check back by reading the task later if asked."
+    )
+
+
 def _submit_plan(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     if (refusal := _nothing_looked_at(context, "submit_plan")) is not None:
         return refusal
@@ -1241,6 +1302,51 @@ TOOLS: dict[str, Tool] = {
             },
             handler=_submit_plan,
         ),
+        Tool(
+            name="start_run",
+            description=(
+                "Start a plan or execute run on a task — the same action as the "
+                "Plan/Execute buttons in the task tree. Only call this when the "
+                "person you are talking with has just asked you to, for this "
+                "specific task, in this conversation. Never decide on your own "
+                "to start one, and never start more than the one task they "
+                "named — a run spends a concurrency slot and may open a pull "
+                "request, which is not something to do unattended on a guess."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "integer", "description": "The task to run."},
+                    "phase": {
+                        "type": "string",
+                        "enum": ["plan", "execute"],
+                        "description": (
+                            "'plan' to investigate and propose, changing nothing; "
+                            "'execute' to carry out an approved plan, or to make "
+                            "the change directly for a task simple enough to skip "
+                            "planning."
+                        ),
+                    },
+                    "origin": {
+                        "type": "string",
+                        "description": (
+                            "Which branch to start the task's worktree from. Only "
+                            "matters before the task has one; usually leave unset."
+                        ),
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": (
+                            "backend, or backend:login, to run as. Usually leave "
+                            "unset to use the project's default or, for a task "
+                            "run before, whatever it last used."
+                        ),
+                    },
+                },
+                "required": ["task_id", "phase"],
+            },
+            handler=_start_run,
+        ),
     )
 }
 
@@ -1270,9 +1376,20 @@ WORKING_TOOLS = (
     "ask_user",
 )
 
+#: What a conversation gets beyond the working set: the ability to start a
+#: fresh run on a task, because that is the one thing the task tree's own
+#: buttons do that nothing else offers from here. Not given to execute or
+#: plan — a run that is itself carrying out work has no business spinning up
+#: another one unasked, and planning cannot call anything regardless.
+CONVERSATION_TOOLS = (*WORKING_TOOLS, "start_run")
+
 
 def tool_names_for(phase: RunPhase) -> tuple[str, ...]:
-    return READ_ONLY_TOOLS if phase is RunPhase.PLAN else WORKING_TOOLS
+    if phase is RunPhase.PLAN:
+        return READ_ONLY_TOOLS
+    if phase is RunPhase.CONVERSATION:
+        return CONVERSATION_TOOLS
+    return WORKING_TOOLS
 
 
 def tools_for(phase: RunPhase) -> list[dict[str, Any]]:

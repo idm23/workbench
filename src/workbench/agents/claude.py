@@ -89,6 +89,7 @@ _PLUGIN_DIR = Path(__file__).parent / "plugin"
 _OUTCOME_SKILL = "workbench-outcome"
 _QUESTION_SKILL = "workbench-question"
 _TASKS_SKILL = "workbench-tasks"
+_RUNS_SKILL = "workbench-runs"
 
 #: What a plan run's structured response must contain. Enforced by the SDK,
 #: not parsed out of prose — `output_format` works under real plan mode
@@ -415,9 +416,10 @@ def _options(request: AgentRequest) -> ClaudeAgentOptions:
         options["output_format"] = _REVIEW_OUTPUT_FORMAT
     elif request.phase is RunPhase.CONVERSATION:
         # Task management, not outcome reporting — a conversation has no
-        # single task to call finished or failed.
+        # single task to call finished or failed. It can still start a run
+        # on one, through workbench-runs, when the person actually asks.
         options["plugins"] = [{"type": "local", "path": str(_PLUGIN_DIR)}]
-        options["skills"] = [_TASKS_SKILL]
+        options["skills"] = [_TASKS_SKILL, _RUNS_SKILL]
     else:
         # These only make sense once tools can actually run, which plan mode
         # does not allow — which is also why a plan run cannot ask a question
