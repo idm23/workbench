@@ -39,8 +39,11 @@ from workbench.agents import claude as backend_module
 from workbench.agents.claude import (
     ClaudeBackend,
     CredentialWindow,
+    named_login_credential_status,
     read_credential,
     read_credential_window,
+    read_named_login_window,
+    remote_control_argv,
     translate,
 )
 from workbench.agents.protocol import (
@@ -638,8 +641,9 @@ def test_the_outcome_skill_files_exist():
     assert "workbench-outcome" in skill_md.read_text()
 
 
-def test_a_conversation_loads_the_tasks_skill_not_the_outcome_one(monkeypatch):
-    """It has no single task to call finished or failed."""
+def test_a_conversation_loads_the_tasks_and_runs_skills_not_the_outcome_one(monkeypatch):
+    """It has no single task to call finished or failed, but it can start one
+    on a task when the person actually asks — see `workbench-runs`."""
     captured: dict[str, Any] = {}
     monkeypatch.setattr(backend_module, "ClaudeSDKClient", stub_client([[a_result()]], captured))
 
@@ -648,7 +652,7 @@ def test_a_conversation_loads_the_tasks_skill_not_the_outcome_one(monkeypatch):
     assert captured["options"].plugins == [
         {"type": "local", "path": str(backend_module._PLUGIN_DIR)}
     ]
-    assert captured["options"].skills == ["workbench-tasks"]
+    assert captured["options"].skills == ["workbench-tasks", "workbench-runs"]
 
 
 def test_a_conversation_does_not_set_a_structured_output_schema(monkeypatch):
@@ -685,6 +689,13 @@ def test_the_tasks_skill_files_exist():
 
     assert skill_md.is_file()
     assert "workbench-tasks" in skill_md.read_text()
+
+
+def test_the_runs_skill_files_exist():
+    skill_md = backend_module._PLUGIN_DIR / "skills" / "workbench-runs" / "SKILL.md"
+
+    assert skill_md.is_file()
+    assert "workbench-runs" in skill_md.read_text()
 
 
 # --- Outcomes --------------------------------------------------------------
@@ -1381,6 +1392,81 @@ def test_there_is_no_login_command_when_there_is_no_cli():
     status = read_credential(SIGNED_OUT)
 
     assert status.login_command == ()
+
+
+# --- A named login's own window and status, not the default login's --------
+#
+# Nothing before this point ever asked about a login other than the default
+# one. A named login's directory *is* `CLAUDE_CONFIG_DIR` directly — there is
+# no nested `.claude` beneath it the way there is under `$HOME` — so the
+# default login's path-building would silently look in the wrong place.
+
+
+def test_a_named_logins_window_is_read_from_its_directory_directly(tmp_path):
+    """Not `tmp_path / ".claude" / ...` — that is the default login's shape."""
+    (tmp_path / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": in_hours(300)}})
+    )
+
+    window = read_named_login_window(tmp_path)
+
+    assert not window.renewal_lapsed()
+    assert window.renewable_until is not None
+
+
+def test_a_named_logins_window_ignores_a_nested_claude_directory(tmp_path):
+    """The default-login shape, written by mistake at this path, must not be
+    picked up as if it were the named login's own — that would report a
+    different login's window under this one's name."""
+    a_credentials_file(tmp_path, refreshTokenExpiresAt=in_hours(300))
+
+    assert read_named_login_window(tmp_path) == CredentialWindow()
+
+
+def test_named_login_credential_status_points_the_cli_at_its_directory(probe, tmp_path):
+    """The whole reason this exists separately from `credential_status`: a
+    named login is never the ambient `CLAUDE_CONFIG_DIR`."""
+    fake = probe(stdout=json.dumps(SIGNED_IN))
+
+    named_login_credential_status(tmp_path)
+
+    assert fake.env["CLAUDE_CONFIG_DIR"] == str(tmp_path)
+
+
+def test_named_login_credential_status_reads_that_logins_own_window(probe, tmp_path):
+    (tmp_path / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": in_hours(-1)}})
+    )
+    probe(stdout=json.dumps(SIGNED_IN))
+
+    status = named_login_credential_status(tmp_path)
+
+    assert not status.logged_in
+    assert "renew" in status.detail
+
+
+def test_a_missing_cli_leaves_named_login_status_unknown(monkeypatch, tmp_path):
+    monkeypatch.setattr(backend_module, "_cli_path", lambda: None)
+
+    status = named_login_credential_status(tmp_path)
+
+    assert status.method == CREDENTIAL_UNKNOWN
+
+
+def test_remote_control_argv_is_none_without_a_cli(monkeypatch):
+    monkeypatch.setattr(backend_module, "_cli_path", lambda: None)
+
+    assert remote_control_argv() is None
+
+
+def test_remote_control_argv_names_this_machine(monkeypatch):
+    """A stable, recognisable name beats whatever the CLI would auto-generate
+    — a person reading their Remote Control session list from a phone wants
+    to know which machine this is without guessing."""
+    monkeypatch.setattr(backend_module, "_cli_path", lambda: "/opt/claude")
+    monkeypatch.setattr(backend_module.socket, "gethostname", lambda: "homebox-core")
+
+    assert remote_control_argv() == ["/opt/claude", "--remote-control", "homebox-core"]
 
 
 def test_the_agent_is_handed_a_scratch_database(monkeypatch, tmp_path):

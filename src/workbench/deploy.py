@@ -758,13 +758,20 @@ def refresh_units() -> DeployFailed | None:
         return None
 
     try:
-        install.install_units()
+        changed = install.install_units()
         install.install_polkit_rule()
     except Exception as error:
         # install.py signals failure by raising, so this is the boundary where
         # that becomes a result again. Broad on purpose: a deploy must report
         # every failure into the journal rather than exit on a traceback.
         return DeployFailed("installing systemd units", str(error))
+
+    if not is_node():
+        # Node-only units (the gaming switch) are reinstalled above like any
+        # other; this is the one that also wants restarting on its own change
+        # rather than left for the next crash — see the function for why that
+        # is not simply folded into `restart_service`.
+        install.converge_remote_control_unit(changed)
 
     converge_notification_keys()
     return None

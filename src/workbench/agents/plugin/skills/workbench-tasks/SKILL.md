@@ -63,8 +63,8 @@ anything else on their behalf.
 
 ## What this does not do
 
-This skill only reads and edits the task list itself. It does not start
-plans or executions against a task, and does not touch git — that is a
-separate, per-task workflow the person drives from the task tree page.
-Managing the list well (writing clear titles and bodies, keeping it
-organized) is the actual job here.
+This skill only reads and edits the task list itself — titles, bodies,
+status, structure. It does not touch git, and it does not start a run: for
+that, when the person explicitly asks you to plan or execute a specific
+task, see the workbench-runs skill. Managing the list well (writing clear
+titles and bodies, keeping it organized) is the actual job here.

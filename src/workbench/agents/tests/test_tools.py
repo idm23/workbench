@@ -486,6 +486,147 @@ def test_a_plan_run_cannot_ask(context):
     assert "not available in this phase" in result.text
 
 
+# --- Starting a run from a conversation ---------------------------------------
+#
+# `start_run`'s own argument is named `phase` too, the same name `call()` uses
+# for which phase to dispatch *in* — so these go through `dispatch` directly
+# rather than through the `call()` helper, to keep the two apart.
+
+
+def test_start_run_posts_to_workbenchs_own_api(context, monkeypatch):
+    seen: dict[str, Any] = {}
+
+    def fake_post(url: str, json: dict, timeout: float):
+        seen["url"] = url
+        seen["json"] = json
+        return httpx.Response(
+            201,
+            json={
+                "id": 42,
+                "task_id": 9,
+                "phase": "plan",
+                "status": "queued",
+                "backend": "claude",
+                "login": None,
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = dispatch(RunPhase.CONVERSATION, "start_run", {"task_id": 9, "phase": "plan"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert not result.is_error
+    assert seen["url"] == "http://127.0.0.1:8787/api/tasks/9/runs"
+    assert seen["json"] == {"phase": "plan"}
+    assert "Started run 42" in result.text
+
+
+def test_start_run_forwards_an_explicit_agent_and_origin(context, monkeypatch):
+    seen: dict[str, Any] = {}
+
+    def fake_post(url: str, json: dict, timeout: float):
+        seen["json"] = json
+        return httpx.Response(
+            201,
+            json={
+                "id": 1,
+                "task_id": 9,
+                "phase": "execute",
+                "status": "queued",
+                "backend": "local",
+                "login": None,
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    dispatch(
+        RunPhase.CONVERSATION,
+        "start_run",
+        {"task_id": 9, "phase": "execute", "origin": "staging", "agent": "local"},
+        context,
+    )
+
+    assert seen["json"] == {"phase": "execute", "origin": "staging", "agent": "local"}
+
+
+def test_start_run_rejects_a_bad_phase_before_sending_anything(context, monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("it asked anyway"))
+
+    result = dispatch(
+        RunPhase.CONVERSATION, "start_run", {"task_id": 9, "phase": "sideways"}, context
+    )
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "'plan' or 'execute'" in result.text
+
+
+def test_start_run_rejects_a_missing_task_id(context, monkeypatch):
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("it asked anyway"))
+
+    result = dispatch(RunPhase.CONVERSATION, "start_run", {"phase": "plan"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "task_id" in result.text
+
+
+def test_start_run_relays_a_refusal_from_the_api(context, monkeypatch):
+    """The API's own reason — a parent task, the concurrency cap, an unknown
+    agent — reaches the model verbatim rather than a generic failure."""
+
+    def fake_post(url: str, json: dict, timeout: float):
+        return httpx.Response(
+            422,
+            json={"detail": "Break this into a sub-task and run that instead."},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = dispatch(RunPhase.CONVERSATION, "start_run", {"task_id": 9, "phase": "plan"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "sub-task" in result.text
+
+
+def test_start_run_reports_an_unreachable_workbench(context, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise httpx.ConnectError("nothing listening")
+
+    monkeypatch.setattr(httpx, "post", refuse)
+
+    result = dispatch(RunPhase.CONVERSATION, "start_run", {"task_id": 9, "phase": "plan"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "Could not reach Workbench" in result.text
+
+
+def test_start_run_is_not_available_while_executing(context):
+    """A run that is itself carrying out work has no business starting
+    another one unasked — and execute mode gets the writing tools plus
+    report_outcome/ask_user, not this."""
+    result = dispatch(RunPhase.EXECUTE, "start_run", {"task_id": 9, "phase": "plan"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "not available in this phase" in result.text
+
+
+def test_start_run_is_not_available_while_planning(context):
+    result = dispatch(RunPhase.PLAN, "start_run", {"task_id": 9, "phase": "plan"}, context)
+
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "not available in this phase" in result.text
+
+
 # --- Names a model reaches for ------------------------------------------------
 
 

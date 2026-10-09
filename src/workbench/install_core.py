@@ -37,6 +37,7 @@ from workbench.install import (
     ensure_agent_state_dir,
     ensure_data_directory,
     ensure_notification_keys,
+    ensure_remote_control_workspace,
     ensure_service_account,
     ensure_uv_for_owner,
     hand_off_to,
@@ -140,6 +141,9 @@ def main() -> int:
 
         step("Preparing the agent's state directory")
         ensure_agent_state_dir(account)
+
+        step("Preparing the remote-control session's workspace")
+        ensure_remote_control_workspace(account)
 
         step("Preparing the account's git identity and SSH key")
         ensure_agent_identity(account)

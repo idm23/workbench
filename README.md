@@ -76,6 +76,7 @@ Re-running it is safe — every step checks before acting, and your data is unto
 | `src/workbench/install_node.py` | A node's install: a GPU serving a model, and nothing else. |
 | `src/workbench/app.py` | The web application: routes and templates. |
 | `src/workbench/agents/` | The backends behind one seam: `claude.py`, and `local.py` for your own GPU. |
+| `src/workbench/remote_control.py` | Keeps a standing, remote-controllable Claude session up on the head. |
 | `src/workbench/database/` | `models.py` (the schema) and `db.py` (engine and sessions). |
 | `src/workbench/git/` | `github.py`, `worktrees.py`, `revision.py` — everything that shells to git. |
 | `src/workbench/tasks/` | `tree.py` (the shape a page renders) and `store.py` (every write). |

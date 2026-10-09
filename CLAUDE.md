@@ -32,6 +32,10 @@ Runs on an always-on Ubuntu box, reachable only over Tailscale.
 > updated. What running a real 7B first found was not the plumbing either: it was that a
 > small model writes its tool calls as prose, claims to have finished things it never
 > started, and reaches verdicts without reading anything. See Machines below.
+> **A standing Claude session now runs on the head whether or not any task is.**
+> `workbench-remote-control.service` keeps `claude --remote-control` up under its own
+> named login, independent of the credential runs bill against — the baseline #66's
+> on-demand spawning will sit on top of, not that feature itself.
 > See `README.md` for what is actually live.
 
 ## Reproducibility is a project goal
@@ -396,6 +400,68 @@ Three consequences that shaped code:
 None of this is Claude-specific by construction: `API_CREDENTIAL_VARS` is a list in
 `config.py`, and the next backend adds its own spelling to it.
 
+**A standing, remote-controllable Claude session now runs on the head, independent of
+any run.** Narrower than #66 on purpose — #66 is homebox-core spawning agents on demand;
+this is the baseline that sits under it, so reaching in from elsewhere never depends on
+someone having started a session by hand first. Shaped like every other always-on piece:
+`workbench-remote-control.service`, `Restart=always`, installed and converged the same
+way `workbench.service` is.
+
+Two decisions the task asked for on purpose, rather than leaving to be discovered later:
+
+- **Its own named login, never the one runs bill against.** The run credential answers
+  "what does this bill to"; a person remote-controlling in directly is a different
+  identity, and conflating the two would mean every run and every direct session show up
+  as the same account. `CLAUDE_CONFIG_DIR` points at `.claude-logins/remote-control`
+  (`WORKBENCH_REMOTE_CONTROL_LOGIN` to rename it), created and signed in exactly the way
+  any other named login is — see "A named login is signed in exactly like the default
+  one" above.
+- **"Alive" and "usable" are two different doctor checks, not one.**
+  `check_remote_control_unit` asks systemd, which only ever knows the process has not
+  crashed. `check_remote_control_login` asks `agents.claude.named_login_credential_status`
+  — the same renewal-window question `check_agent_credential` already asks of the default
+  login, generalised to take any login's own directory — because a unit can be `active`
+  while sitting at the CLI's own first-run setup screen with nobody there to click through
+  it, which is exactly the "alive but not usable" gap this task exists not to repeat.
+
+**`--remote-control` turns out to need a real pty, and that shaped `ExecStart`.** Tried
+directly under a plain pipe — stdin as `/dev/null`, the way a unit's is by default — the
+CLI refused immediately: "Input must be provided either through stdin or as a prompt
+argument when using --print," never opening its interface at all. Given a pty instead
+(the stdlib's own `pty.spawn`, which needs nothing external), it rendered its full
+first-run setup screen correctly. So `ExecStart` is `python -m workbench.remote_control`
+rather than the CLI directly: that module resolves the CLI's path through
+`agents.claude.remote_control_argv` — the one module allowed to know the SDK bundles a
+binary — and hands it the pty itself. Named with this machine's hostname rather than the
+CLI's own auto-generated name, so a person reading their Remote Control session list from
+a phone recognises which one it is.
+
+**A fresh login hits that setup screen and sits there, which is "active" and not useful —
+the exact split the two doctor checks exist to catch.** `Restart=always` protects against
+a genuine crash — the CLI dying, an unhandled error in the wrapper — but does nothing for
+this failure, because nothing crashed: the process is simply waiting on a keystroke nobody
+can supply over a unit with no terminal. The fix is the same one-time manual step every
+login already needs: sign in once, from a real terminal, as the service account, before
+the unit's own restart loop is relied on for anything.
+
+**Enabled and started at install time, restarted only when its own unit changes.**
+`install_service()` enables and restarts it exactly like the app unit. Deploy convergence
+is more careful: `converge_remote_control_unit` only `try-restart`s it when the rendered
+template itself differs — restarting it on every deploy tick, the way `workbench.service`
+is, would interrupt a person's live session for a change that has nothing to do with this
+unit at all. Mirrors `install_node.converge_client_unit`'s own restraint, from the other
+end: a changed unit nobody restarts is a unit still running what it was before the change.
+One known gap, consistent with the project's standing rule here: a deployment where this
+unit is entirely new picks up the file on the next automatic deploy tick, but only starts
+running it after `./install.sh` is re-run by hand once, or at the next reboot — the same
+bargain "It cannot install itself" already describes for any feature this new.
+
+**Deliberately narrower than #66.** No `WORKBENCH_DB`, no plugin directory, no project
+worktree: this session works in its own directory (`agent_home()/remote-control`,
+pre-created the same way `.claude` is, for the same `ProtectSystem=strict` reason), with
+no stake in any project's checkout or the live database. Giving it one is #66's decision
+to make, not a default this task should have smuggled in.
+
 **Tasks live in local SQLite, not GitHub Issues.** GitHub is used for code hosting,
 remotes, and PRs only. Issues were considered and rejected: every UI interaction
 becomes a network round-trip, and the sub-issue API is an awkward fit for the
@@ -464,6 +530,32 @@ outlive a pause of more than a few minutes, so the first message after a break r
 the whole transcript whether or not the process stayed up. What staying up *would* cost
 is a slot. The project chat has a slot of its own for the same reason: a chat that queued
 behind task runs, or stopped them starting, would be no use for talking about them.
+
+**The chat can now press Plan or Execute itself, on the same terms as a tap and no
+looser.** The only thing that started a run used to be the HTML form at `POST
+/tasks/{task_id}/runs`, answering with a redirect carrying a `notice`/`error` query param —
+useless to anything that needs a real answer back rather than a page to render.
+`POST /api/tasks/{task_id}/runs` is the JSON twin, built by lifting the form route's own
+validation into `lifecycle.request_run` so the two share one implementation rather than
+two that could drift: the concurrency cap, `agent_choices`/`allowed_agents`, and the "a
+task with children has no single thing to do" refusal all apply exactly as they do to a
+button press. Both backends reach it the way they reach everything else above the seam —
+a skill for Claude (`workbench-runs`), a tool for the local loop (`start_run`, offered only
+in `RunPhase.CONVERSATION`, never execute or plan) — so nothing above the seam learns there
+were two mechanisms.
+
+The question worth deciding deliberately, rather than inheriting by accident: the chat
+starts a run only when the person in *that* conversation explicitly names a task and asks
+for it, in that turn — never on its own initiative, and never as a batch decision to work
+through several tasks unattended. Opening a pull request with no click per task is a real
+behaviour change, not a wiring exercise, and nothing asked for it. The bound is stated
+twice — in the skill's and the tool's own description, and again in the conversation
+prompt's wording — because a capability that spends a concurrency slot and may open a pull
+request earns saying it twice: once where the model reads what it is doing, once in the
+tool it reaches for. `TaskOut` grew a `latest_run` field (id, phase, status, summary,
+pr_url) so a later question in the same conversation — "did that finish?" — is answered by
+re-reading the tree rather than by the launch call blocking, which it must not: the run it
+started keeps going after the conversation does, on its own, exactly like every other run.
 
 **An agent can now ask a question, and that is the same decision rather than a reversal
 of it.** Agents said outright, in real runs here, that there was no way to reach the

@@ -98,6 +98,7 @@ from workbench.runs.lifecycle import (
     cancel_run,
     continue_run,
     parse_agent_choice,
+    request_run,
     start_conversation,
     start_run,
 )
@@ -121,7 +122,7 @@ from workbench.tasks import (
     delete_task as delete_task_and_children,
 )
 from workbench.tasks.origin import DEFAULT as DEFAULT_ORIGIN
-from workbench.tasks.origin import InvalidOrigin, origin_branch_for, origin_choices, resolve_origin
+from workbench.tasks.origin import origin_branch_for, origin_choices
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 # A plan, a summary, and a run's own `text`/`thinking` events are Markdown —
@@ -948,44 +949,11 @@ def start_task_run(
     except ValueError:
         return _redirect(target, error=f"{phase!r} is not a run phase.")
 
-    if task.children:
-        # A task with children describes work rather than being work, so an
-        # agent pointed at one has no single thing to do.
-        return _redirect(target, error="Break this into a sub-task and run that instead.")
-
-    if task.worktree_path is None:
-        # Nothing to choose once a worktree already exists — its branch is
-        # fixed, and every run after the first only ever resumes it.
-        resolved = resolve_origin(task, origin or None)
-        if isinstance(resolved, InvalidOrigin):
-            return _redirect(target, error=resolved.message)
-        task.origin_ref = origin or None
-        db.commit()
-
-    backend: str | None
-    login: str | None
-    seed: str | None = None
-    if agent:
-        backend, _, login = agent.partition(":")
-        if backend not in available_backends():
-            return _redirect(target, error=f"There is no agent backend called {backend!r}.")
-        login = login or None
-    elif task.runs:
-        # No fresh choice was offered — Retry and re-plan post no `agent` —
-        # so pick up wherever the task's last attempt left off rather than
-        # silently reverting to the project's default.
-        last = task.runs[-1]
-        backend, login = last.backend, last.login
-        if last.phase is chosen:
-            # And with what it was handed. For a run executing another agent's
-            # approved plan, the seed *is* the plan, and a retry that starts a
-            # fresh session — as one whose old conversation is too long now
-            # does — would otherwise be left with the task and no plan.
-            seed = last.seed_message
-    else:
-        backend, login = None, None
-
-    result = start_run(db, task, chosen, backend=backend, login=login, seed_message=seed)
+    # Everything past "which phase" — the children check, the origin, the
+    # agent, the concurrency cap — is shared with the JSON API and the
+    # project chat's own way of starting a run, so a refusal reads
+    # identically whichever door it came through. See `request_run`.
+    result = request_run(db, task, chosen, origin=origin or None, agent=agent or None)
     if isinstance(result, Run):
         return _redirect(target, notice=f"Run {result.id} started ({chosen.value}).")
     return _redirect(target, error=result.message)

@@ -1,0 +1,68 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+#
+# A standing Claude Code session on this head, always up and reachable over
+# Remote Control, so reaching in from elsewhere never depends on someone
+# having started one by hand first. Head-only: a node runs no app and holds
+# no database, and has nothing of its own for a session like this to work on.
+#
+# Signs in as its own named login, never the one runs bill against —
+# `CLAUDE_CONFIG_DIR` below points at a login under `.claude-logins` created
+# the same way any other named login is, which the doctor's remote-control
+# check names the exact command for. The run credential answers "what does
+# this bill to"; this one answers "who is this when a person reaches in
+# directly", and the two must not be the same login, in the same way the
+# project's own agent choices already keep "which login ran this" and "which
+# account pays for it" from being silently conflated.
+#
+# ExecStart goes through `workbench.remote_control` rather than the CLI
+# directly — see that module for why `--remote-control` needs a pty this
+# unit cannot otherwise give it.
+
+[Unit]
+Description=Workbench: standing remote-control session (__SERVICE__)
+Documentation=https://github.com/idm23/workbench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REMOTE_CONTROL_WORKSPACE__
+
+ExecStart=__REPO__/.venv/bin/python -m workbench.remote_control
+
+Environment=CLAUDE_CONFIG_DIR=__REMOTE_CONTROL_LOGIN_DIR__
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Restarts a crash — the CLI dying, the pty wrapper hitting an unhandled
+# error. It does *not* protect against the other failure shape this session
+# has: a fresh login with no credential yet sits at the CLI's own first-run
+# setup screen forever, which is `active` by every measure systemd has and
+# useless by the one that matters. That is what the doctor's own credential
+# check is for; restarting a process that is not crashing would not touch it.
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+
+# Where this session works, and the only place besides its own login it may
+# write. Created at install time because ProtectSystem=strict means a
+# directory absent when the unit starts can never be created by anything
+# inside it — the same reason the agent's own `.claude` is.
+ReadWritePaths=__REMOTE_CONTROL_WORKSPACE__
+
+# The named login's own credential and session transcripts. Writable, not
+# merely readable: its OAuth token is refreshed periodically, exactly like
+# every other login this project uses. The `-` tolerates a machine where no
+# named login has ever been created yet — this unit still starts, and sits at
+# the setup screen above until one is.
+ReadWritePaths=-__HOME__/.claude-logins
+
+# ssh writes known_hosts on first connection, and a session that can run git
+# is one that eventually pushes.
+ReadWritePaths=-__HOME__/.ssh
+
+[Install]
+WantedBy=multi-user.target
