@@ -1030,8 +1030,11 @@ def _start_run(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     runs in the runner's process, and the API is the one seam already proven
     to carry a decision like this one durably across a crash.
     """
+    raw_task_id = args.get("task_id")
+    if raw_task_id is None:
+        return ToolResult("`task_id` must be the task's id, a number.", is_error=True)
     try:
-        task_id = int(args.get("task_id"))
+        task_id = int(raw_task_id)
     except TypeError, ValueError:
         return ToolResult("`task_id` must be the task's id, a number.", is_error=True)
 

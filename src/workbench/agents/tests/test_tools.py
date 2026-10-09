@@ -560,6 +560,7 @@ def test_start_run_rejects_a_bad_phase_before_sending_anything(context, monkeypa
         RunPhase.CONVERSATION, "start_run", {"task_id": 9, "phase": "sideways"}, context
     )
 
+    assert isinstance(result, ToolResult)
     assert result.is_error
     assert "'plan' or 'execute'" in result.text
 
@@ -569,6 +570,7 @@ def test_start_run_rejects_a_missing_task_id(context, monkeypatch):
 
     result = dispatch(RunPhase.CONVERSATION, "start_run", {"phase": "plan"}, context)
 
+    assert isinstance(result, ToolResult)
     assert result.is_error
     assert "task_id" in result.text
 
@@ -588,6 +590,7 @@ def test_start_run_relays_a_refusal_from_the_api(context, monkeypatch):
 
     result = dispatch(RunPhase.CONVERSATION, "start_run", {"task_id": 9, "phase": "plan"}, context)
 
+    assert isinstance(result, ToolResult)
     assert result.is_error
     assert "sub-task" in result.text
 
@@ -600,6 +603,7 @@ def test_start_run_reports_an_unreachable_workbench(context, monkeypatch):
 
     result = dispatch(RunPhase.CONVERSATION, "start_run", {"task_id": 9, "phase": "plan"}, context)
 
+    assert isinstance(result, ToolResult)
     assert result.is_error
     assert "Could not reach Workbench" in result.text
 
