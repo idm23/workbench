@@ -16,7 +16,16 @@ from sqlalchemy.orm import Session
 
 from workbench.app import app
 from workbench.database.db import get_db, make_engine
-from workbench.database.models import Base, Project, Run, RunOutcome, RunPhase, RunStatus, Task, User
+from workbench.database.models import (
+    Base,
+    Project,
+    Run,
+    RunOutcome,
+    RunPhase,
+    RunStatus,
+    Task,
+    User,
+)
 from workbench.runs import lifecycle
 from workbench.runs.executors import Started, StartRefused
 from workbench.runs.store import create_run, finish_run, mark_running

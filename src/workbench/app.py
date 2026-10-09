@@ -88,7 +88,6 @@ from workbench.runs.activity import (
 )
 from workbench.runs.chat import chat_history, failed_without_a_word
 from workbench.runs.lifecycle import (
-    InvalidRunRequest,
     NotCancellable,
     active_run_for_project,
     active_run_for_task,
