@@ -345,9 +345,7 @@ def test_a_parent_task_cannot_be_run(client, executor):
 def test_an_unknown_agent_is_refused(client, executor):
     task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
 
-    response = client.post(
-        f"/api/tasks/{task['id']}/runs", json={"phase": "plan", "agent": "gpt"}
-    )
+    response = client.post(f"/api/tasks/{task['id']}/runs", json={"phase": "plan", "agent": "gpt"})
 
     assert response.status_code == 422
     assert "no agent backend called" in response.json()["detail"]

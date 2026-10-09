@@ -1032,7 +1032,7 @@ def _start_run(context: ToolContext, args: dict[str, Any]) -> ToolOutcome:
     """
     try:
         task_id = int(args.get("task_id"))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return ToolResult("`task_id` must be the task's id, a number.", is_error=True)
 
     phase = str(args.get("phase") or "").strip()
