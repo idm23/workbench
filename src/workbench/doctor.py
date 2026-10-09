@@ -63,6 +63,8 @@ from workbench.config import (
     is_inference_node,
     is_node,
     port,
+    remote_control_login_dir,
+    remote_control_unit_name,
     repo_root,
     restore_from,
     service_account,
@@ -352,6 +354,123 @@ def _remaining(delta: timedelta) -> str:
     if hours < 48:
         return f"{hours} hours"
     return f"{hours // 24} days"
+
+
+def _remote_control_login_fix(login_dir: Path) -> str:
+    """The one-time command that signs the standing session's own login in.
+
+    Run by hand, as the service account, exactly like any other named login —
+    see `claude_login_dir` and CLAUDE.md's "A named login is signed in exactly
+    like the default one". `sys.executable` rather than a hardcoded venv path,
+    matching `_login`'s own fix message below for the same reason: this is
+    the interpreter that is actually answering right now.
+    """
+    return (
+        f"sudo -iu {service_account()} env CLAUDE_CONFIG_DIR={login_dir} "
+        f"{sys.executable} -m workbench.doctor --login"
+    )
+
+
+def check_remote_control_unit() -> Check:
+    """Whether the standing remote-control session's unit is installed and running.
+
+    "Running", not "reachable". `is-active` only ever knows the process has
+    not crashed — which is equally true of a healthy session and of one stuck
+    forever at the CLI's own first-run setup screen because nobody has signed
+    its login in yet. That is deliberately a different question, asked by
+    `check_remote_control_login` below: the two can disagree, and the whole
+    reason both exist is that a process being alive must never be read as a
+    session being usable. See `check_client_unit` below, which is the same
+    split for the same reason on a different unit.
+    """
+    key = "remote-control-unit"
+    title = "The standing remote-control session is running"
+    unit = f"{remote_control_unit_name()}.service"
+
+    enabled = _run(["systemctl", "is-enabled", unit])
+    if enabled is None:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail="systemctl could not be run here.",
+        )
+    if enabled.returncode != 0:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=f"{unit} is not installed, so nothing is reachable over Remote Control yet.",
+            fix="sudo ./install.sh",
+        )
+
+    active = _run(["systemctl", "is-active", unit])
+    running = active is not None and active.stdout.strip() == "active"
+    if running:
+        return Check(key=key, title=title, state=CheckState.OK, detail="Enabled and running.")
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.FAIL,
+        detail=(
+            f"{unit} is enabled but not running right now, so nothing is reachable over "
+            "Remote Control. Restart=always should already be retrying this — check:"
+        ),
+        fix=f"journalctl -u {unit} -n 50 --no-pager",
+    )
+
+
+def check_remote_control_login() -> Check:
+    """Whether the standing session's own login could actually authenticate.
+
+    Deliberately a separate login from the one runs bill against — see
+    CLAUDE.md's "Its own named login, never the one runs bill against" — so
+    this asks `agents.claude` about one specific named login directly rather
+    than going through `get_backend().credential_status()`, which only ever
+    knows about the machine's configured backend and its default login.
+
+    Mirrors `check_agent_credential` exactly otherwise, including the renewal
+    window: the credential-expiry problem that check exists to catch —
+    `claude auth status` reporting a healthy login for weeks after it quietly
+    stopped renewing — applies just as much to a login nobody is watching
+    because no run ever authenticates with it to notice.
+    """
+    from workbench.agents.claude import named_login_credential_status
+
+    key = "remote-control-login"
+    title = "The remote-control session's login works"
+    login_dir = remote_control_login_dir()
+
+    if not login_dir.is_dir():
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL,
+            detail="No named login has been created for the remote-control session yet.",
+            fix=_remote_control_login_fix(login_dir),
+        )
+
+    status = named_login_credential_status(login_dir)
+    fix = _remote_control_login_fix(login_dir)
+
+    if status.logged_in:
+        closing = _renewal_closing(status.renewable_until)
+        if closing is not None:
+            return Check(
+                key=key,
+                title=title,
+                state=CheckState.WARN,
+                detail=(
+                    f"{status.detail} That login stops being renewable in {closing}, and "
+                    "renewing does not extend it — after that the standing session can no "
+                    "longer authenticate until someone signs in again."
+                ),
+                fix=fix,
+            )
+        return Check(key=key, title=title, state=CheckState.OK, detail=status.detail)
+
+    state = CheckState.UNKNOWN if status.method == "unknown" else CheckState.FAIL
+    return Check(key=key, title=title, state=state, detail=status.detail, fix=fix)
 
 
 def check_agent_state() -> Check:
@@ -1984,6 +2103,8 @@ HEAD_CHECKS = (
     check_home_directory,
     check_agent_credential,
     check_agent_state,
+    check_remote_control_unit,
+    check_remote_control_login,
     check_git_identity,
     check_snapshot_source,
     check_deploy_key,

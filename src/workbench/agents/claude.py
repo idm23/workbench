@@ -16,6 +16,7 @@ home server and a traceback out of a detached runner helps nobody.
 import json
 import logging
 import shutil
+import socket
 import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
@@ -593,15 +594,14 @@ def _moment(value: Any) -> datetime | None:
         return None
 
 
-def read_credential_window(home: Path | None = None) -> CredentialWindow:
-    """When the credential expires, and how long it can renew itself.
+def _credential_window_at(path: Path) -> CredentialWindow:
+    """Shared by the default login and a named one — see the two callers.
 
     Never raises and never guesses. The file belongs to the vendor, so it may
     be absent (an API key, a long-lived token, a machine nobody has signed in
     on) or shaped differently tomorrow, and either way an empty window is the
     honest answer.
     """
-    path = (home or Path.home()).joinpath(*CREDENTIAL_PATH)
     try:
         payload = json.loads(path.read_text())
     except OSError, json.JSONDecodeError, UnicodeDecodeError:
@@ -618,6 +618,24 @@ def read_credential_window(home: Path | None = None) -> CredentialWindow:
         expires_at=_moment(oauth.get("expiresAt")),
         renewable_until=_moment(oauth.get("refreshTokenExpiresAt")),
     )
+
+
+def read_credential_window(home: Path | None = None) -> CredentialWindow:
+    """When the default login's credential expires, and how long it can renew
+    itself. See `read_named_login_window` for the same question about a named
+    login, which is not rooted at `home` the same way.
+    """
+    return _credential_window_at((home or Path.home()).joinpath(*CREDENTIAL_PATH))
+
+
+def read_named_login_window(config_dir: Path) -> CredentialWindow:
+    """The same question as `read_credential_window`, for one named login.
+
+    A named login's directory *is* its `CLAUDE_CONFIG_DIR` directly — unlike
+    the default login, there is no nested `.claude` beneath it, because
+    nothing ever points `CLAUDE_CONFIG_DIR` at `~`. See `config.claude_login_dir`.
+    """
+    return _credential_window_at(config_dir / CREDENTIAL_PATH[-1])
 
 
 def _login_command(cli: str | None) -> tuple[str, ...]:
@@ -728,6 +746,90 @@ def read_credential(
     )
 
 
+def _credential_status_in(config_dir: Path | None) -> CredentialStatus:
+    """What `ClaudeBackend.credential_status` asks, parameterised by login.
+
+    `config_dir` is `None` for the default login — `agent_environment()`'s own
+    `CLAUDE_CONFIG_DIR`, usually unset, resolving to `~/.claude` — and a named
+    login's own directory otherwise. Split out so the doctor can ask this
+    about the standing remote-control session's login without going through a
+    `Backend`, which has no notion of "which login" beyond the one the rest of
+    Workbench is configured to use.
+
+    The exit code is ignored on purpose — a logged-out CLI answers 1 and still
+    prints a perfectly good report on stdout, so treating non-zero as
+    unreadable would turn the most important case into `unknown`.
+    """
+    cli = _cli_path()
+    if cli is None:
+        return _unknown_credential(
+            "The Claude CLI could not be found, so the credential was not checked."
+        )
+
+    env = agent_environment()
+    if config_dir is not None:
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+
+    try:
+        probe = subprocess.run(
+            [cli, "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=AUTH_PROBE_TIMEOUT_SECONDS,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _unknown_credential(
+            f"The Claude CLI did not answer within {AUTH_PROBE_TIMEOUT_SECONDS}s."
+        )
+    except OSError as exc:
+        return _unknown_credential(f"The Claude CLI could not be run: {exc}.")
+
+    try:
+        payload = json.loads(probe.stdout)
+    except json.JSONDecodeError:
+        logger.warning("Unreadable auth status from %s: %r", cli, probe.stdout[:200])
+        return _unknown_credential("The Claude CLI did not report a readable status.")
+
+    if not isinstance(payload, dict):
+        return _unknown_credential("The Claude CLI did not report a readable status.")
+
+    window = read_credential_window() if config_dir is None else read_named_login_window(config_dir)
+    return read_credential(payload, cli, window)
+
+
+def named_login_credential_status(config_dir: Path) -> CredentialStatus:
+    """Whether one named login could authenticate right now, and on whose
+    account — the question `check_agent_credential` already asks of the
+    default login, asked instead of the standing remote-control session's own.
+
+    Nothing today asks this of a login used for project runs; it did not need
+    asking there because a run that cannot authenticate simply fails, loudly,
+    on its own. A standing session has no such moment — it either answers to
+    Remote Control or it sits there looking alive — which is exactly why this
+    exists.
+    """
+    return _credential_status_in(config_dir)
+
+
+def remote_control_argv() -> list[str] | None:
+    """The command that starts a standing, remote-controllable session.
+
+    `None` when no CLI can be found — the same condition `credential_status`
+    already reports through the doctor, except nothing here has a `Check` to
+    hand it to, so the caller (`workbench.remote_control`) logs and exits.
+
+    Named with this machine's hostname rather than left to the CLI's own
+    default (which is the hostname too, per `--remote-control-session-name-prefix`,
+    just suffixed to stay unique across concurrent sessions) — a person
+    reading their Remote Control session list from a phone wants to recognise
+    *this* one without having to guess which auto-generated name was it.
+    """
+    cli = _cli_path()
+    return None if cli is None else [cli, "--remote-control", socket.gethostname()]
+
+
 class ClaudeBackend:
     """Drives Claude through `claude_agent_sdk`.
 
@@ -755,46 +857,13 @@ class ClaudeBackend:
     def credential_status(self) -> CredentialStatus:
         """Ask the CLI who it would authenticate as. See the protocol's note.
 
-        Run under `agent_environment()`, which is the whole point: it strips
-        the metered-API variables exactly as the runner does, so this reports
-        what a run would get rather than what happens to be exported in the
-        shell that asked.
-
-        The exit code is ignored on purpose — a logged-out CLI answers 1 and
-        still prints a perfectly good report on stdout, so treating non-zero
-        as unreadable would turn the most important case into `unknown`.
+        Delegates to `_credential_status_in(None)` — the default login, read
+        from whatever `agent_environment()` resolves `CLAUDE_CONFIG_DIR` to.
+        See `named_login_credential_status` for the same question asked of a
+        named login instead, which nothing above the seam may ask through a
+        `Backend` — it is specific to this one.
         """
-        cli = _cli_path()
-        if cli is None:
-            return _unknown_credential(
-                "The Claude CLI could not be found, so the credential was not checked."
-            )
-
-        try:
-            probe = subprocess.run(
-                [cli, "auth", "status", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=AUTH_PROBE_TIMEOUT_SECONDS,
-                env=agent_environment(),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return _unknown_credential(
-                f"The Claude CLI did not answer within {AUTH_PROBE_TIMEOUT_SECONDS}s."
-            )
-        except OSError as exc:
-            return _unknown_credential(f"The Claude CLI could not be run: {exc}.")
-
-        try:
-            payload = json.loads(probe.stdout)
-        except json.JSONDecodeError:
-            logger.warning("Unreadable auth status from %s: %r", cli, probe.stdout[:200])
-            return _unknown_credential("The Claude CLI did not report a readable status.")
-
-        if not isinstance(payload, dict):
-            return _unknown_credential("The Claude CLI did not report a readable status.")
-        return read_credential(payload, cli, read_credential_window())
+        return _credential_status_in(None)
 
     async def run(self, request: AgentRequest) -> AgentStream:
         """Drive the conversation on one persistent connection, turn by turn.

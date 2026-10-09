@@ -40,11 +40,13 @@ UNIT_NAMES = [
     "workbench-deploy.service",
     "workbench-deploy.timer",
     "workbench-run@.service",
+    "workbench-remote-control.service",
 ]
 
 SERVICE_NAME = "workbench"
 DEPLOY_NAME = "workbench-deploy"
 RUN_NAME = "workbench-run"
+REMOTE_CONTROL_NAME = "workbench-remote-control"
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +86,7 @@ def test_every_unit_is_rendered(rendered):
         f"{DEPLOY_NAME}.service",
         f"{DEPLOY_NAME}.timer",
         f"{RUN_NAME}@.service",
+        f"{REMOTE_CONTROL_NAME}.service",
     }
 
 
@@ -351,6 +354,7 @@ def test_staging_units_are_named_apart_from_production(staging):
         "workbench-staging-deploy.service",
         "workbench-staging-deploy.timer",
         "workbench-staging-run@.service",
+        "workbench-staging-remote-control.service",
     }
 
 
@@ -557,16 +561,29 @@ def test_a_deploy_installs_everything_an_install_does(monkeypatch):
     that only ever updated automatically got the run unit without the
     authorisation to start it. The fix for that would have been a remembered
     manual step, which is the thing the automatic deployer exists to abolish.
+
+    The remote-control unit's own convergence is asserted here too, for the
+    same reason: a unit only `install.sh` restarts on change is a unit a
+    machine updated by the timer alone never picks a template change up for.
     """
     from workbench import deploy
 
     called: list[str] = []
+
+    def fake_install_units() -> set[str]:
+        called.append("units")
+        return set()
+
     monkeypatch.setattr("workbench.install.systemd_is_running", lambda: True)
-    monkeypatch.setattr("workbench.install.install_units", lambda: called.append("units"))
+    monkeypatch.setattr("workbench.install.install_units", fake_install_units)
     monkeypatch.setattr("workbench.install.install_polkit_rule", lambda: called.append("polkit"))
+    monkeypatch.setattr(
+        "workbench.install.converge_remote_control_unit",
+        lambda changed: called.append("remote-control"),
+    )
 
     assert deploy.refresh_units() is None
-    assert called == ["units", "polkit"]
+    assert called == ["units", "polkit", "remote-control"]
 
 
 def test_a_failure_installing_the_rule_is_reported_not_raised(monkeypatch):
