@@ -16,8 +16,19 @@ from sqlalchemy.orm import Session
 
 from workbench.app import app
 from workbench.database.db import get_db, make_engine
-from workbench.database.models import Base, Project, Run, RunOutcome, RunPhase, Task, User
-from workbench.runs.store import create_run, mark_running
+from workbench.database.models import (
+    Base,
+    Project,
+    Run,
+    RunOutcome,
+    RunPhase,
+    RunStatus,
+    Task,
+    User,
+)
+from workbench.runs import lifecycle
+from workbench.runs.executors import Started, StartRefused
+from workbench.runs.store import create_run, finish_run, mark_running
 
 #: Module state rather than a second fixture: only a couple of tests need to
 #: set up a `Run` directly (there is no HTTP route to create one), and a
@@ -262,6 +273,129 @@ def test_a_subtask_under_an_unbranched_parent_still_defaults_to_staging(client):
 
 def test_a_subtask_of_a_missing_task_is_404(client):
     assert client.post("/api/tasks/9999/subtasks", json={"title": "x"}).status_code == 404
+
+
+# --- Starting a run: the JSON twin of the task tree's own buttons ----------
+
+
+class _FakeExecutor:
+    """Starts nothing, records what it was asked to start — see
+    `tests/test_run_routes.py`'s `FakeExecutor`, which this mirrors."""
+
+    name = "fake"
+
+    def __init__(self, refuses: str | None = None) -> None:
+        self.refuses = refuses
+        self.started: list[int] = []
+
+    def start(self, run_id: int):
+        if self.refuses:
+            return StartRefused(self.refuses)
+        self.started.append(run_id)
+        return Started(f"fake-{run_id}")
+
+    def cancel(self, handle: str) -> bool:
+        return True
+
+    def is_running(self, handle: str) -> bool:
+        return True
+
+
+@pytest.fixture
+def executor(monkeypatch):
+    fake = _FakeExecutor()
+    monkeypatch.setattr(lifecycle, "get_executor", lambda _name=None: fake)
+    return fake
+
+
+def test_a_run_is_started(client, executor):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+
+    response = client.post(f"/api/tasks/{task['id']}/runs", json={"phase": "plan"})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["task_id"] == task["id"]
+    assert body["phase"] == "plan"
+    assert body["status"] == "queued"
+    assert executor.started == [body["id"]]
+
+
+def test_a_run_defaults_to_the_plan_phase(client, executor):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+
+    response = client.post(f"/api/tasks/{task['id']}/runs", json={})
+
+    assert response.json()["phase"] == "plan"
+
+
+def test_a_parent_task_cannot_be_run(client, executor):
+    """It describes work rather than being work — the same refusal the
+    task tree's own button gets, reached through `request_run`."""
+    parent = client.post("/api/projects/1/tasks", json={"title": "parent"}).json()
+    client.post("/api/projects/1/tasks", json={"title": "child", "parent_id": parent["id"]})
+
+    response = client.post(f"/api/tasks/{parent['id']}/runs", json={"phase": "plan"})
+
+    assert response.status_code == 422
+    assert "sub-task" in response.json()["detail"]
+    assert executor.started == []
+
+
+def test_an_unknown_agent_is_refused(client, executor):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+
+    response = client.post(f"/api/tasks/{task['id']}/runs", json={"phase": "plan", "agent": "gpt"})
+
+    assert response.status_code == 422
+    assert "no agent backend called" in response.json()["detail"]
+    assert executor.started == []
+
+
+def test_a_second_run_on_the_same_task_is_refused(client, executor):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+    client.post(f"/api/tasks/{task['id']}/runs", json={"phase": "plan"})
+
+    response = client.post(f"/api/tasks/{task['id']}/runs", json={"phase": "plan"})
+
+    assert response.status_code == 409
+    assert "already working" in response.json()["detail"]
+
+
+def test_the_concurrency_cap_is_reported_as_a_conflict(client, executor, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_MAX_CONCURRENT_RUNS", "1")
+    first = client.post("/api/projects/1/tasks", json={"title": "a"}).json()
+    second = client.post("/api/projects/1/tasks", json={"title": "b"}).json()
+    client.post(f"/api/tasks/{first['id']}/runs", json={"phase": "plan"})
+
+    response = client.post(f"/api/tasks/{second['id']}/runs", json={"phase": "plan"})
+
+    assert response.status_code == 409
+    assert "limit is 1" in response.json()["detail"]
+
+
+def test_starting_a_run_for_a_missing_task_is_404(client):
+    assert client.post("/api/tasks/9999/runs", json={"phase": "plan"}).status_code == 404
+
+
+def test_a_fresh_task_has_no_latest_run(client):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+
+    assert task["latest_run"] is None
+
+
+def test_the_tree_shows_a_tasks_latest_run(client, executor):
+    task = client.post("/api/projects/1/tasks", json={"title": "x"}).json()
+    started = client.post(f"/api/tasks/{task['id']}/runs", json={"phase": "plan"}).json()
+    with _db() as db:
+        finish_run(db, _run(db, started["id"]), RunStatus.SUCCEEDED, summary="done")
+
+    roots = client.get("/api/projects/1/tasks").json()
+
+    assert roots[0]["latest_run"]["id"] == started["id"]
+    assert roots[0]["latest_run"]["phase"] == "plan"
+    assert roots[0]["latest_run"]["status"] == "succeeded"
+    assert roots[0]["latest_run"]["summary"] == "done"
 
 
 # --- Outcomes: what the agent itself reports, live -------------------------

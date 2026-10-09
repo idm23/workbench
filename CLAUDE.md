@@ -531,6 +531,32 @@ the whole transcript whether or not the process stayed up. What staying up *woul
 is a slot. The project chat has a slot of its own for the same reason: a chat that queued
 behind task runs, or stopped them starting, would be no use for talking about them.
 
+**The chat can now press Plan or Execute itself, on the same terms as a tap and no
+looser.** The only thing that started a run used to be the HTML form at `POST
+/tasks/{task_id}/runs`, answering with a redirect carrying a `notice`/`error` query param —
+useless to anything that needs a real answer back rather than a page to render.
+`POST /api/tasks/{task_id}/runs` is the JSON twin, built by lifting the form route's own
+validation into `lifecycle.request_run` so the two share one implementation rather than
+two that could drift: the concurrency cap, `agent_choices`/`allowed_agents`, and the "a
+task with children has no single thing to do" refusal all apply exactly as they do to a
+button press. Both backends reach it the way they reach everything else above the seam —
+a skill for Claude (`workbench-runs`), a tool for the local loop (`start_run`, offered only
+in `RunPhase.CONVERSATION`, never execute or plan) — so nothing above the seam learns there
+were two mechanisms.
+
+The question worth deciding deliberately, rather than inheriting by accident: the chat
+starts a run only when the person in *that* conversation explicitly names a task and asks
+for it, in that turn — never on its own initiative, and never as a batch decision to work
+through several tasks unattended. Opening a pull request with no click per task is a real
+behaviour change, not a wiring exercise, and nothing asked for it. The bound is stated
+twice — in the skill's and the tool's own description, and again in the conversation
+prompt's wording — because a capability that spends a concurrency slot and may open a pull
+request earns saying it twice: once where the model reads what it is doing, once in the
+tool it reaches for. `TaskOut` grew a `latest_run` field (id, phase, status, summary,
+pr_url) so a later question in the same conversation — "did that finish?" — is answered by
+re-reading the tree rather than by the launch call blocking, which it must not: the run it
+started keeps going after the conversation does, on its own, exactly like every other run.
+
 **An agent can now ask a question, and that is the same decision rather than a reversal
 of it.** Agents said outright, in real runs here, that there was no way to reach the
 person — and every prompt told them so, because asking did nothing. Now an execute run

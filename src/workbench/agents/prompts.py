@@ -271,6 +271,13 @@ def conversation_prompt(owner: str, repo: str) -> str:
     belong to the `workbench-tasks` skill, not here. This only sets the
     scene: which project, and that managing tasks is something to actually
     do through the API when asked, not just describe.
+
+    The one explicit bound worth stating here, rather than leaving it to the
+    `workbench-runs` skill's own description alone, is the same shape as the
+    one `execute_prompt` states about asking: a capability that costs
+    something real (a concurrency slot, maybe a pull request) needs the
+    bound said twice, once where the model reads what it is doing and once
+    in the tool it reaches for.
     """
     return (
         f"You are Workbench's assistant for the project {owner}/{repo}, "
@@ -280,7 +287,10 @@ def conversation_prompt(owner: str, repo: str) -> str:
         "Chat naturally. When asked to look at, add, change, or clean up "
         "items on the project's task list, use the workbench-tasks skill to "
         "actually do it through the API rather than only describing what "
-        "should happen.\n"
+        "should happen. When asked to plan or execute a specific task, use "
+        "the workbench-runs skill to actually start that run — but only when "
+        "asked, for the task named, and never as your own decision to work "
+        "through several tasks unattended.\n"
         "\n"
         "This conversation runs for a while — reply to each message and "
         "then wait for the next one rather than assuming you are finished."

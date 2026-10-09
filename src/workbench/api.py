@@ -35,6 +35,7 @@ from workbench.database.models import (
 )
 from workbench.git.worktrees import local_checkout
 from workbench.nodes import Registration, register
+from workbench.runs.lifecycle import InvalidRunRequest, request_run
 from workbench.runs.store import report_outcome
 from workbench.tasks import (
     TaskNode,
@@ -60,12 +61,32 @@ class ProjectSummary(BaseModel):
     open_tasks: int
 
 
+class RunSummary(BaseModel):
+    """Just enough of a task's most recent run for a reader to tell what it
+    reported without a second lookup — the same question the task's own
+    `status` half-answers, filled in with the detail `status` cannot carry.
+
+    Useful chiefly to whoever just called `POST /tasks/{task_id}/runs`: that
+    call answers whether a run *started*; what it eventually reported is
+    only visible by reading the tree again later, and this is what that
+    re-read shows.
+    """
+
+    id: int
+    phase: RunPhase
+    status: RunStatus
+    summary: str | None
+    pr_url: str | None
+
+
 class TaskOut(BaseModel):
     id: int
     title: str
     body: str | None
     status: TaskStatus
     parent_id: int | None
+    #: None when the task has never had a run at all.
+    latest_run: RunSummary | None
     #: Nested rather than flat: it mirrors what the page renders, and reading a
     #: tree back as a tree is the point of asking for one.
     children: list[TaskOut]
@@ -137,7 +158,43 @@ class OutcomeIn(BaseModel):
     detail: str | None = None
 
 
+class RunStartIn(BaseModel):
+    """A fresh run request — the same thing the task tree's Plan and Execute
+    buttons post as a form, in JSON so a caller that is not a browser can
+    parse the answer. See `workbench.runs.lifecycle.request_run`."""
+
+    phase: RunPhase = RunPhase.PLAN
+    #: Which branch to start the task's worktree from. Only consulted the
+    #: first time a task is run — see `resolve_origin` — so almost always
+    #: left unset once a task has one.
+    origin: str | None = None
+    #: `backend`, or `backend:login`. A fresh choice, not the project's
+    #: default: an unknown one is refused rather than silently falling back
+    #: to it. Left unset, a task with a previous run picks up its backend and
+    #: login rather than reverting to the project's default, exactly as
+    #: Retry and re-plan do from the task tree.
+    agent: str | None = None
+
+
+class RunStartOut(BaseModel):
+    id: int
+    task_id: int | None
+    phase: RunPhase
+    status: RunStatus
+    backend: str
+    login: str | None
+
+
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+def _latest_run(task: Task) -> RunSummary | None:
+    if not task.runs:
+        return None
+    last = task.runs[-1]
+    return RunSummary(
+        id=last.id, phase=last.phase, status=last.status, summary=last.summary, pr_url=last.pr_url
+    )
 
 
 def _as_out(node: TaskNode) -> TaskOut:
@@ -147,6 +204,7 @@ def _as_out(node: TaskNode) -> TaskOut:
         body=node.task.body,
         status=node.task.status,
         parent_id=node.task.parent_id,
+        latest_run=_latest_run(node.task),
         children=[_as_out(child) for child in node.children],
     )
 
@@ -225,6 +283,7 @@ def add_task(db: DbSession, project_id: int, incoming: TaskIn) -> TaskOut:
         body=created.body,
         status=created.status,
         parent_id=created.parent_id,
+        latest_run=None,
         children=[],
     )
 
@@ -259,6 +318,7 @@ def add_subtask(db: DbSession, task_id: int, incoming: SubtaskIn) -> TaskOut:
         body=created.body,
         status=created.status,
         parent_id=created.parent_id,
+        latest_run=None,
         children=[],
     )
 
@@ -282,6 +342,45 @@ def update_task(db: DbSession, task_id: int, patch: TaskPatch) -> TaskOut:
 def remove_task(db: DbSession, task_id: int) -> None:
     """Delete a task and everything under it, worktrees included."""
     delete_task(db, _task_or_404(db, task_id))
+
+
+@router.post(
+    "/tasks/{task_id}/runs",
+    response_model=RunStartOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def start_task_run(db: DbSession, task_id: int, incoming: RunStartIn) -> RunStartOut:
+    """Press Plan or Execute on a task — the JSON twin of the task tree's own
+    form at `POST /tasks/{task_id}/runs`, and the door the project chat's
+    `workbench-runs` skill and the local backend's `start_run` tool both
+    reach this through.
+
+    Both go through `request_run`/`start_run`, so the concurrency cap, the
+    project's `allowed_agents`, and the "a task with children has no single
+    thing to do" refusal all apply exactly as they do to a button press —
+    this is a new way in, not new behaviour. A refusal comes back as a 422
+    with `detail` saying why, in the refusal's own words, rather than as a
+    silent no-op: unlike the form, nothing here can fall back to a redirect
+    with a notice on the next page, so the reason has to travel in the
+    response itself.
+    """
+    task = _task_or_404(db, task_id)
+    result = request_run(db, task, incoming.phase, origin=incoming.origin, agent=incoming.agent)
+    if isinstance(result, InvalidRunRequest):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, result.message)
+    if not isinstance(result, Run):
+        # TooManyRuns, AlreadyRunning, NotStarted — refusals about the state
+        # of the world right now rather than about this request, but still
+        # ordinary answers to "start a run", not server errors.
+        raise HTTPException(status.HTTP_409_CONFLICT, result.message)
+    return RunStartOut(
+        id=result.id,
+        task_id=result.task_id,
+        phase=result.phase,
+        status=result.status,
+        backend=result.backend,
+        login=result.login,
+    )
 
 
 @router.get("/nodes", response_model=list[NodeOut])
