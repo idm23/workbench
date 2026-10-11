@@ -47,6 +47,7 @@ from workbench.config import (
 from workbench.database.db import get_db
 from workbench.database.models import (
     DeviceSubscription,
+    Node,
     Project,
     Run,
     RunEvent,
@@ -77,7 +78,7 @@ from workbench.git.worktrees import (
     local_checkout,
     sync_worktree,
 )
-from workbench.nodes import known_nodes
+from workbench.nodes import is_screen, known_nodes, play_on, stop_on
 from workbench.notifications import devices_for, forget, send_test, set_enabled, subscribe
 from workbench.rendering import render_markdown
 from workbench.runs.activity import (
@@ -284,7 +285,12 @@ def service_worker() -> FileResponse:
 
 
 @app.get("/services", response_class=HTMLResponse)
-def show_services(request: Request, db: DbSession) -> HTMLResponse:
+def show_services(
+    request: Request,
+    db: DbSession,
+    error: str | None = None,
+    notice: str | None = None,
+) -> HTMLResponse:
     """What this instance of Workbench is actually running right now.
 
     Scoped to this instance on purpose — production and staging share a
@@ -301,8 +307,34 @@ def show_services(request: Request, db: DbSession) -> HTMLResponse:
             "shells": active_shells(db),
             "nodes": known_nodes(db),
             "systemd_available": systemd_available(),
+            "error": error,
+            "notice": notice,
         },
     )
+
+
+@app.post("/nodes/{node_id}/stream")
+def press_stream(db: DbSession, node_id: int, action: Annotated[str, Form()]) -> RedirectResponse:
+    """The Play and Stop buttons on a client node's row.
+
+    Synchronous on purpose: starting Steam takes a few seconds, and a person
+    who pressed Play wants to be told whether it worked rather than sent back
+    to a page that cannot know yet.
+    """
+    node = db.get(Node, node_id)
+    if node is None or not is_screen(node):
+        raise HTTPException(status_code=404, detail="No such screen.")
+    if action == "start":
+        problems = play_on(db, node)
+        done = f"Playing on {node.name}."
+    elif action == "stop":
+        problems = stop_on(node)
+        done = f"Stopped the stream on {node.name}."
+    else:
+        raise HTTPException(status_code=400, detail="Unknown action.")
+    if problems:
+        return _redirect("/services", error=" ".join(problems))
+    return _redirect("/services", notice=done)
 
 
 @app.get("/users/{user_id}", response_class=HTMLResponse)

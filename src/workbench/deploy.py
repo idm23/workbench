@@ -766,6 +766,15 @@ def refresh_units() -> DeployFailed | None:
         # every failure into the journal rather than exit on a traceback.
         return DeployFailed("installing systemd units", str(error))
 
+    if is_node():
+        try:
+            install.install_node_rule()
+            install.converge_node_control(changed)
+        except Exception as error:
+            # The buttons on the head are a convenience; a node that cannot
+            # offer them is still updated and still does its job.
+            logger.warning("Could not converge the node's control listener: %s", error)
+
     if not is_node():
         # Node-only units (the gaming switch) are reinstalled above like any
         # other; this is the one that also wants restarting on its own change

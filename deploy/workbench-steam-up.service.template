@@ -1,0 +1,21 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+#
+# Starts __GAMING_USER__'s Steam, which is a unit in *their* user manager. The
+# control listener runs as the service account and cannot reach another
+# account's manager; root can, with `--user -M <user>@`. So polkit grants the
+# listener this one unit, and this unit does the reaching.
+#
+# Oneshot without RemainAfterExit, so it can be started again every time the
+# button is pressed. `start` on a Steam already running does nothing at all,
+# which is the point: pressing Play must never restart a game in progress.
+#
+# Deliberately has no [Install] section: it exists only to be started.
+
+[Unit]
+Description=Workbench: start Steam for __GAMING_USER__ (__SERVICE__)
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/systemctl --user -M __GAMING_USER__@ start __STEAM_UNIT__
+TimeoutStartSec=30

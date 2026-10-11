@@ -20,13 +20,17 @@ import pytest
 
 from workbench import install, install_core
 from workbench.config import (
+    CLIENT_UNIT_NAME,
+    STEAM_UNIT_NAME,
     agent_git_identity,
     agent_home,
     deploy_unit_name,
     deployment_root,
     gaming_unit_name,
+    node_control_unit_name,
     service_account,
     service_name,
+    steam_up_unit_name,
 )
 from workbench.install import (
     InstallError,
@@ -783,3 +787,54 @@ def test_a_run_may_open_enough_files_to_run_a_test_suite():
 
 def test_a_named_logins_token_can_be_refreshed():
     assert ".claude-logins" in render_unit("workbench-run@.service.template")
+
+
+def test_no_placeholder_survives_in_the_node_rule_or_its_units(monkeypatch):
+    """A rule naming `__USER__` grants nobody, and the Play button is refused
+    with an authorisation error that names neither."""
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+
+    for template in (
+        "workbench-node.rules.template",
+        "workbench-node.service.template",
+        "workbench-steam-up.service.template",
+    ):
+        leftover = [line for line in render_unit(template).splitlines() if "__" in line]
+        assert leftover == [], template
+
+
+def test_the_node_rule_grants_the_listener_exactly_its_buttons(monkeypatch):
+    """The listener is unauthenticated on the LAN, so its account must be able
+    to start the stream and Steam and nothing else at all."""
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+    rule = render_unit("workbench-node.rules.template")
+
+    subject = re.search(r'subject\.user !== "([^"]+)"', rule)
+    runs_as = re.search(
+        r"^User=(.+)$", render_unit("workbench-node.service.template"), re.MULTILINE
+    )
+    granted = set(re.findall(r'unit === "([^"]+)"', rule))
+
+    # The agreement the run rule has to reach too: the account the listener
+    # runs as is the one the rule names, or every press is refused.
+    assert subject is not None and runs_as is not None
+    assert subject.group(1) == runs_as.group(1)
+    assert granted == {CLIENT_UNIT_NAME, f"{steam_up_unit_name()}.service"}
+
+
+def test_the_listener_never_runs_as_root(monkeypatch):
+    service = _directives(render_unit("workbench-node.service.template"))
+
+    assert "User=root" not in service
+    assert re.search(r"^User=\S+$", service, re.MULTILINE)
+    assert "-m workbench.node_control" in service
+    assert node_control_unit_name() == "workbench-node"
+
+
+def test_steam_is_started_in_the_players_own_manager(monkeypatch):
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+    service = _directives(render_unit("workbench-steam-up.service.template"))
+
+    assert f"--user -M ian@ start {STEAM_UNIT_NAME}" in service
+    # Started again on every press, so it must not stay "active".
+    assert "RemainAfterExit" not in service
