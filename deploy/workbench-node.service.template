@@ -1,0 +1,31 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+#
+# The buttons a head can press on this node: start or stop the stream. A
+# fixed set of verbs with no arguments, so there is nothing a request can say
+# that changes *what* runs — only whether it does.
+#
+# Listens on every interface, unauthenticated, exactly like the model server
+# beside it: anything on the home network can start or stop the stream. That
+# was chosen over the head reaching in by SSH (a key on the head, readable by
+# agents, that unlocks every node) and over nodes polling the head. If it ever
+# matters, the mitigation is a firewall rule on the node, not a setting here.
+
+[Unit]
+Description=Workbench: answer the head's buttons (__SERVICE__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The service account, never root. What needs privilege — starting the stream,
+# starting another account's Steam — is granted to it unit by unit by polkit.
+User=__USER__
+WorkingDirectory=__REPO__
+ExecStart=__REPO__/.venv/bin/python -m workbench.node_control
+Environment=WORKBENCH_INSTANCE=__INSTANCE__
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

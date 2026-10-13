@@ -806,6 +806,19 @@ audience than the two-device tailnet the "no auth at the app layer" note below w
 against, and if it ever matters the mitigation is a firewall rule on the node rather than
 a setting in Workbench.
 
+**A node answers two buttons, and that is the one thing that reaches *in*.** Until the
+Play button, a head could only read what nodes told it. `workbench-node.service` listens on
+port 8790 for `POST /stream/start` and `/stream/stop`. That is all it accepts: fixed verbs
+with no arguments, each a `systemctl` call on a unit the node itself names (the client's
+stream, and a root oneshot that starts the gaming account's Steam with `--user -M`). It
+runs as the service account, and polkit grants that account exactly those units. Like the
+model server it is unauthenticated on every interface, so anything on the home LAN can put
+the game on the television. The listener was chosen over two alternatives. One was the
+head SSHing in, which means a key on the head, readable by agents, that unlocks every
+node. The other was nodes polling the head: no ingress, but slower, and another loop on
+every node. The safety argument depends on the request being unable to choose *what*
+runs, so a verb that takes an argument would need that argument made again.
+
 **Two things a node install owns, and two it deliberately does not.** It owns the systemd
 drop-in that decides where Ollama listens, and the model pull. It does not own the GPU
 driver — a driver install is reboot-shaped, so `check_gpu` reports it with the exact

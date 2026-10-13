@@ -45,7 +45,9 @@ import urllib.request
 from pathlib import Path
 
 from workbench.config import (
+    CLIENT_UNIT_NAME,
     RUN_TIMEOUT_SECONDS,
+    STEAM_UNIT_NAME,
     agent_git_identity,
     agent_home,
     capabilities_marker,
@@ -62,6 +64,7 @@ from workbench.config import (
     instance,
     is_gaming_node,
     is_node,
+    node_control_unit_name,
     port,
     remote_control_login_dir,
     remote_control_unit_name,
@@ -72,6 +75,7 @@ from workbench.config import (
     run_unit_prefix,
     service_account,
     service_name,
+    steam_up_unit_name,
     stream_host_marker,
     vapid_private_key,
 )
@@ -125,12 +129,26 @@ def units() -> tuple[tuple[str, str], ...]:
         # like everything else — a unit only the installer writes is a unit a
         # machine updated by the timer never gets, which this project has now
         # learned three separate times.
-        if is_gaming_node():
+        #
+        # Every node also gets the listener a head presses its buttons
+        # through, and a gaming node the unit that starts its person's Steam.
+        node = (
+            *deployer,
+            (f"{node_control_unit_name()}.service", "workbench-node.service.template"),
+        )
+        if not is_gaming_node():
+            return node
+        gaming = (
+            *node,
+            (f"{gaming_unit_name()}.service", "workbench-gaming.service.template"),
+        )
+        # Only with a person to start Steam for: the unit names their account.
+        if gaming_user():
             return (
-                *deployer,
-                (f"{gaming_unit_name()}.service", "workbench-gaming.service.template"),
+                *gaming,
+                (f"{steam_up_unit_name()}.service", "workbench-steam-up.service.template"),
             )
-        return deployer
+        return gaming
     return (
         (f"{service_name()}.service", "workbench.service.template"),
         *deployer,
@@ -1153,6 +1171,9 @@ def render_unit(template_name: str) -> str:
         "__RUN_PREFIX__": run_unit_prefix(),
         "__RUN_TIMEOUT__": str(RUN_TIMEOUT_SECONDS),
         "__GAMING_UNIT__": gaming_unit_name(),
+        "__CLIENT_UNIT__": CLIENT_UNIT_NAME,
+        "__STEAM_UNIT__": STEAM_UNIT_NAME,
+        "__STEAM_UP_UNIT__": steam_up_unit_name(),
         # Empty on a machine nobody plays games on. The gaming rule is the only
         # template that reads it, and it is not rendered there.
         "__GAMING_USER__": gaming_user() or "",
@@ -1338,6 +1359,48 @@ def install_gaming_rule() -> bool:
 
     info(f"wrote {target}, letting '{player}' start {gaming_unit_name()}")
     return True
+
+
+def node_rule_path() -> Path:
+    return POLKIT_DIR / f"50-{node_control_unit_name()}.rules"
+
+
+def install_node_rule() -> bool:
+    """Let the control listener start and stop the units its buttons name.
+
+    Rendered on every node, whatever it offers: a rule naming a unit a machine
+    does not have grants nothing, and one rule is one fewer thing to keep in
+    step with the capabilities. Returns whether the file changed.
+    """
+    if not POLKIT_DIR.is_dir():
+        warn(f"{POLKIT_DIR} does not exist; the head's buttons will be refused here.")
+        return False
+
+    rendered = render_unit("workbench-node.rules.template")
+    target = node_rule_path()
+    if target.is_file() and target.read_text() == rendered:
+        return False
+
+    write_privileged(target, rendered, staged_as=f"{target.name}.staged")
+    # World-readable and root-owned: polkit refuses rules it does not trust.
+    run(["chmod", "0644", str(target)], privileged=True)
+    run(["chown", "root:root", str(target)], privileged=True)
+    info(f"wrote {target}")
+    return True
+
+
+def converge_node_control(changed: set[str]) -> None:
+    """Keep the control listener enabled and running, restarted on its own change.
+
+    `enable --now` every time rather than only at install, because a node
+    installed before the listener existed only ever gets it from a deploy — the
+    lesson this project keeps relearning about units only an installer starts.
+    """
+    unit = f"{node_control_unit_name()}.service"
+    run(["systemctl", "enable", "--now", "--quiet", unit], privileged=True)
+    if unit in changed:
+        run(["systemctl", "restart", unit], privileged=True)
+        info(f"restarted {unit} to pick up its own change")
 
 
 def enable_deploy_timer() -> None:
