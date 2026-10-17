@@ -125,8 +125,13 @@ Moonlight Embedded's controller database has no entry for a Pro Controller repor
 version `8001` over `hid-nintendo`, and no default to fall back on. Without one, every
 button is a guess: A and B swap, the triggers land in the wrong place, and Home moves
 the mouse. The client unit carries the correct mapping in `SDL_GAMECONTROLLERCONFIG`
-(see `install_node.PRO_CONTROLLER_MAPPING`). Another controller that maps wrongly needs
+(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow the labels, so the button marked A confirms, the Nintendo way. The first version followed positions, the Xbox way, and on the television that read as A/B and X/Y swapped. Another controller that maps wrongly needs
 a line added there.
+
+A gaming node also runs a window manager (`workbench-wm`, Matchbox) as its player.
+X with no window manager never moves keyboard focus. So a game that opens over Big
+Picture is drawn on top but receives no input, because Steam sends the controller to
+whichever window has focus.
 
 ### Putting the game on the television
 

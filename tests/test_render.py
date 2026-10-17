@@ -8,6 +8,7 @@ already holds itself to for the model server.
 
 import os
 import pwd
+import subprocess
 
 import pytest
 
@@ -335,3 +336,34 @@ def test_a_node_without_xset_is_given_it(monkeypatch):
 
     assert render._ensure_xorg_installed() is True
     assert installed == [["apt-get", "install", "-y", "x11-xserver-utils"]]
+
+
+def test_the_window_manager_is_kept_running_for_the_player(tmp_path, monkeypatch):
+    """Without one, a game that opens over Big Picture never gets focus, and
+    Steam sends the controller to the focused window."""
+    import pwd as _pwd
+
+    account = _pwd.struct_passwd(("ian", "x", 1000, 1000, "", str(tmp_path), "/bin/sh"))
+    calls = []
+    monkeypatch.setattr(render, "gaming_user", lambda: "ian")
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render.pwd, "getpwnam", lambda name: account)
+    monkeypatch.setattr(render.os, "chown", lambda *a: None)
+    monkeypatch.setattr(render, "WINDOW_MANAGER_BINARY", tmp_path / "matchbox")
+    (tmp_path / "matchbox").touch()
+    monkeypatch.setattr(
+        render,
+        "run_as_account",
+        lambda argv, *a, **k: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    monkeypatch.setattr(render, "run", lambda *a, **k: pytest.fail("already installed"))
+
+    assert render.converge_window_manager() is True
+    unit = tmp_path / ".config/systemd/user" / render.WINDOW_MANAGER_UNIT_NAME
+    assert "-use_titlebar no" in unit.read_text()
+    assert ["systemctl", "--user", "enable", "--now", render.WINDOW_MANAGER_UNIT_NAME] in calls
+
+    # Unchanged on the next tick: started again (a no-op), never restarted.
+    calls.clear()
+    assert render.converge_window_manager() is False
+    assert not any("try-restart" in argv for argv in calls)
