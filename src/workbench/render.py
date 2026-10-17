@@ -52,6 +52,7 @@ from workbench.install import (
     render_unit,
     restart_user_manager,
     run,
+    run_as_account,
     systemd_is_running,
     warn,
     write_privileged,
@@ -173,6 +174,85 @@ def display_blanks() -> bool | None:
     return saver_on or "DPMS is Enabled" in result.stdout
 
 
+#: A window manager, for one reason: focus. With none, X gives keyboard focus
+#: to whatever had it and never moves it, so a game that opens over Big Picture
+#: is drawn on top and gets no input - Steam routes the controller to the
+#: focused window, and that stayed one of Steam's own. Found with Slay the
+#: Spire 2 on screen and a controller that moved nothing.
+#:
+#: Matchbox because it is made for exactly this screen: every window
+#: fullscreen, no title bars, and the newest one focused. A desktop window
+#: manager would decorate windows nobody can drag on a television.
+WINDOW_MANAGER_PACKAGE = "matchbox-window-manager"
+WINDOW_MANAGER_BINARY = Path("/usr/bin/matchbox-window-manager")
+WINDOW_MANAGER_UNIT_NAME = "workbench-wm.service"
+
+WINDOW_MANAGER_UNIT = f"""\
+# Rendered by install.sh — do not edit; re-run the installer instead.
+[Unit]
+Description=Workbench: a window manager, so a game that opens gets the controller
+
+[Service]
+Type=simple
+# DISPLAY comes from environment.d, written by the render backend.
+ExecStart={WINDOW_MANAGER_BINARY} -use_titlebar no
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def converge_window_manager() -> bool:
+    """Install the window manager and keep it running for the gaming account.
+
+    Returns whether its unit changed. Safe on every deploy tick, mid-game: a
+    window manager started on a running display adopts the windows already
+    there, and nothing here restarts the X server or Steam. A changed unit is
+    restarted, which re-adopts them the same way.
+    """
+    player = gaming_user()
+    if not player or not systemd_is_running():
+        return False
+    if not WINDOW_MANAGER_BINARY.exists():
+        info(f"installing {WINDOW_MANAGER_PACKAGE}")
+        try:
+            run(
+                ["apt-get", "install", "-y", "--no-install-recommends", WINDOW_MANAGER_PACKAGE],
+                privileged=True,
+                stream=True,
+            )
+        except InstallError as error:
+            warn(f"could not install {WINDOW_MANAGER_PACKAGE}: {error}")
+            return False
+
+    account = pwd.getpwnam(player)
+    target = Path(account.pw_dir) / ".config/systemd/user" / WINDOW_MANAGER_UNIT_NAME
+    changed = not target.is_file() or target.read_text() != WINDOW_MANAGER_UNIT
+    if changed:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(WINDOW_MANAGER_UNIT)
+        os.chown(target, account.pw_uid, account.pw_gid)
+        info(f"wrote {target}")
+
+    env = {"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"}
+    run_as_account(["systemctl", "--user", "daemon-reload"], account, extra_env=env)
+    result = run_as_account(
+        ["systemctl", "--user", "enable", "--now", WINDOW_MANAGER_UNIT_NAME], account, extra_env=env
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        warn(f"could not start {WINDOW_MANAGER_UNIT_NAME} for '{player}': {detail}")
+    elif changed:
+        run_as_account(
+            ["systemctl", "--user", "try-restart", WINDOW_MANAGER_UNIT_NAME],
+            account,
+            extra_env=env,
+        )
+    return changed
+
+
 def converge() -> None:
     """Keep a gaming node's render surface as the repo says, from a deploy tick.
 
@@ -188,6 +268,7 @@ def converge() -> None:
     _write_xorg_conf()
     if render_session_is_up():
         stop_blanking()
+        converge_window_manager()
 
 
 def _write_x11_unit() -> bool:
@@ -270,6 +351,8 @@ def _install_x11_dummy() -> bool:
         account = pwd.getpwnam(player)
         if _write_display_environment(account):
             restart_user_manager(account)
+        if started:
+            converge_window_manager()
 
     return started
 
