@@ -1310,6 +1310,13 @@ MOONLIGHT_BUILD_DIR = "moonlight-embedded"
 #: television that read as A and B swapped, X and Y too, for someone holding a
 #: controller that says A on the right. `hid-nintendo` reports the buttons by
 #: position (b0 south, b1 east, b2 north, b3 west), so A is b1.
+#:
+#: It only applies to a controller SDL reads through evdev, which is why the
+#: unit also sets `SDL_JOYSTICK_HIDAPI=0`. After a fresh Bluetooth pairing,
+#: Moonlight opened the controller's `/dev/hidraw` node instead, through SDL's
+#: own Switch driver: the mapping was silently unused, the face buttons came
+#: out in SDL's layout, and it logged that it could not enable vibration or
+#: load stick calibration.
 PRO_CONTROLLER_MAPPING = (
     "050000007e0500000920000001800000,Nintendo Switch Pro Controller (hid-nintendo),"
     "a:b1,b:b0,x:b2,y:b3,misc1:b4,leftshoulder:b5,rightshoulder:b6,"
@@ -1352,6 +1359,10 @@ SupplementaryGroups={" ".join(CLIENT_GROUPS)}
 Environment=XDG_RUNTIME_DIR=/run/user/{account.pw_uid}
 # Controllers Moonlight's own database does not know - see the installer.
 Environment="SDL_GAMECONTROLLERCONFIG={PRO_CONTROLLER_MAPPING}"
+# Read controllers through the kernel's driver, so the mapping above applies.
+# SDL otherwise opens a Pro Controller's raw HID device itself, ignores the
+# mapping, applies its own layout, and contends with hid-nintendo for it.
+Environment=SDL_JOYSTICK_HIDAPI=0
 ExecStart=/usr/local/bin/moonlight stream {host} -app Desktop -1080 -fps 60 -bitrate 20000
 Restart=on-failure
 RestartSec=5
