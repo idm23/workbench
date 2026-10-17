@@ -1440,3 +1440,16 @@ def test_steam_is_found_where_the_deployer_cannot_see_it(steam_session, tmp_path
 
     unit = (home / ".config/systemd/user" / install_node.STEAM_UNIT_NAME).read_text()
     assert f"ExecStart={wrapper} -gamepadui -cef-disable-gpu" in unit
+
+
+def test_the_client_reads_controllers_through_the_kernel_so_its_mapping_applies():
+    """SDL's own HID driver ignores SDL_GAMECONTROLLERCONFIG; found after a
+    fresh pairing, when A and B came out swapped with the mapping loaded."""
+    import pwd as _pwd
+
+    account = _pwd.struct_passwd(("workbench", "x", 999, 985, "", "/home/workbench", "/bin/sh"))
+    unit = install_node._client_unit("192.168.1.155", account)
+
+    assert "Environment=SDL_JOYSTICK_HIDAPI=0" in unit
+    assert f'Environment="SDL_GAMECONTROLLERCONFIG={install_node.PRO_CONTROLLER_MAPPING}"' in unit
+    assert "a:b1,b:b0,x:b2,y:b3" in install_node.PRO_CONTROLLER_MAPPING
