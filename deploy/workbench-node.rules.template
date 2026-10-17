@@ -1,0 +1,18 @@
+// Rendered by install.sh into /etc/polkit-1/rules.d/.
+//
+// Lets the node's control listener — running as __USER__ — start and stop the
+// units its buttons name, and nothing else. Exact matches, the same narrowness
+// the run and gaming rules argue for: __USER__ is not an account that should
+// be able to manage units in general.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return;
+    }
+    if (subject.user !== "__USER__") {
+        return;
+    }
+    var unit = action.lookup("unit");
+    if (unit === "__CLIENT_UNIT__" || unit === "__STEAM_UP_UNIT__.service") {
+        return polkit.Result.YES;
+    }
+});

@@ -60,6 +60,20 @@
           {% if node.last_seen_at %}last seen {{ node.last_seen_at.strftime("%d %b %H:%M") }}
           {% else %}never checked in{% endif %}
         </div>
+        {% if "client" in (node.capabilities or []) %}
+          {# Play starts Steam on the gaming node first, then the stream, so the
+             television opens onto Steam rather than an empty desktop. #}
+          <div class="task-actions">
+            <form method="post" action="/nodes/{{ node.id }}/stream">
+              <input type="hidden" name="action" value="start">
+              <button class="slim" type="submit">Play on this screen</button>
+            </form>
+            <form method="post" action="/nodes/{{ node.id }}/stream">
+              <input type="hidden" name="action" value="stop">
+              <button class="slim secondary" type="submit">Stop</button>
+            </form>
+          </div>
+        {% endif %}
       </li>
     {% endfor %}
   </ul>

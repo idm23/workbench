@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 #: `config` rather than here, because the node that advertises the word and the
 #: head that matches on it must not be able to drift apart — this module is
 #: only one side of that wire.
-from workbench.config import INFERENCE
+from workbench.config import CLIENT, CONTROL_PORT, GAMING, INFERENCE
 from workbench.database.models import Node
 
 logger = logging.getLogger(__name__)
@@ -167,3 +167,70 @@ def inference_endpoint(db: Session) -> Endpoint | None:
             return Endpoint(url=url, model=node.model, node=node.name)
         logger.warning("Node %s did not answer on any of %s.", node.name, node.addresses)
     return None
+
+
+#: How long to wait for a node to carry out a button. Longer than a probe,
+#: because starting Steam is a real start: the node's own unit allows thirty
+#: seconds. Connecting is still the probe's short wait, so a node that is off
+#: costs a moment rather than this.
+CONTROL_TIMEOUT_SECONDS = 45.0
+
+
+def _press(node: Node, verb: str) -> str | None:
+    """Press a button on one node. None when it did it, else what went wrong.
+
+    Each advertised address is tried in turn, like a probe, but only a failure
+    to *connect* moves on to the next one. A node that answered and refused has
+    said something true, and asking it again by another route would only say it
+    twice.
+    """
+    timeout = httpx.Timeout(CONTROL_TIMEOUT_SECONDS, connect=PROBE_TIMEOUT_SECONDS)
+    for address in candidates(node):
+        try:
+            response = httpx.post(f"http://{address}:{CONTROL_PORT}/stream/{verb}", timeout=timeout)
+        except httpx.ConnectError, httpx.ConnectTimeout:
+            continue
+        except httpx.HTTPError as error:
+            return f"{node.name}: {error}"
+        try:
+            outcome = response.json()
+        except ValueError:
+            return f"{node.name} answered {response.status_code}"
+        if response.status_code == 200 and outcome.get("ok"):
+            return None
+        failed = outcome.get("failed") or [f"answered {response.status_code}"]
+        return f"{node.name}: {'; '.join(str(item) for item in failed)}"
+    return f"{node.name} did not answer on any of {', '.join(candidates(node)) or 'no addresses'}"
+
+
+def play_on(db: Session, screen: Node) -> list[str]:
+    """Put the game on a client node's screen. Returns what went wrong, if anything.
+
+    Every gaming node's Steam first, then the stream — so the stream opens onto
+    Steam rather than onto an empty desktop. Every gaming node rather than the
+    one this client streams from, because the head does not know which that is
+    (a client records its stream host locally and never reports it), and with
+    one gaming node the difference is nothing. A Steam that could not be
+    started is reported and the stream started anyway: a desktop on the
+    television is more useful than a refusal.
+    """
+    problems: list[str] = []
+    for node in known_nodes(db):
+        if GAMING not in (node.capabilities or []) or node.id == screen.id:
+            continue
+        if (problem := _press(node, "start")) is not None:
+            problems.append(problem)
+    if (problem := _press(screen, "start")) is not None:
+        problems.append(problem)
+    return problems
+
+
+def stop_on(screen: Node) -> list[str]:
+    """Take the stream off a client node's screen. Steam is left running."""
+    problem = _press(screen, "stop")
+    return [] if problem is None else [problem]
+
+
+def is_screen(node: Node) -> bool:
+    """Whether a node has a screen a stream can be put on."""
+    return CLIENT in (node.capabilities or [])
