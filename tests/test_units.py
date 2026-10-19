@@ -45,12 +45,14 @@ UNIT_NAMES = [
     "workbench-deploy.timer",
     "workbench-run@.service",
     "workbench-remote-control.service",
+    "workbench-project-session@.service",
 ]
 
 SERVICE_NAME = "workbench"
 DEPLOY_NAME = "workbench-deploy"
 RUN_NAME = "workbench-run"
 REMOTE_CONTROL_NAME = "workbench-remote-control"
+PROJECT_SESSION_NAME = "workbench-project-session"
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +93,7 @@ def test_every_unit_is_rendered(rendered):
         f"{DEPLOY_NAME}.timer",
         f"{RUN_NAME}@.service",
         f"{REMOTE_CONTROL_NAME}.service",
+        f"{PROJECT_SESSION_NAME}@.service",
     }
 
 
@@ -359,6 +362,7 @@ def test_staging_units_are_named_apart_from_production(staging):
         "workbench-staging-deploy.timer",
         "workbench-staging-run@.service",
         "workbench-staging-remote-control.service",
+        "workbench-staging-project-session@.service",
     }
 
 
@@ -838,3 +842,14 @@ def test_steam_is_started_in_the_players_own_manager(monkeypatch):
     assert f"--user -M ian@ start {STEAM_UNIT_NAME}" in service
     # Started again on every press, so it must not stay "active".
     assert "RemainAfterExit" not in service
+
+
+def test_a_project_session_can_write_clones_but_not_the_database(rendered):
+    """Its project's clone is where it works; the database beside it is the one
+    file GitHub cannot give back."""
+    unit = directives(rendered[f"{PROJECT_SESSION_NAME}@.service"])
+
+    assert any(line.endswith("/data/repos") for line in unit if line.startswith("ReadWritePaths="))
+    assert not any(line.endswith("/data") for line in unit if line.startswith("ReadWritePaths="))
+    assert "ExecStart=" in "".join(unit)
+    assert any(line.endswith("-m workbench.remote_control --project %i") for line in unit)

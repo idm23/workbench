@@ -850,6 +850,24 @@ def remote_control_workspace() -> Path:
     return agent_home() / "remote-control"
 
 
+def project_session_prefix() -> str:
+    """The template unit a project's standing session runs from, without `@`.
+
+    One instance per project, `<prefix>@<project id>.service`, instance-scoped
+    like the run template so staging could never start production's.
+    """
+    return f"{service_name()}-project-session"
+
+
+def project_sessions_dir() -> Path:
+    """Where the deployer leaves each project session's spec, one file per id.
+
+    A file rather than a database read in the session itself: the unit can
+    read `data/` but not write it, and a SQLite reader in WAL mode wants to.
+    """
+    return data_dir() / "project-sessions"
+
+
 def deploy_unit_name() -> str:
     """The deployer's unit name, without the `.service` or `.timer`."""
     return f"{service_name()}-deploy"
