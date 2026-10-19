@@ -521,7 +521,8 @@ def _revive_if_failed(unit: str) -> bool:
 
 
 #: What the deployer last converged the project sessions to, `{id: fingerprint}`.
-PROJECT_SESSIONS_MARKER = "project-sessions"
+#: Not `project-sessions`: that is the directory the specs themselves live in.
+PROJECT_SESSIONS_MARKER = "project-sessions.json"
 
 
 def converge_project_sessions() -> None:

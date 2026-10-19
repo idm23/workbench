@@ -14,6 +14,7 @@ import pytest
 
 import workbench.deploy as deploy_module
 from workbench import project_sessions, remote_control
+from workbench.config import project_sessions_dir
 from workbench.database.models import Project
 from workbench.project_sessions import SessionSpec, read_spec, spec_for, write_specs
 from workbench.runs.lifecycle import ClaudeLogin, project_claude_login
@@ -189,8 +190,13 @@ class _Ran:
 
 @pytest.fixture
 def systemctl(monkeypatch, tmp_path):
-    """The deployer against a fake `systemctl`, wanting whatever `wanted` holds."""
+    """The deployer against a fake `systemctl`, wanting whatever `wanted` holds.
+
+    The specs' own directory is there, as it is on a real machine, so a marker
+    that collides with it cannot pass by being written into an empty `data/`.
+    """
     monkeypatch.setattr(deploy_module, "data_dir", lambda: tmp_path)
+    (tmp_path / project_sessions_dir().name).mkdir()
     monkeypatch.setattr(deploy_module, "ensure_data_dir", lambda: None)
     monkeypatch.setattr(deploy_module, "restore_from", lambda: None)
     wanted: dict[str, str] = {}
