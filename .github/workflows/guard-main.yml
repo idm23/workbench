@@ -7,9 +7,17 @@ name: Guard main
 # staging. Without it such a PR doesn't fail — it sits forever waiting on
 # staging-acceptance, a status that can only ever be posted for staging's own
 # commits, so the real problem never surfaces as anything but silence.
+#
+# The promotion PR is opened by promote.yml with the workflow's own
+# GITHUB_TOKEN, and GitHub never starts a workflow for an event that token
+# caused — so `pull_request` alone left every automatic promotion PR without
+# this check, merging regardless. `workflow_dispatch` is the one exception to
+# that rule, so promote.yml dispatches this against staging, which attaches
+# the check to staging's tip: the promotion PR's head commit.
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # Reads only event context; never checks out the repository.
 permissions: {}
@@ -20,8 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Refuse anything that is not staging
+        env:
+          # head_ref is empty outside pull_request; a dispatch names its ref.
+          HEAD: ${{ github.head_ref || github.ref_name }}
         run: |
-          if [ "${{ github.head_ref }}" != "staging" ]; then
-            echo "::error::main only accepts pull requests from staging (this one is from '${{ github.head_ref }}')."
+          if [ "$HEAD" != "staging" ]; then
+            echo "::error::main only accepts pull requests from staging (this one is from '$HEAD')."
             exit 1
           fi

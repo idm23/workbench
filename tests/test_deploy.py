@@ -908,3 +908,24 @@ def test_a_failed_listener_restart_is_retried_next_tick(monkeypatch, tmp_path):
 
     assert deploy_module.converge_node_listener() is False
     assert not (tmp_path / deploy_module.NODE_LISTENER_MARKER).exists()
+
+
+def test_the_remote_control_session_is_enabled_once(monkeypatch, tmp_path):
+    """The timer delivered the unit and never enabled it, so it never ran."""
+    ran = _a_node_at(monkeypatch, tmp_path, "9ad1122")
+
+    assert deploy_module.converge_remote_control_enabled() is True
+    assert ran == [["systemctl", "enable", "--now", "workbench-remote-control.service"]]
+
+    assert deploy_module.converge_remote_control_enabled() is False
+    assert len(ran) == 1
+
+
+def test_a_failed_remote_control_enable_is_retried_next_tick(monkeypatch, tmp_path):
+    _a_node_at(monkeypatch, tmp_path, "9ad1122")
+    monkeypatch.setattr(
+        deploy_module, "_run", lambda argv, **k: _Ran(returncode=1, stderr="Access denied")
+    )
+
+    assert deploy_module.converge_remote_control_enabled() is False
+    assert not (tmp_path / deploy_module.REMOTE_CONTROL_ENABLED_MARKER).exists()
