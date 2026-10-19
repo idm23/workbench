@@ -29,6 +29,9 @@ Type=simple
 User=__USER__
 WorkingDirectory=__REMOTE_CONTROL_WORKSPACE__
 
+# The wrapper also pre-answers the CLI's first-run setup (theme, folder trust)
+# in the login's own config before starting it: a unit has no terminal, and a
+# session waiting at that screen is `active` and unusable.
 ExecStart=__REPO__/.venv/bin/python -m workbench.remote_control
 
 Environment=CLAUDE_CONFIG_DIR=__REMOTE_CONTROL_LOGIN_DIR__
