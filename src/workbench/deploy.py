@@ -50,6 +50,7 @@ from workbench.config import (
     is_node,
     node_control_unit_name,
     port,
+    remote_control_unit_name,
     repo_root,
     restore_from,
     service_name,
@@ -459,6 +460,33 @@ def converge_node_listener() -> bool:
     return True
 
 
+#: Recorded once the deployer has enabled the standing session on this head.
+REMOTE_CONTROL_ENABLED_MARKER = "remote-control-enabled"
+
+
+def converge_remote_control_enabled() -> bool:
+    """Enable and start the standing session, once, on a head that never had it.
+
+    Returns whether it did. Found by its absence: the unit reached the head by
+    the deploy timer, which writes unit files and enables nothing, so it sat
+    `disabled` and never ran for ten days while only `install.sh` would have
+    switched it on. Once rather than every tick, so a session someone disables
+    by hand stays disabled; the marker is what tells the two apart.
+    """
+    if _read_marker(REMOTE_CONTROL_ENABLED_MARKER) is not None:
+        return False
+    unit = f"{remote_control_unit_name()}.service"
+    enabled = _run(
+        ["systemctl", "enable", "--now", unit], as_owner=False, timeout=RESTART_TIMEOUT_SECONDS
+    )
+    if enabled.returncode != 0:
+        logger.warning("Could not enable %s: %s", unit, (enabled.stderr or "").strip())
+        return False
+    _write_marker(REMOTE_CONTROL_ENABLED_MARKER, current_revision())
+    logger.info("Enabled and started %s.", unit)
+    return True
+
+
 def converge_node() -> DeployFailed | None:
     """Bring a node back in line with what the repo says, and say it is alive.
 
@@ -821,6 +849,10 @@ def refresh_units() -> DeployFailed | None:
         # rather than left for the next crash — see the function for why that
         # is not simply folded into `restart_service`.
         install.converge_remote_control_unit(changed)
+        try:
+            converge_remote_control_enabled()
+        except Exception as error:
+            logger.warning("Could not enable the remote-control session: %s", error)
 
     converge_notification_keys()
     return None

@@ -451,10 +451,12 @@ template itself differs — restarting it on every deploy tick, the way `workben
 is, would interrupt a person's live session for a change that has nothing to do with this
 unit at all. Mirrors `install_node.converge_client_unit`'s own restraint, from the other
 end: a changed unit nobody restarts is a unit still running what it was before the change.
-One known gap, consistent with the project's standing rule here: a deployment where this
-unit is entirely new picks up the file on the next automatic deploy tick, but only starts
-running it after `./install.sh` is re-run by hand once, or at the next reboot — the same
-bargain "It cannot install itself" already describes for any feature this new.
+**The deployer enables it once, because otherwise nothing did.** A head that got this
+unit from the timer had the file and nothing more: `disabled`, never started, for ten
+days, and not even a reboot would have helped, because nothing had linked it into a
+target. `deploy.converge_remote_control_enabled` runs `enable --now` the first time and
+records that in `data/remote-control-enabled`, so a session someone later disables by
+hand stays disabled.
 
 **Deliberately narrower than #66.** No `WORKBENCH_DB`, no plugin directory, no project
 worktree: this session works in its own directory (`agent_home()/remote-control`,
@@ -1126,7 +1128,12 @@ pull request into `main` has any other head branch. Before this existed such a P
 fail — it sat forever waiting on `staging-acceptance`, a status that is only ever posted
 for `staging`'s own commits, so the actual problem never surfaced as anything but
 silence. Ruleset required-check syntax cannot express "only from branch X" directly,
-which is why this needed its own job rather than a ruleset setting.
+which is why this needed its own job rather than a ruleset setting. **And it has to be dispatched, not just triggered.** The promotion PR
+is opened with the workflow's own `GITHUB_TOKEN`, and GitHub starts no workflow for an
+event that token caused, so for four promotions the check never ran and — never having
+been added to the ruleset either — nothing noticed. `promote.yml` now dispatches the
+guard against `staging` on every green acceptance (`workflow_dispatch` is the one event
+that token may trigger), which attaches the check to the PR's head commit.
 
 This is also what lets *Require branches to be up to date before merging* stay off.
 That setting exists to stop a PR merging against a base it was never actually tested
