@@ -67,6 +67,13 @@ X11_CONF_PATH = Path("/etc/X11/xorg.conf.d/10-workbench-dummy.conf")
 
 X11_UNIT_NAME = "workbench-x11.service"
 
+#: Where the first version of this backend put the X server: a *user* unit,
+#: before it was found that one cannot run Xorg here (see this module's
+#: docstring). The system unit replaced it, but nothing removed it, and on
+#: homebox-node-1 it crash-looped beside the real server for a month - 581,193
+#: restarts, each one failing to take a display the system unit already owns.
+STALE_USER_X11_UNIT = Path("/etc/systemd/user") / X11_UNIT_NAME
+
 
 def install() -> bool:
     """Set up whatever this node's declared render backend needs.
@@ -253,6 +260,40 @@ def converge_window_manager() -> bool:
     return changed
 
 
+def remove_stale_user_x11_unit() -> bool:
+    """Stop and delete the user-level X unit an early install left behind.
+
+    Returns whether there was one. Disabled as the gaming account first, so its
+    restart loop ends and the `default.target.wants` link in that account's
+    home goes with it; the file itself is root's.
+    """
+    if not STALE_USER_X11_UNIT.is_file() or not systemd_is_running():
+        return False
+    player = gaming_user()
+    account = pwd.getpwnam(player) if player else None
+    if account:
+        env = {"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"}
+        result = run_as_account(
+            ["systemctl", "--user", "disable", "--now", X11_UNIT_NAME], account, extra_env=env
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            warn(f"could not stop the old user-level {X11_UNIT_NAME} for '{player}': {detail}")
+    try:
+        run(["rm", "-f", str(STALE_USER_X11_UNIT)], privileged=True)
+    except InstallError as error:
+        warn(f"could not remove {STALE_USER_X11_UNIT}: {error}")
+        return False
+    if account:
+        run_as_account(
+            ["systemctl", "--user", "daemon-reload"],
+            account,
+            extra_env={"XDG_RUNTIME_DIR": f"/run/user/{account.pw_uid}"},
+        )
+    info(f"removed {STALE_USER_X11_UNIT}, the user-level X server this backend no longer uses")
+    return True
+
+
 def converge() -> None:
     """Keep a gaming node's render surface as the repo says, from a deploy tick.
 
@@ -265,6 +306,7 @@ def converge() -> None:
     """
     if render_backend() == GAMESCOPE or not systemd_is_running():
         return
+    remove_stale_user_x11_unit()
     _write_xorg_conf()
     if render_session_is_up():
         stop_blanking()
@@ -334,6 +376,7 @@ def _install_x11_dummy() -> bool:
         warn("could not install xserver-xorg-core; no render surface was installed.")
         return False
 
+    remove_stale_user_x11_unit()
     _write_xorg_conf()
     changed = _write_x11_unit()
     if changed:
