@@ -850,6 +850,9 @@ def refresh_units() -> DeployFailed | None:
         # is not simply folded into `restart_service`.
         install.converge_remote_control_unit(changed)
         try:
+            # Before enabling: a unit whose WorkingDirectory is missing fails
+            # at NAMESPACE, every two seconds, forever.
+            install.ensure_remote_control_workspace(install._service_passwd())
             converge_remote_control_enabled()
         except Exception as error:
             logger.warning("Could not enable the remote-control session: %s", error)
