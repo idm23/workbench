@@ -456,7 +456,9 @@ unit from the timer had the file and nothing more: `disabled`, never started, fo
 days, and not even a reboot would have helped, because nothing had linked it into a
 target. `deploy.converge_remote_control_enabled` runs `enable --now` the first time and
 records that in `data/remote-control-enabled`, so a session someone later disables by
-hand stays disabled.
+hand stays disabled. The directory it works in is converged on every tick before that — the
+installer was the only thing that made it, and the first start the deployer ever caused
+failed at `NAMESPACE` on its absence, restarting every two seconds.
 
 **Deliberately narrower than #66.** No `WORKBENCH_DB`, no plugin directory, no project
 worktree: this session works in its own directory (`agent_home()/remote-control`,

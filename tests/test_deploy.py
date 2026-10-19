@@ -65,6 +65,10 @@ def no_privileged_installs(monkeypatch):
     # `systemctl restart` against whatever this machine happens to have
     # installed. Tests that mean to exercise it patch it back themselves.
     monkeypatch.setattr("workbench.deploy.restart_service", lambda: None)
+    # And the standing session: a real `install -d` in a home directory and
+    # a real `systemctl enable --now`. Tests that mean either patch them back.
+    monkeypatch.setattr("workbench.install.ensure_remote_control_workspace", lambda account: None)
+    monkeypatch.setattr("workbench.deploy.converge_remote_control_enabled", lambda: False)
 
 
 @pytest.fixture
@@ -910,7 +914,40 @@ def test_a_failed_listener_restart_is_retried_next_tick(monkeypatch, tmp_path):
     assert not (tmp_path / deploy_module.NODE_LISTENER_MARKER).exists()
 
 
-def test_the_remote_control_session_is_enabled_once(monkeypatch, tmp_path):
+@pytest.fixture
+def real_remote_control_enable(monkeypatch):
+    monkeypatch.setattr(
+        deploy_module, "converge_remote_control_enabled", _real_converge_remote_control_enabled
+    )
+
+
+_real_converge_remote_control_enabled = deploy_module.converge_remote_control_enabled
+
+
+def test_a_head_deploy_makes_the_workspace_before_enabling(monkeypatch):
+    """The first start a deploy caused failed at NAMESPACE, every two seconds,
+    because only the installer ever created the session's directory."""
+    calls: list[str] = []
+    monkeypatch.setattr("workbench.install.systemd_is_running", lambda: True)
+    monkeypatch.setattr("workbench.install.install_units", lambda: set())
+    monkeypatch.setattr("workbench.install.install_polkit_rule", lambda: False)
+    monkeypatch.setattr("workbench.install.ensure_notification_keys", lambda account: None)
+    monkeypatch.setattr("workbench.deploy.repo_owner", lambda: None)
+    monkeypatch.setattr(
+        "workbench.install.ensure_remote_control_workspace",
+        lambda account: calls.append("workspace"),
+    )
+    monkeypatch.setattr(
+        deploy_module, "converge_remote_control_enabled", lambda: calls.append("enable")
+    )
+
+    assert refresh_units() is None
+    assert calls == ["workspace", "enable"]
+
+
+def test_the_remote_control_session_is_enabled_once(
+    monkeypatch, tmp_path, real_remote_control_enable
+):
     """The timer delivered the unit and never enabled it, so it never ran."""
     ran = _a_node_at(monkeypatch, tmp_path, "9ad1122")
 
@@ -921,7 +958,9 @@ def test_the_remote_control_session_is_enabled_once(monkeypatch, tmp_path):
     assert len(ran) == 1
 
 
-def test_a_failed_remote_control_enable_is_retried_next_tick(monkeypatch, tmp_path):
+def test_a_failed_remote_control_enable_is_retried_next_tick(
+    monkeypatch, tmp_path, real_remote_control_enable
+):
     _a_node_at(monkeypatch, tmp_path, "9ad1122")
     monkeypatch.setattr(
         deploy_module, "_run", lambda argv, **k: _Ran(returncode=1, stderr="Access denied")
