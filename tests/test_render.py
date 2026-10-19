@@ -367,3 +367,60 @@ def test_the_window_manager_is_kept_running_for_the_player(tmp_path, monkeypatch
     calls.clear()
     assert render.converge_window_manager() is False
     assert not any("try-restart" in argv for argv in calls)
+
+
+class _Finished:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def test_the_old_user_level_x_unit_is_stopped_and_removed(monkeypatch, tmp_path):
+    """The first version ran X as a user unit, which cannot work here, and left
+    it crash-looping beside the system unit that replaced it."""
+    stale = tmp_path / "workbench-x11.service"
+    stale.write_text("[Unit]\n")
+    monkeypatch.setattr(render, "STALE_USER_X11_UNIT", stale)
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render, "gaming_user", lambda: "ian")
+    monkeypatch.setattr(render.pwd, "getpwnam", lambda name: pwd.getpwuid(os.getuid()))
+    as_account = []
+    monkeypatch.setattr(
+        render,
+        "run_as_account",
+        lambda argv, account, **k: as_account.append(argv) or _Finished(),
+    )
+    privileged = []
+    monkeypatch.setattr(render, "run", lambda argv, **k: privileged.append(argv) or None)
+
+    assert render.remove_stale_user_x11_unit() is True
+    assert as_account[0] == ["systemctl", "--user", "disable", "--now", render.X11_UNIT_NAME]
+    assert privileged == [["rm", "-f", str(stale)]]
+    assert as_account[-1] == ["systemctl", "--user", "daemon-reload"]
+
+
+def test_with_no_old_user_level_x_unit_nothing_happens(monkeypatch, tmp_path):
+    monkeypatch.setattr(render, "STALE_USER_X11_UNIT", tmp_path / "absent.service")
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render, "run", lambda *a, **k: pytest.fail("touched the machine"))
+    monkeypatch.setattr(
+        render, "run_as_account", lambda *a, **k: pytest.fail("touched the machine")
+    )
+
+    assert render.remove_stale_user_x11_unit() is False
+
+
+def test_a_failed_removal_is_a_warning_not_a_crash(monkeypatch, tmp_path, caplog):
+    stale = tmp_path / "workbench-x11.service"
+    stale.write_text("[Unit]\n")
+    monkeypatch.setattr(render, "STALE_USER_X11_UNIT", stale)
+    monkeypatch.setattr(render, "systemd_is_running", lambda: True)
+    monkeypatch.setattr(render, "gaming_user", lambda: None)
+
+    def refuse(argv, **k):
+        raise InstallError("sudo said no")
+
+    monkeypatch.setattr(render, "run", refuse)
+
+    assert render.remove_stale_user_x11_unit() is False
+    assert "could not remove" in caplog.text
