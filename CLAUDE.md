@@ -458,7 +458,9 @@ target. `deploy.converge_remote_control_enabled` runs `enable --now` the first t
 records that in `data/remote-control-enabled`, so a session someone later disables by
 hand stays disabled. The directory it works in is converged on every tick before that — the
 installer was the only thing that made it, and the first start the deployer ever caused
-failed at `NAMESPACE` on its absence, restarting every two seconds.
+failed at `NAMESPACE` on its absence, restarting every two seconds. And once systemd
+hits its start limit the unit is `failed` for good, so the deployer also starts again a
+session that is enabled and `failed` — never one that is merely stopped or disabled.
 
 **Deliberately narrower than #66.** No `WORKBENCH_DB`, no plugin directory, no project
 worktree: this session works in its own directory (`agent_home()/remote-control`,

@@ -69,6 +69,7 @@ def no_privileged_installs(monkeypatch):
     # a real `systemctl enable --now`. Tests that mean either patch them back.
     monkeypatch.setattr("workbench.install.ensure_remote_control_workspace", lambda account: None)
     monkeypatch.setattr("workbench.deploy.converge_remote_control_enabled", lambda: False)
+    monkeypatch.setattr("workbench.deploy.revive_failed_remote_control", lambda: False)
 
 
 @pytest.fixture
@@ -869,9 +870,10 @@ def test_a_gaming_node_deploy_converges_sunshine_settings(monkeypatch):
 
 
 class _Ran:
-    def __init__(self, returncode=0, stderr=""):
+    def __init__(self, returncode=0, stderr="", stdout=""):
         self.returncode = returncode
         self.stderr = stderr
+        self.stdout = stdout
 
 
 def _a_node_at(monkeypatch, tmp_path, revision):
@@ -968,3 +970,47 @@ def test_a_failed_remote_control_enable_is_retried_next_tick(
 
     assert deploy_module.converge_remote_control_enabled() is False
     assert not (tmp_path / deploy_module.REMOTE_CONTROL_ENABLED_MARKER).exists()
+
+
+_real_revive_failed_remote_control = deploy_module.revive_failed_remote_control
+
+
+def _remote_control_showing(monkeypatch, shown: str) -> list[list[str]]:
+    monkeypatch.setattr(
+        deploy_module, "revive_failed_remote_control", _real_revive_failed_remote_control
+    )
+    ran: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        ran.append(argv)
+        return _Ran(stdout=shown if argv[1] == "show" else "")
+
+    monkeypatch.setattr(deploy_module, "_run", run)
+    return ran
+
+
+def test_a_session_systemd_gave_up_on_is_started_again(monkeypatch):
+    """It hit the start limit on a missing directory and stayed down after
+    the directory arrived."""
+    ran = _remote_control_showing(monkeypatch, "ActiveState=failed\nUnitFileState=enabled\n")
+
+    assert deploy_module.revive_failed_remote_control() is True
+    assert ran[1:] == [
+        ["systemctl", "reset-failed", "workbench-remote-control.service"],
+        ["systemctl", "start", "workbench-remote-control.service"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "shown",
+    [
+        "ActiveState=inactive\nUnitFileState=enabled\n",
+        "ActiveState=failed\nUnitFileState=disabled\n",
+        "ActiveState=active\nUnitFileState=enabled\n",
+    ],
+)
+def test_a_session_someone_stopped_or_disabled_is_left_alone(monkeypatch, shown):
+    ran = _remote_control_showing(monkeypatch, shown)
+
+    assert deploy_module.revive_failed_remote_control() is False
+    assert len(ran) == 1
