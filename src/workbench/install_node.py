@@ -1305,21 +1305,20 @@ MOONLIGHT_BUILD_DIR = "moonlight-embedded"
 #: and Home moving the mouse. Worked out from the button and axis codes the
 #: controller itself reports on the Pi, and confirmed with a controller in hand.
 #:
-#: The face buttons follow the labels, not the positions. The first version was
-#: positional - the Xbox convention, bottom button confirms - and on the
-#: television that read as A and B swapped, X and Y too, for someone holding a
-#: controller that says A on the right. `hid-nintendo` reports the buttons by
-#: position (b0 south, b1 east, b2 north, b3 west), so A is b1.
+#: The face buttons follow positions, not labels: the bottom one confirms, the
+#: Xbox way, which is what the person holding it asked for. `hid-nintendo`
+#: reports them by position (b0 south, b1 east, b2 north, b3 west), so `a` is
+#: b0. A label-following version (`a:b1`) was tried and swapped back.
 #:
 #: It only applies to a controller SDL reads through evdev, which is why the
 #: unit also sets `SDL_JOYSTICK_HIDAPI=0`. After a fresh Bluetooth pairing,
 #: Moonlight opened the controller's `/dev/hidraw` node instead, through SDL's
 #: own Switch driver: the mapping was silently unused, the face buttons came
-#: out in SDL's layout, and it logged that it could not enable vibration or
+#: out in SDL's label layout, and it logged that it could not enable vibration or
 #: load stick calibration.
 PRO_CONTROLLER_MAPPING = (
     "050000007e0500000920000001800000,Nintendo Switch Pro Controller (hid-nintendo),"
-    "a:b1,b:b0,x:b2,y:b3,misc1:b4,leftshoulder:b5,rightshoulder:b6,"
+    "a:b0,b:b1,x:b3,y:b2,misc1:b4,leftshoulder:b5,rightshoulder:b6,"
     "lefttrigger:b7,righttrigger:b8,back:b9,start:b10,guide:b11,"
     "leftstick:b12,rightstick:b13,leftx:a0,lefty:a1,rightx:a2,righty:a3,"
     "dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"
