@@ -115,3 +115,57 @@ def test_a_node_with_nothing_to_stream_says_so(listening, node, monkeypatch):
 
     assert status == 409
     assert "nothing to stream" in body["failed"][0]
+
+
+def _get(url: str) -> tuple[int, dict]:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as answer:
+            return answer.status, json.loads(answer.read())
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, json.loads(error.read())
+
+
+class _Finished:
+    def __init__(self, stdout: str):
+        self.stdout = stdout
+
+
+@pytest.mark.parametrize(
+    ("systemd_says", "streaming"),
+    [("active\n", True), ("activating\n", True), ("inactive\n", False), ("failed\n", False)],
+)
+def test_the_listener_says_whether_the_stream_is_on(
+    listening, node, monkeypatch, systemd_says, streaming
+):
+    asked: list[list[str]] = []
+    monkeypatch.setattr(
+        node_control.subprocess,
+        "run",
+        lambda argv, **k: asked.append(argv) or _Finished(systemd_says),
+    )
+
+    status, body = _get(f"{listening}/stream")
+
+    assert status == 200
+    assert body["streaming"] is streaming
+    # A read, and only of the one unit this node names.
+    assert asked == [["systemctl", "is-active", CLIENT_UNIT_NAME]]
+    assert node == []
+
+
+def test_a_node_with_no_screen_cannot_say_it_is_streaming(listening, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_CAPABILITIES", "inference")
+    monkeypatch.setattr(
+        node_control.subprocess, "run", lambda *a, **k: pytest.fail("asked systemd")
+    )
+
+    assert _get(f"{listening}/stream") == (200, {"ok": True, "streaming": None})
+
+
+@pytest.mark.parametrize("path", ["/stream/start", "/", "/stream?unit=sshd"])
+def test_no_other_read_exists(listening, node, path):
+    status, _ = _get(f"{listening}{path}")
+
+    assert status == 404
+    assert node == []
