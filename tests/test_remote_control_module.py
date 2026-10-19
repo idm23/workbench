@@ -34,18 +34,18 @@ def waitstatus(*, exit_code: int | None = None, signal: int | None = None) -> in
 
 
 def test_main_fails_without_a_cli(monkeypatch):
-    monkeypatch.setattr(remote_control, "remote_control_argv", lambda: None)
+    monkeypatch.setattr(remote_control, "remote_control_argv", lambda name=None: None)
 
-    assert remote_control.main() == 1
+    assert remote_control.main([]) == 1
 
 
 def test_main_returns_the_wrapped_commands_exit_code(monkeypatch):
     monkeypatch.setattr(
-        remote_control, "remote_control_argv", lambda: ["claude", "--remote-control"]
+        remote_control, "remote_control_argv", lambda name=None: ["claude", "--remote-control"]
     )
     monkeypatch.setattr(remote_control.pty, "spawn", lambda argv: waitstatus(exit_code=2))
 
-    assert remote_control.main() == 2
+    assert remote_control.main([]) == 2
 
 
 def test_main_folds_a_signal_into_a_plain_nonzero_exit(monkeypatch):
@@ -53,11 +53,11 @@ def test_main_folds_a_signal_into_a_plain_nonzero_exit(monkeypatch):
     child killed by a signal is not `WIFEXITED`, and `Restart=always` only
     needs "did it exit", so this is reported as 1 rather than guessed at."""
     monkeypatch.setattr(
-        remote_control, "remote_control_argv", lambda: ["claude", "--remote-control"]
+        remote_control, "remote_control_argv", lambda name=None: ["claude", "--remote-control"]
     )
     monkeypatch.setattr(remote_control.pty, "spawn", lambda argv: waitstatus(signal=9))
 
-    assert remote_control.main() == 1
+    assert remote_control.main([]) == 1
 
 
 def test_converge_remote_control_unit_restarts_only_its_own_unit(monkeypatch):
@@ -88,11 +88,11 @@ def test_main_answers_first_run_setup_before_starting(monkeypatch, tmp_path):
         remote_control, "skip_first_run_setup", lambda cfg, ws: order.append(f"setup {cfg}")
     )
     monkeypatch.setattr(
-        remote_control, "remote_control_argv", lambda: ["claude", "--remote-control"]
+        remote_control, "remote_control_argv", lambda name=None: ["claude", "--remote-control"]
     )
     monkeypatch.setattr(
         remote_control.pty, "spawn", lambda argv: order.append("spawn") or waitstatus(exit_code=0)
     )
 
-    assert remote_control.main() == 0
-    assert order == [f"setup {tmp_path}", "spawn"]
+    assert remote_control.main([]) == 0
+    assert order == [f"setup {tmp_path / '.claude.json'}", "spawn"]

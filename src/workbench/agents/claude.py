@@ -815,34 +815,55 @@ def named_login_credential_status(config_dir: Path) -> CredentialStatus:
     return _credential_status_in(config_dir)
 
 
-def remote_control_argv() -> list[str] | None:
+#: The model a standing session asks for. The CLI's alias rather than a model
+#: id, so it means "the newest Opus this CLI knows" and moves with the SDK pin:
+#: 2.1.239 knew no Opus 5.5, 2.1.301 does.
+REMOTE_CONTROL_MODEL = "opus"
+
+
+def remote_control_argv(name: str | None = None) -> list[str] | None:
     """The command that starts a standing, remote-controllable session.
 
     `None` when no CLI can be found — the same condition `credential_status`
     already reports through the doctor, except nothing here has a `Check` to
     hand it to, so the caller (`workbench.remote_control`) logs and exits.
 
-    Named with this machine's hostname rather than left to the CLI's own
-    default (which is the hostname too, per `--remote-control-session-name-prefix`,
-    just suffixed to stay unique across concurrent sessions) — a person
-    reading their Remote Control session list from a phone wants to recognise
-    *this* one without having to guess which auto-generated name was it.
+    Named with this machine's hostname unless given a name, rather than left
+    to the CLI's own default (which is the hostname too, per
+    `--remote-control-session-name-prefix`, just suffixed to stay unique
+    across concurrent sessions) — a person reading their Remote Control
+    session list from a phone wants to recognise *this* one without having to
+    guess which auto-generated name was it. A project's session passes its own.
     """
     cli = _cli_path()
-    return None if cli is None else [cli, "--remote-control", socket.gethostname()]
+    if cli is None:
+        return None
+    return [cli, "--remote-control", name or socket.gethostname(), "--model", REMOTE_CONTROL_MODEL]
 
 
-def skip_first_run_setup(config_dir: Path, workspace: Path) -> None:
+def cli_config_file(config_dir: Path | None) -> Path:
+    """The CLI's own settings file for a login.
+
+    Inside a named login's directory, but *beside* `~/.claude` for the default
+    login, not in it — the same two-paths-not-one split the run unit's
+    `ReadWritePaths` already had to learn.
+    """
+    if config_dir is None:
+        return Path.home() / ".claude.json"
+    return config_dir / ".claude.json"
+
+
+def skip_first_run_setup(path: Path, workspace: Path) -> None:
     """Answer the CLI's first-run questions for a session nobody is sitting at.
 
     A login made with `auth login` leaves onboarding unfinished, so the first
     start under a unit sat at the theme picker: `active`, waiting for a key no
     terminal could send. Measured against 2.1.239: with these three keys in the
-    config directory's `.claude.json` it opens straight to its prompt. Merged
-    into whatever the login already wrote, never replacing it, and the folder
-    trusted is only the session's own empty workspace.
+    login's `.claude.json` (`path`, from `cli_config_file`) it opens straight
+    to its prompt. Merged into whatever the login already wrote, never
+    replacing it, and the folder trusted is only the one the session works in:
+    its own empty workspace, or a project's clone, which runs already work in.
     """
-    path = config_dir / ".claude.json"
     try:
         state = json.loads(path.read_text())
     except FileNotFoundError:
@@ -861,7 +882,7 @@ def skip_first_run_setup(config_dir: Path, workspace: Path) -> None:
     state["hasCompletedOnboarding"] = True
     state.setdefault("theme", "dark")
     project["hasTrustDialogAccepted"] = True
-    config_dir.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     staged = path.with_name(f"{path.name}.workbench-tmp")
     staged.write_text(json.dumps(state, indent=2))
     staged.chmod(0o600)

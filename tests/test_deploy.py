@@ -70,6 +70,7 @@ def no_privileged_installs(monkeypatch):
     monkeypatch.setattr("workbench.install.ensure_remote_control_workspace", lambda account: None)
     monkeypatch.setattr("workbench.deploy.converge_remote_control_enabled", lambda: False)
     monkeypatch.setattr("workbench.deploy.revive_failed_remote_control", lambda: False)
+    monkeypatch.setattr("workbench.deploy.converge_project_sessions", lambda: None)
 
 
 @pytest.fixture

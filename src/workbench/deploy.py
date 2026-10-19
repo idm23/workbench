@@ -23,6 +23,7 @@ here are ordinary conditions — a dirty checkout, a diverged branch, no network
 — and they need to be reported into the journal, not raised into a traceback.
 """
 
+import json
 import logging
 import pwd
 import shutil
@@ -50,6 +51,7 @@ from workbench.config import (
     is_node,
     node_control_unit_name,
     port,
+    project_session_prefix,
     remote_control_unit_name,
     repo_root,
     restore_from,
@@ -497,7 +499,10 @@ def revive_failed_remote_control() -> bool:
     Only `failed`: a session someone stopped is `inactive`, and one someone
     disabled is left alone, so neither is undone.
     """
-    unit = f"{remote_control_unit_name()}.service"
+    return _revive_if_failed(f"{remote_control_unit_name()}.service")
+
+
+def _revive_if_failed(unit: str) -> bool:
     shown = _run(
         ["systemctl", "show", unit, "--property=ActiveState,UnitFileState"],
         as_owner=False,
@@ -513,6 +518,69 @@ def revive_failed_remote_control() -> bool:
         return False
     logger.info("Restarted %s, which systemd had given up on.", unit)
     return True
+
+
+#: What the deployer last converged the project sessions to, `{id: fingerprint}`.
+PROJECT_SESSIONS_MARKER = "project-sessions"
+
+
+def converge_project_sessions() -> None:
+    """One standing session per project, as the project's own login.
+
+    Which projects, and as whom, is `workbench.project_sessions`, run as the
+    service account because it reads the database. What is left here is what
+    needs root: a new project's session is enabled and started, one whose spec
+    changed (another login, a moved clone) is restarted, one systemd gave up on
+    is started again, and one whose project is gone is stopped and disabled.
+    Enabled once, like the head's own session, so one someone disabled by hand
+    stays disabled until its spec changes. Production only: staging's database
+    is a copy of production's projects, and a second session per project
+    signed in as nobody would be the whole of what it added.
+    """
+    if restore_from() is not None:
+        return
+    wrote = _run(
+        [str(_python()), "-m", "workbench.project_sessions", "write"],
+        as_owner=True,
+        timeout=RESTART_TIMEOUT_SECONDS,
+    )
+    if wrote.returncode != 0:
+        logger.warning(
+            "Could not work out the projects' sessions: %s", (wrote.stderr or "").strip()
+        )
+        return
+    wanted: dict[str, str] = json.loads(wrote.stdout.strip().splitlines()[-1])
+    try:
+        before: dict[str, str] = json.loads(_read_marker(PROJECT_SESSIONS_MARKER) or "{}")
+    except ValueError:
+        before = {}
+
+    def systemctl(*argv: str) -> bool:
+        ran = _run(["systemctl", *argv], as_owner=False, timeout=RESTART_TIMEOUT_SECONDS)
+        if ran.returncode != 0:
+            logger.warning("systemctl %s: %s", " ".join(argv), (ran.stderr or "").strip())
+        return ran.returncode == 0
+
+    converged = dict(before)
+    for project_id, fingerprint in wanted.items():
+        unit = f"{project_session_prefix()}@{project_id}.service"
+        if project_id not in before:
+            if systemctl("enable", "--now", unit):
+                converged[project_id] = fingerprint
+                logger.info("Started %s.", unit)
+        elif before[project_id] != fingerprint:
+            if systemctl("try-restart", unit):
+                converged[project_id] = fingerprint
+                logger.info("Restarted %s onto its new spec.", unit)
+        else:
+            _revive_if_failed(unit)
+    for project_id in set(before) - set(wanted):
+        unit = f"{project_session_prefix()}@{project_id}.service"
+        if systemctl("disable", "--now", unit):
+            del converged[project_id]
+            logger.info("Stopped %s: its project no longer has a session.", unit)
+    if converged != before:
+        _write_marker(PROJECT_SESSIONS_MARKER, json.dumps(converged, sort_keys=True))
 
 
 def converge_node() -> DeployFailed | None:
@@ -885,6 +953,10 @@ def refresh_units() -> DeployFailed | None:
             revive_failed_remote_control()
         except Exception as error:
             logger.warning("Could not enable the remote-control session: %s", error)
+        try:
+            converge_project_sessions()
+        except Exception as error:
+            logger.warning("Could not converge the projects' sessions: %s", error)
 
     converge_notification_keys()
     return None
