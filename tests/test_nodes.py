@@ -268,7 +268,7 @@ def test_a_node_in_the_database_is_a_node_on_the_page(db):
     assert [node.name for node in known_nodes(db)] == ["homebox-node-1", "homebox-node-2"]
 
 
-def test_the_services_page_lists_a_node(client, monkeypatch):
+def test_the_first_screen_lists_a_node(client, monkeypatch):
     """Including the address that is actually working, because "which route is
     it using" is the question someone asks when a node goes quiet."""
     monkeypatch.setattr("workbench.app.page_warnings", lambda: [])
@@ -283,19 +283,19 @@ def test_the_services_page_lists_a_node(client, monkeypatch):
         },
     )
 
-    page = client.get("/services").text
+    page = client.get("/").text
 
     assert "homebox-node-1" in page
     assert "192.168.1.155" in page
     assert "qwen2.5-coder:7b" in page
 
 
-def test_the_services_page_says_how_to_add_one(client, monkeypatch):
+def test_the_first_screen_says_how_to_add_one(client, monkeypatch):
     """Not an error state: a single machine is a perfectly good Workbench, and
     this panel is how someone learns a second one is possible."""
     monkeypatch.setattr("workbench.app.page_warnings", lambda: [])
 
-    assert "--role=node" in client.get("/services").text
+    assert "--role=node" in client.get("/").text
 
 
 def test_the_url_is_built_from_the_address(db):
@@ -422,14 +422,17 @@ def test_a_refusal_is_reported_rather_than_retried(db, monkeypatch):
     assert len(pressed) == 1
 
 
-def test_the_button_reports_back_on_the_services_page(client, monkeypatch):
+def test_the_button_reports_back_on_the_first_screen(client, monkeypatch):
     monkeypatch.setattr(nodes.httpx, "post", lambda url, timeout: _Answer(200, {"ok": True}))
+    monkeypatch.setattr(
+        nodes.httpx, "get", lambda url, timeout: _Answer(200, {"ok": True, "streaming": False})
+    )
     client.post(
         "/api/nodes",
         json={"name": "homebox-node-2", "addresses": ["192.168.1.171"], "capabilities": ["client"]},
     )
 
-    page = client.get("/services").text
+    page = client.get("/").text
     assert "Play on this screen" in page
 
     answer = client.post("/nodes/1/stream", data={"action": "start"})
@@ -447,5 +450,91 @@ def test_a_node_with_no_screen_has_no_button(client):
         },
     )
 
-    assert "Play on this screen" not in client.get("/services").text
+    assert "Play on this screen" not in client.get("/").text
     assert client.post("/nodes/1/stream", data={"action": "start"}).status_code == 404
+
+
+def _a_screen(client, monkeypatch, answer):
+    monkeypatch.setattr("workbench.app.page_warnings", lambda: [])
+    monkeypatch.setattr(nodes.httpx, "get", answer)
+    client.post(
+        "/api/nodes",
+        json={"name": "homebox-node-2", "addresses": ["192.168.1.171"], "capabilities": ["client"]},
+    )
+    return client.get("/").text
+
+
+def test_a_screen_that_is_streaming_offers_only_stop(client, monkeypatch):
+    page = _a_screen(
+        client, monkeypatch, lambda url, timeout: _Answer(200, {"ok": True, "streaming": True})
+    )
+
+    assert "Stop playing on this screen" in page
+    assert "Play on this screen" not in page
+
+
+def test_a_screen_that_is_idle_offers_only_play(client, monkeypatch):
+    page = _a_screen(
+        client, monkeypatch, lambda url, timeout: _Answer(200, {"ok": True, "streaming": False})
+    )
+
+    assert "Play on this screen" in page
+    assert "Stop playing on this screen" not in page
+
+
+def test_a_screen_that_cannot_be_asked_offers_both(client, monkeypatch):
+    """Guessing would hide the button that was needed."""
+
+    def unreachable(url, timeout):
+        raise nodes.httpx.ConnectError("no route")
+
+    page = _a_screen(client, monkeypatch, unreachable)
+
+    assert "Play on this screen" in page
+    assert "Stop playing on this screen" in page
+
+
+def test_a_listener_from_before_the_question_offers_both(client, monkeypatch):
+    page = _a_screen(client, monkeypatch, lambda url, timeout: _Answer(404, {"ok": False}))
+
+    assert "Play on this screen" in page
+    assert "Stop playing on this screen" in page
+
+
+def test_the_first_screen_lists_this_head_first(client, monkeypatch):
+    monkeypatch.setattr("workbench.app.page_warnings", lambda: [])
+    monkeypatch.setattr("workbench.app.socket.gethostname", lambda: "homebox-core")
+    client.post(
+        "/api/nodes",
+        json={"name": "homebox-node-1", "addresses": ["192.168.1.155"], "capabilities": ["gaming"]},
+    )
+
+    page = client.get("/").text
+
+    assert page.index("homebox-core") < page.index("homebox-node-1")
+
+
+def test_the_services_page_keeps_services_and_drops_machines(client, monkeypatch):
+    monkeypatch.setattr("workbench.app.page_warnings", lambda: [])
+    client.post(
+        "/api/nodes",
+        json={"name": "homebox-node-1", "addresses": ["192.168.1.155"], "capabilities": ["gaming"]},
+    )
+
+    page = client.get("/services").text
+
+    assert "Services" in page
+    assert "homebox-node-1" not in page
+    assert 'href="/services"' in client.get("/").text
+
+
+def test_a_button_returns_to_the_first_screen(client, monkeypatch):
+    monkeypatch.setattr(nodes.httpx, "post", lambda url, timeout: _Answer(200, {"ok": True}))
+    client.post(
+        "/api/nodes",
+        json={"name": "homebox-node-2", "addresses": ["192.168.1.171"], "capabilities": ["client"]},
+    )
+
+    answer = client.post("/nodes/1/stream", data={"action": "stop"}, follow_redirects=False)
+
+    assert answer.headers["location"].startswith("/?")

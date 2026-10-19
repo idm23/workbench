@@ -4,8 +4,11 @@
 <h1>Workbench</h1>
 <p class="sub">
   {{ users | length }} user{{ '' if users | length == 1 else 's' }}.
-  Pick one to see their projects. <a href="/services">What's running &rarr;</a>
+  Pick one to see their projects.
 </p>
+<div class="task-actions">
+  <a class="slim" href="/services">What's running &rsaquo;</a>
+</div>
 
 {% if users %}
   <ul class="items">
@@ -34,4 +37,71 @@
          autocomplete="off" autocapitalize="none" required>
   <button type="submit">Add user</button>
 </form>
+
+<h2 class="section">Machines</h2>
+<ul class="items">
+  {# This head first: the machine serving this page, and the one every node
+     reports to. It is not a row in `nodes` - it never registers with itself. #}
+  <li>
+    <div class="row-title">
+      <span>{{ head.name }}</span>
+      <span class="chev">head</span>
+    </div>
+    <div class="row-meta">
+      Workbench {{ head.instance }}{% if head.revision %} · <span class="mono">{{ head.revision[:7] }}</span>{% endif %}
+    </div>
+  </li>
+  {% for node in nodes %}
+    <li>
+      <div class="row-title">
+        <span>{{ node.name }}</span>
+        <span class="chev">{{ node.capabilities | join(", ") or "node" }}</span>
+      </div>
+      {# The address that answered last, because "which route is actually
+         working" is the question a person asks when a node goes quiet — and
+         it is not always the first one the node advertised. #}
+      <div class="row-meta mono">
+        {{ node.last_good_address or node.addresses | join(", ") }}
+      </div>
+      <div class="row-meta">
+        {{ node.model or "no model recorded" }}{% if node.gpu %} · {{ node.gpu }}{% endif %}
+      </div>
+      <div class="row-meta">
+        {% if node.last_seen_at %}last seen {{ node.last_seen_at.strftime("%d %b %H:%M") }}
+        {% else %}never checked in{% endif %}
+      </div>
+      {% if "client" in (node.capabilities or []) %}
+        {# One button, the one that makes sense now: Stop while the stream is
+           on this screen, Play when it is not. Both when the node could not be
+           asked, because guessing wrong would hide the button that was needed.
+           Play starts Steam on the gaming node first, then the stream, so the
+           television opens onto Steam rather than an empty desktop. #}
+        {% set state = streaming.get(node.id) %}
+        <div class="task-actions">
+          {% if state is not sameas true %}
+            <form method="post" action="/nodes/{{ node.id }}/stream">
+              <input type="hidden" name="action" value="start">
+              <button class="slim" type="submit">Play on this screen</button>
+            </form>
+          {% endif %}
+          {% if state is not sameas false %}
+            <form method="post" action="/nodes/{{ node.id }}/stream">
+              <input type="hidden" name="action" value="stop">
+              <button class="slim secondary" type="submit">Stop playing on this screen</button>
+            </form>
+          {% endif %}
+        </div>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>
+{% if not nodes %}
+  {# Not an error state. A single machine is a perfectly good Workbench, and
+     this is how someone finds out that adding a second one is a thing they
+     can do. #}
+  <p class="empty">
+    No worker nodes. Install one with <span class="mono">./install.sh --role=node</span>
+    on another machine.
+  </p>
+{% endif %}
 {% endblock %}

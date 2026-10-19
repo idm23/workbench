@@ -20,6 +20,10 @@ installer and the doctor read it:
 - **client**: `start` and `stop` the stream onto this screen.
 
 On a node that is both, Steam goes first, so the stream opens onto it.
+
+**One read, also with no arguments.** `GET /stream` says whether this node's
+stream is on its screen, so the head can offer Play or Stop rather than both.
+It runs `systemctl is-active` on the one unit named here and nothing else.
 """
 
 import json
@@ -90,6 +94,26 @@ def press(verb: str) -> dict[str, object]:
     return {"ok": not failed, "done": done, "failed": failed}
 
 
+def streaming() -> bool | None:
+    """Whether this node's stream is on its screen. None if it has no screen,
+    or systemd could not say."""
+    if not is_client_node():
+        return None
+    try:
+        finished = subprocess.run(
+            ["systemctl", "is-active", CLIENT_UNIT_NAME],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SYSTEMCTL_TIMEOUT_SECONDS,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    # `activating` counts: Moonlight restarting between connection attempts is
+    # still a stream a person would want the Stop button for.
+    return finished.stdout.strip() in ("active", "activating", "reloading")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "workbench-node"
 
@@ -100,6 +124,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def do_GET(self) -> None:
+        if self.path != "/stream":
+            self._reply(HTTPStatus.NOT_FOUND, {"ok": False, "failed": [f"nothing at {self.path}"]})
+            return
+        self._reply(HTTPStatus.OK, {"ok": True, "streaming": streaming()})
 
     def do_POST(self) -> None:
         prefix, _, verb = self.path.rpartition("/")

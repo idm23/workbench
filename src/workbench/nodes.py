@@ -13,6 +13,7 @@ worked last, then each one in order, and writes down which answered.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -229,6 +230,49 @@ def stop_on(screen: Node) -> list[str]:
     """Take the stream off a client node's screen. Steam is left running."""
     problem = _press(screen, "stop")
     return [] if problem is None else [problem]
+
+
+#: How long the home page waits to learn whether a screen is streaming, per
+#: address. Short, because the page renders after it: a node that is off costs
+#: this once per address it advertises, and then the page says it does not know.
+STREAM_STATE_TIMEOUT_SECONDS = 0.5
+
+
+def _streaming_at(addresses: list[str]) -> bool | None:
+    for address in addresses:
+        try:
+            response = httpx.get(
+                f"http://{address}:{CONTROL_PORT}/stream", timeout=STREAM_STATE_TIMEOUT_SECONDS
+            )
+        except httpx.HTTPError:
+            continue
+        if response.status_code != 200:
+            # A node still running a listener from before this question existed.
+            return None
+        try:
+            answer = response.json().get("streaming")
+        except ValueError:
+            return None
+        return answer if isinstance(answer, bool) else None
+    return None
+
+
+def streaming_states(nodes: list[Node]) -> dict[int, bool | None]:
+    """Whether each screen among these nodes is showing a stream right now.
+
+    True or False when the node said so, None when it could not be asked - in
+    which case the page offers both buttons rather than guessing. All screens
+    are asked at once, so a page with several waits for the slowest rather than
+    the sum.
+    """
+    asked = {node.id: candidates(node) for node in nodes if is_screen(node)}
+    if not asked:
+        return {}
+    with ThreadPoolExecutor(max_workers=len(asked)) as pool:
+        futures = {
+            node_id: pool.submit(_streaming_at, addresses) for node_id, addresses in asked.items()
+        }
+        return {node_id: future.result() for node_id, future in futures.items()}
 
 
 def is_screen(node: Node) -> bool:

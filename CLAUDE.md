@@ -808,8 +808,9 @@ a setting in Workbench.
 
 **A node answers two buttons, and that is the one thing that reaches *in*.** Until the
 Play button, a head could only read what nodes told it. `workbench-node.service` listens on
-port 8790 for `POST /stream/start` and `/stream/stop`. That is all it accepts: fixed verbs
-with no arguments, each a `systemctl` call on a unit the node itself names (the client's
+port 8790 for `POST /stream/start` and `/stream/stop`, plus one read, `GET /stream`, which
+says whether the stream is on so the first screen offers Play or Stop rather than both.
+That is all it accepts: fixed verbs with no arguments, each a `systemctl` call on a unit the node itself names (the client's
 stream, and a root oneshot that starts the gaming account's Steam with `--user -M`). It
 runs as the service account, and polkit grants that account exactly those units. Like the
 model server it is unauthenticated on every interface, so anything on the home LAN can put
