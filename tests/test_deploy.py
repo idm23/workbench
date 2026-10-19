@@ -856,8 +856,55 @@ def test_a_gaming_node_deploy_converges_sunshine_settings(monkeypatch):
     monkeypatch.setattr(deploy_module, "is_client_node", lambda: False)
     monkeypatch.setattr(deploy_module, "is_gaming_node", lambda: True)
     monkeypatch.setattr(deploy_module.render, "converge", lambda: calls.append("render"))
+    monkeypatch.setattr(deploy_module, "converge_node_listener", lambda: calls.append("listener"))
     for name in ("converge_steam_session", "converge_sunshine_conf", "register_with_head"):
         monkeypatch.setattr(deploy_module.install_node, name, lambda name=name: calls.append(name))
 
     assert deploy_module.converge_node() is None
     assert "converge_sunshine_conf" in calls
+
+
+class _Ran:
+    def __init__(self, returncode=0, stderr=""):
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def _a_node_at(monkeypatch, tmp_path, revision):
+    monkeypatch.setattr(deploy_module, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(deploy_module, "ensure_data_dir", lambda: None)
+    monkeypatch.setattr(deploy_module, "current_revision", lambda: revision)
+    ran: list[list[str]] = []
+    monkeypatch.setattr(deploy_module, "_run", lambda argv, **k: ran.append(argv) or _Ran())
+    return ran
+
+
+def test_a_node_listener_with_no_record_is_restarted_once(monkeypatch, tmp_path):
+    """Every node that predates the marker is running the listener it loaded
+    at boot, so absent means stale here."""
+    ran = _a_node_at(monkeypatch, tmp_path, "9ad1122")
+
+    assert deploy_module.converge_node_listener() is True
+    assert ran == [["systemctl", "try-restart", "workbench-node.service"]]
+
+    assert deploy_module.converge_node_listener() is False
+    assert len(ran) == 1
+
+
+def test_a_node_listener_is_restarted_when_the_code_moves(monkeypatch, tmp_path):
+    (tmp_path / deploy_module.NODE_LISTENER_MARKER).write_text("506d867\n")
+    ran = _a_node_at(monkeypatch, tmp_path, "9ad1122")
+
+    assert deploy_module.converge_node_listener() is True
+    assert (tmp_path / deploy_module.NODE_LISTENER_MARKER).read_text().strip() == "9ad1122"
+    assert len(ran) == 1
+
+
+def test_a_failed_listener_restart_is_retried_next_tick(monkeypatch, tmp_path):
+    _a_node_at(monkeypatch, tmp_path, "9ad1122")
+    monkeypatch.setattr(
+        deploy_module, "_run", lambda argv, **k: _Ran(returncode=1, stderr="Access denied")
+    )
+
+    assert deploy_module.converge_node_listener() is False
+    assert not (tmp_path / deploy_module.NODE_LISTENER_MARKER).exists()

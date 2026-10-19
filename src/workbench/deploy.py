@@ -48,6 +48,7 @@ from workbench.config import (
     is_gaming_node,
     is_inference_node,
     is_node,
+    node_control_unit_name,
     port,
     repo_root,
     restore_from,
@@ -424,6 +425,40 @@ def _converge_model_server() -> None:
             logger.warning("Could not converge the model server: %s", error)
 
 
+#: Which revision this node's control listener was last restarted onto.
+NODE_LISTENER_MARKER = "node-listener-revision"
+
+
+def converge_node_listener() -> bool:
+    """Restart the node's control listener when the code on disk is newer than it.
+
+    Returns whether it restarted. Found by its absence: a change that gave the
+    listener a new endpoint deployed to every node, and every node went on
+    answering with the code it had loaded at boot, because a node's deploy
+    re-rendered unit files and converged its own state and restarted nothing.
+
+    The head's `service_is_stale` treats a missing marker as current, to avoid
+    restarting a web app every tick forever if the marker can never be written.
+    Here a missing marker is stale on purpose: every node that predates this
+    has none and is running old code, and restarting a listener costs a
+    fraction of a second, so the worst case of an unwritable marker is cheap.
+    `try-restart`, so a listener someone stopped stays stopped.
+    """
+    current = current_revision()
+    if _read_marker(NODE_LISTENER_MARKER) == current:
+        return False
+    unit = f"{node_control_unit_name()}.service"
+    restarted = _run(
+        ["systemctl", "try-restart", unit], as_owner=False, timeout=RESTART_TIMEOUT_SECONDS
+    )
+    if restarted.returncode != 0:
+        logger.warning("Could not restart %s: %s", unit, (restarted.stderr or "").strip())
+        return False
+    _write_marker(NODE_LISTENER_MARKER, current)
+    logger.info("Restarted %s onto %s.", unit, current[:7])
+    return True
+
+
 def converge_node() -> DeployFailed | None:
     """Bring a node back in line with what the repo says, and say it is alive.
 
@@ -465,6 +500,11 @@ def converge_node() -> DeployFailed | None:
             install_node.converge_sunshine_conf()
         except Exception as error:
             logger.warning("Could not converge Sunshine's settings: %s", error)
+
+    try:
+        converge_node_listener()
+    except Exception as error:
+        logger.warning("Could not converge the node's control listener: %s", error)
 
     try:
         # Every tick, not only the ones that pulled something. This is what
