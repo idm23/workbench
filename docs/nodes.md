@@ -118,16 +118,24 @@ bluetoothctl pair <address>
 bluetoothctl connect <address>
 ```
 
-Moonlight passes it to the gaming node, where Sunshine creates a virtual pad for it. With
-the mapping below, a Switch Pro Controller arrives as `Sunshine (libvirtualhid) X-Box 360
-Controller`: Moonlight sends a standard gamepad, not the controller it came from.
+Moonlight passes it to the gaming node, where Sunshine creates a virtual pad for it:
+`Sunshine (libvirtualhid) Nintendo Pro Controller`, because the installer sets
+`gamepad = switch` in `sunshine.conf` (and every deploy puts it back if it changes). That
+pad is a real HID device, so Steam sees a Pro Controller, Nintendo glyphs and all. A
+deploy rewrites the setting but never restarts Sunshine to apply it, since that would end a
+stream: a change takes effect the next time Sunshine starts.
 
-Moonlight Embedded's controller database has no entry for a Pro Controller reporting
-version `8001` over `hid-nintendo`, and no default to fall back on. Without one, every
-button is a guess: A and B swap, the triggers land in the wrong place, and Home moves
-the mouse. The client unit carries the correct mapping in `SDL_GAMECONTROLLERCONFIG`
-(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow positions, so the bottom button confirms, the Xbox way. The unit also sets `SDL_JOYSTICK_HIDAPI=0`: otherwise SDL may open the controller's raw HID device itself, and on that path the mapping is ignored. Another controller that maps wrongly needs
-a line added there.
+Moonlight Embedded's own controller database maps a Pro Controller on `hid-nintendo`
+positionally, and that is the wrong answer once the gaming node's pad is a Pro Controller.
+The client unit carries the correct mapping in `SDL_GAMECONTROLLERCONFIG`, which wins over
+the database entry for the same controller
+(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow the labels, because
+Sunshine hands Moonlight's buttons to the virtual Pro Controller by label. That was
+measured end to end, by pressing each button on a fake Pro Controller on the client and
+reading what the gaming node's pad reported. A positional mapping turned every face
+button into its neighbour. The unit also sets `SDL_JOYSTICK_HIDAPI=0`: otherwise SDL may
+open the controller's raw HID device itself, and on that path the mapping is ignored.
+Another controller that maps wrongly needs a line added there.
 
 A gaming node also runs a window manager (`workbench-wm`, Matchbox) as its player.
 X with no window manager never moves keyboard focus. So a game that opens over Big
