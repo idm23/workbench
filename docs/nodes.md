@@ -118,14 +118,15 @@ bluetoothctl pair <address>
 bluetoothctl connect <address>
 ```
 
-Moonlight passes it to the gaming node, where Sunshine creates a matching virtual pad — a
-Switch Pro Controller arrives as `Sunshine (libvirtualhid) Nintendo Pro Controller`.
+Moonlight passes it to the gaming node, where Sunshine creates a virtual pad for it. With
+the mapping below, a Switch Pro Controller arrives as `Sunshine (libvirtualhid) X-Box 360
+Controller`: Moonlight sends a standard gamepad, not the controller it came from.
 
 Moonlight Embedded's controller database has no entry for a Pro Controller reporting
 version `8001` over `hid-nintendo`, and no default to fall back on. Without one, every
 button is a guess: A and B swap, the triggers land in the wrong place, and Home moves
 the mouse. The client unit carries the correct mapping in `SDL_GAMECONTROLLERCONFIG`
-(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow the labels, so the button marked A confirms, the Nintendo way. The first version followed positions, the Xbox way, and on the television that read as A/B and X/Y swapped. Another controller that maps wrongly needs
+(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow positions, so the bottom button confirms, the Xbox way. The unit also sets `SDL_JOYSTICK_HIDAPI=0`: otherwise SDL may open the controller's raw HID device itself, and on that path the mapping is ignored. Another controller that maps wrongly needs
 a line added there.
 
 A gaming node also runs a window manager (`workbench-wm`, Matchbox) as its player.

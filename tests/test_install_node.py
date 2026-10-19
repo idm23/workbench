@@ -1452,4 +1452,5 @@ def test_the_client_reads_controllers_through_the_kernel_so_its_mapping_applies(
 
     assert "Environment=SDL_JOYSTICK_HIDAPI=0" in unit
     assert f'Environment="SDL_GAMECONTROLLERCONFIG={install_node.PRO_CONTROLLER_MAPPING}"' in unit
-    assert "a:b1,b:b0,x:b2,y:b3" in install_node.PRO_CONTROLLER_MAPPING
+    # Positional: the bottom button confirms.
+    assert "a:b0,b:b1,x:b3,y:b2" in install_node.PRO_CONTROLLER_MAPPING
