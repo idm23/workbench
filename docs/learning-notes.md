@@ -318,6 +318,11 @@ ever need must be imported before the change lands. `deploy.py` now imports
 old one — and the deploy after it converges. That the deployer runs one commit behind is
 already the documented design; the lazy import was quietly opting one module out of it.
 
+It happened again through `install_node`, the first deploy to a gaming node after it
+gained a window manager: `cannot import name 'CLIENT_UNIT_NAME' from 'workbench.config'`.
+So the rule is now a test rather than a note. `test_deploy.py` fails if `deploy.py`
+imports any `workbench` module inside a function.
+
 The preflight (`import workbench.app` in a throwaway subprocess) could not have caught
 this, and it is worth understanding why: in a *fresh* process the new code imports
 fine. The failure only exists in a process that straddles the pull, so no amount of
