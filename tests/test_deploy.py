@@ -846,3 +846,18 @@ def test_the_deployer_imports_every_workbench_module_before_it_pulls():
         )
     ]
     assert not late, f"deploy.py imports workbench code inside a function: {late}"
+
+
+def test_a_gaming_node_deploy_converges_sunshine_settings(monkeypatch):
+    """A hand-set `gamepad = x360` went unnoticed because only the installer
+    ever wrote sunshine.conf."""
+    calls = []
+    monkeypatch.setattr(deploy_module, "is_inference_node", lambda: False)
+    monkeypatch.setattr(deploy_module, "is_client_node", lambda: False)
+    monkeypatch.setattr(deploy_module, "is_gaming_node", lambda: True)
+    monkeypatch.setattr(deploy_module.render, "converge", lambda: calls.append("render"))
+    for name in ("converge_steam_session", "converge_sunshine_conf", "register_with_head"):
+        monkeypatch.setattr(deploy_module.install_node, name, lambda name=name: calls.append(name))
+
+    assert deploy_module.converge_node() is None
+    assert "converge_sunshine_conf" in calls
