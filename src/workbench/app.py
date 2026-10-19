@@ -9,6 +9,7 @@ Messages are passed between requests as query parameters rather than flash
 state, which keeps the app free of session middleware and a signing secret.
 """
 
+import socket
 from functools import cache
 from pathlib import Path
 from typing import Annotated
@@ -78,7 +79,7 @@ from workbench.git.worktrees import (
     local_checkout,
     sync_worktree,
 )
-from workbench.nodes import is_screen, known_nodes, play_on, stop_on
+from workbench.nodes import is_screen, known_nodes, play_on, stop_on, streaming_states
 from workbench.notifications import devices_for, forget, send_test, set_enabled, subscribe
 from workbench.rendering import render_markdown
 from workbench.runs.activity import (
@@ -234,14 +235,41 @@ def healthz() -> dict[str, str]:
 
 
 @app.get("/", response_class=HTMLResponse)
-def list_users(request: Request, db: DbSession, error: str | None = None) -> HTMLResponse:
+def list_users(
+    request: Request,
+    db: DbSession,
+    error: str | None = None,
+    notice: str | None = None,
+) -> HTMLResponse:
+    """The first screen: who has projects here, and the machines doing the work.
+
+    The machines are here rather than on the services page because pressing
+    Play is the thing someone opens this app on a phone to do, and it should
+    not be two taps away. This head is listed first, as the machine the page
+    itself is coming from.
+    """
     users = db.scalars(
         # selectinload so rendering each user's project count is one extra
         # query rather than one per user.
         select(User).options(selectinload(User.projects)).order_by(User.name)
     ).all()
+    nodes = known_nodes(db)
     return templates.TemplateResponse(
-        request, "users.html", {**_shared(db), "users": users, "error": error}
+        request,
+        "users.html",
+        {
+            **_shared(db),
+            "users": users,
+            "head": {
+                "name": socket.gethostname(),
+                "instance": instance() or "production",
+                "revision": deployed_revision(),
+            },
+            "nodes": nodes,
+            "streaming": streaming_states(nodes),
+            "error": error,
+            "notice": notice,
+        },
     )
 
 
@@ -305,7 +333,6 @@ def show_services(
             **_shared(db),
             "services": running_services(db),
             "shells": active_shells(db),
-            "nodes": known_nodes(db),
             "systemd_available": systemd_available(),
             "error": error,
             "notice": notice,
@@ -333,8 +360,8 @@ def press_stream(db: DbSession, node_id: int, action: Annotated[str, Form()]) ->
     else:
         raise HTTPException(status_code=400, detail="Unknown action.")
     if problems:
-        return _redirect("/services", error=" ".join(problems))
-    return _redirect("/services", notice=done)
+        return _redirect("/", error=" ".join(problems))
+    return _redirect("/", notice=done)
 
 
 @app.get("/users/{user_id}", response_class=HTMLResponse)

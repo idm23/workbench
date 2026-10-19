@@ -1036,22 +1036,63 @@ def _sunshine_prep_commands(unit: str) -> str:
     return json.dumps(commands, separators=(",", ":"))
 
 
+#: Which virtual pad Sunshine gives a client's controller. `switch` makes it a
+#: Nintendo Pro Controller - real enough over uhid that the gaming node's own
+#: `hid-nintendo` binds to it, and that Steam sees exactly the controller in
+#: the person's hands, glyphs and all. Owned here because it was found set to
+#: `x360` by hand, which nothing in the repo would ever have noticed.
+#:
+#: Sunshine maps Moonlight's buttons onto this pad *by label*: Moonlight's A
+#: arrives as the Pro Controller's A, which sits on the right. That is why
+#: `PRO_CONTROLLER_MAPPING` on a client also follows labels.
+SUNSHINE_GAMEPAD = "switch"
+
+
 def _sunshine_conf_with_prep(existing: str, unit: str) -> str:
-    """`sunshine.conf` with our `global_prep_cmd` line, leaving every other
-    setting alone.
+    """`sunshine.conf` with the settings this installer owns - the prep
+    command and the virtual pad - leaving every other setting alone.
 
     Rewritten rather than appended blindly, because Sunshine rewrites this
     whole file itself whenever anyone saves from its web UI — so this has to
     be something that converges when run twice, not something that stacks up a
     duplicate key per install.
     """
-    kept = [
-        line for line in existing.splitlines() if not line.lstrip().startswith("global_prep_cmd")
-    ]
+    owned = {
+        "global_prep_cmd": _sunshine_prep_commands(unit),
+        "gamepad": SUNSHINE_GAMEPAD,
+    }
+    kept = [line for line in existing.splitlines() if line.split("=", 1)[0].strip() not in owned]
     while kept and not kept[-1].strip():
         kept.pop()
-    kept.append(f"global_prep_cmd = {_sunshine_prep_commands(unit)}")
+    kept.extend(f"{key} = {value}" for key, value in owned.items())
     return "\n".join(kept) + "\n"
+
+
+def converge_sunshine_conf() -> bool:
+    """Keep `sunshine.conf`'s owned settings as the repo says. Returns whether it changed.
+
+    From the installer and from every deploy tick. A deploy never restarts
+    Sunshine to apply it - that would end whatever is streaming - so a change
+    takes effect the next time Sunshine starts.
+    """
+    player = gaming_user()
+    if not player:
+        return False
+    try:
+        account = pwd.getpwnam(player)
+    except KeyError:
+        return False
+    conf = Path(account.pw_dir) / ".config" / "sunshine" / "sunshine.conf"
+    existing = conf.read_text() if conf.is_file() else ""
+    wanted = _sunshine_conf_with_prep(existing, gaming_unit_name())
+    if existing == wanted:
+        info("Sunshine's settings already configured")
+        return False
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text(wanted)
+    os.chown(conf, account.pw_uid, account.pw_gid)
+    info(f"wrote {conf}: the gaming switch, and a Pro Controller as the virtual pad")
+    return True
 
 
 def configure_sunshine_prep_command() -> bool:
@@ -1084,15 +1125,7 @@ def configure_sunshine_prep_command() -> bool:
         os.chown(apps, account.pw_uid, account.pw_gid)
         info(f"wrote {apps}, giving Moonlight something to select")
 
-    conf = config_dir / "sunshine.conf"
-    existing = conf.read_text() if conf.is_file() else ""
-    wanted = _sunshine_conf_with_prep(existing, gaming_unit_name())
-    if existing == wanted:
-        info("Sunshine's prep command already configured")
-    else:
-        conf.write_text(wanted)
-        os.chown(conf, account.pw_uid, account.pw_gid)
-        info(f"wrote {conf}, wiring Sunshine into the gaming switch")
+    converge_sunshine_conf()
 
     _ensure_linger(player)
     _ensure_headless_autostart(account)
@@ -1305,20 +1338,29 @@ MOONLIGHT_BUILD_DIR = "moonlight-embedded"
 #: and Home moving the mouse. Worked out from the button and axis codes the
 #: controller itself reports on the Pi, and confirmed with a controller in hand.
 #:
-#: The face buttons follow positions, not labels: the bottom one confirms, the
-#: Xbox way, which is what the person holding it asked for. `hid-nintendo`
-#: reports them by position (b0 south, b1 east, b2 north, b3 west), so `a` is
-#: b0. A label-following version (`a:b1`) was tried and swapped back.
+#: The face buttons follow the labels: the button marked A is Moonlight's A.
+#: Measured end to end rather than chosen - the gaming node's Sunshine gives
+#: Moonlight's buttons to a virtual Pro Controller by label (see
+#: `SUNSHINE_GAMEPAD`), so a positional mapping here came out with every face
+#: button as its neighbour. `hid-nintendo` reports them by position (b0 south,
+#: b1 east, b2 north, b3 west), so A is b1. The Xbox-style positional version
+#: (`a:b0`) was right only while that pad was an Xbox 360 one.
+#:
+#: Worth knowing before trusting a test of this on the Pi: on 16 October a
+#: drop-in (`workbench-client.service.d/10-pro-controller-test.conf`) was left
+#: behind there carrying a positional mapping, and it silently overrode this
+#: one for three days - including the label-following version this replaces,
+#: which therefore never reached the television at all.
 #:
 #: It only applies to a controller SDL reads through evdev, which is why the
 #: unit also sets `SDL_JOYSTICK_HIDAPI=0`. After a fresh Bluetooth pairing,
 #: Moonlight opened the controller's `/dev/hidraw` node instead, through SDL's
 #: own Switch driver: the mapping was silently unused, the face buttons came
-#: out in SDL's label layout, and it logged that it could not enable vibration or
+#: out in SDL's own layout, and it logged that it could not enable vibration or
 #: load stick calibration.
 PRO_CONTROLLER_MAPPING = (
     "050000007e0500000920000001800000,Nintendo Switch Pro Controller (hid-nintendo),"
-    "a:b0,b:b1,x:b3,y:b2,misc1:b4,leftshoulder:b5,rightshoulder:b6,"
+    "a:b1,b:b0,x:b2,y:b3,misc1:b4,leftshoulder:b5,rightshoulder:b6,"
     "lefttrigger:b7,righttrigger:b8,back:b9,start:b10,guide:b11,"
     "leftstick:b12,rightstick:b13,leftx:a0,lefty:a1,rightx:a2,righty:a3,"
     "dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"

@@ -461,6 +461,10 @@ def converge_node() -> DeployFailed | None:
             install_node.converge_steam_session()
         except Exception as error:
             logger.warning("Could not converge Steam's unit: %s", error)
+        try:
+            install_node.converge_sunshine_conf()
+        except Exception as error:
+            logger.warning("Could not converge Sunshine's settings: %s", error)
 
     try:
         # Every tick, not only the ones that pulled something. This is what

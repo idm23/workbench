@@ -118,16 +118,24 @@ bluetoothctl pair <address>
 bluetoothctl connect <address>
 ```
 
-Moonlight passes it to the gaming node, where Sunshine creates a virtual pad for it. With
-the mapping below, a Switch Pro Controller arrives as `Sunshine (libvirtualhid) X-Box 360
-Controller`: Moonlight sends a standard gamepad, not the controller it came from.
+Moonlight passes it to the gaming node, where Sunshine creates a virtual pad for it:
+`Sunshine (libvirtualhid) Nintendo Pro Controller`, because the installer sets
+`gamepad = switch` in `sunshine.conf` (and every deploy puts it back if it changes). That
+pad is a real HID device, so Steam sees a Pro Controller, Nintendo glyphs and all. A
+deploy rewrites the setting but never restarts Sunshine to apply it, since that would end a
+stream: a change takes effect the next time Sunshine starts.
 
-Moonlight Embedded's controller database has no entry for a Pro Controller reporting
-version `8001` over `hid-nintendo`, and no default to fall back on. Without one, every
-button is a guess: A and B swap, the triggers land in the wrong place, and Home moves
-the mouse. The client unit carries the correct mapping in `SDL_GAMECONTROLLERCONFIG`
-(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow positions, so the bottom button confirms, the Xbox way. The unit also sets `SDL_JOYSTICK_HIDAPI=0`: otherwise SDL may open the controller's raw HID device itself, and on that path the mapping is ignored. Another controller that maps wrongly needs
-a line added there.
+Moonlight Embedded's own controller database maps a Pro Controller on `hid-nintendo`
+positionally, and that is the wrong answer once the gaming node's pad is a Pro Controller.
+The client unit carries the correct mapping in `SDL_GAMECONTROLLERCONFIG`, which wins over
+the database entry for the same controller
+(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow the labels, because
+Sunshine hands Moonlight's buttons to the virtual Pro Controller by label. That was
+measured end to end, by pressing each button on a fake Pro Controller on the client and
+reading what the gaming node's pad reported. A positional mapping turned every face
+button into its neighbour. The unit also sets `SDL_JOYSTICK_HIDAPI=0`: otherwise SDL may
+open the controller's raw HID device itself, and on that path the mapping is ignored.
+Another controller that maps wrongly needs a line added there.
 
 A gaming node also runs a window manager (`workbench-wm`, Matchbox) as its player.
 X with no window manager never moves keyboard focus. So a game that opens over Big
@@ -136,13 +144,19 @@ whichever window has focus.
 
 ### Putting the game on the television
 
-The **What's running** page (`/services`) shows *Play on this screen* and *Stop* on
-every client node. Play starts Steam on each gaming node, then starts the stream, so the
-television opens onto Big Picture. Stop ends the stream and leaves Steam running, so a
-game in progress is never killed. The head reaches each node's control listener on port
-8790. By hand:
+The first screen lists every machine, the head first. A client node's row has one
+button: *Play on this screen* when nothing is streaming to it, *Stop playing on this
+screen* when something is. If the node can't be asked, the row shows both. Play starts
+Steam on each gaming node, then starts the stream, so the television opens onto Big
+Picture. Stop ends the stream and leaves Steam running, so a game in progress is never
+killed.
+
+The head reaches each node's control listener on port 8790, which accepts the two
+buttons and one read. To render the button, the head asks `GET /stream`, giving each
+address half a second. By hand:
 
 ```sh
+curl http://<node>:8790/stream            # {"ok": true, "streaming": true}
 curl -X POST http://<node>:8790/stream/start
 ```
 
@@ -268,7 +282,7 @@ which asks the four questions that apply to a node — is this a proper deployme
 `$HOME` belong to the right account, is there a GPU, and does a model server answer with
 the right model loaded.
 
-On the head, the nodes it knows about are listed at `/services`, and the doctor gains a
+On the head, the nodes it knows about are listed on the first screen, and the doctor gains a
 `A worker node is answering` check whenever this machine is configured for a local model.
 
 From the head, the same endpoint the backend will use:
@@ -292,7 +306,7 @@ journalctl -u ollama -f
 | The doctor says the model is not there | `ollama pull <model>` on the node, or set `WORKBENCH_LOCAL_MODEL` to one it has |
 | Everything works but is very slow | `nvidia-smi` during a run — if the model is on the CPU, the driver is missing or the model does not fit in VRAM |
 | A node stopped updating itself | `systemctl list-timers workbench-deploy.timer`, then `journalctl -u workbench-deploy -n 50` |
-| A node is missing from `/services` | It was installed without `--head`, or could not reach it — `journalctl -u workbench-deploy -n 50` on the node says which |
+| A node is missing from the first screen | It was installed without `--head`, or could not reach it — `journalctl -u workbench-deploy -n 50` on the node says which |
 | A node's `last seen` is hours old | Its deploy timer has stopped; the node re-registers on every tick, so a stale time means the timer, not the model server |
 | Runs fail asking for a model the node hasn't got | `WORKBENCH_LOCAL_MODEL` is set on the head and overrides what the node reports — unset it, or pull that model on the node |
 | A plan is fluent and about the wrong thing, a run replies with nothing, or the model asks whether there has been a user query yet | The model lost its task to a too-small context window. The run's log says so ("dropping the oldest messages to fit"). Raise `WORKBENCH_INFERENCE_CONTEXT_TOKENS` in `/etc/workbench/env` on the node; the next deploy tick rewrites the drop-in and restarts Ollama. `ollama ps` on the node shows the window actually in use |

@@ -907,6 +907,39 @@ def test_the_autostart_link_is_made_even_when_the_dropin_is_unchanged(monkeypatc
     ] in calls
 
 
+def test_sunshine_presents_a_pro_controller_whatever_was_set_by_hand():
+    """Found set to `x360` by hand, which made Steam see an Xbox pad while a
+    Pro Controller was in someone's hands."""
+    conf = install_node._sunshine_conf_with_prep(
+        "gamepad = x360\nmin_log_level = 2\n", "workbench-gaming.service"
+    )
+    assert [line for line in conf.splitlines() if line.startswith("gamepad")] == [
+        "gamepad = switch"
+    ]
+    assert "min_log_level = 2" in conf
+
+
+def test_a_deploy_converges_sunshine_conf_without_restarting_it(monkeypatch, tmp_path):
+    import pwd as _pwd
+
+    real = _pwd.getpwuid(os.getuid())
+    account = _pwd.struct_passwd(
+        (real.pw_name, "x", real.pw_uid, real.pw_gid, "", str(tmp_path), "/bin/sh")
+    )
+    monkeypatch.setattr(install_node, "gaming_user", lambda: real.pw_name)
+    monkeypatch.setattr(install_node.pwd, "getpwnam", lambda name: account)
+    monkeypatch.setattr(
+        install_node, "run_as_account", lambda *a, **k: pytest.fail("restarted Sunshine")
+    )
+    conf = tmp_path / ".config" / "sunshine" / "sunshine.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("gamepad = x360\n")
+
+    assert install_node.converge_sunshine_conf() is True
+    assert "gamepad = switch" in conf.read_text()
+    assert install_node.converge_sunshine_conf() is False
+
+
 def test_an_existing_sunshine_conf_keeps_its_other_settings(monkeypatch):
     """Sunshine rewrites this whole file itself whenever anyone saves from its
     web UI, so this has to converge rather than stack up a duplicate key per
@@ -1452,5 +1485,5 @@ def test_the_client_reads_controllers_through_the_kernel_so_its_mapping_applies(
 
     assert "Environment=SDL_JOYSTICK_HIDAPI=0" in unit
     assert f'Environment="SDL_GAMECONTROLLERCONFIG={install_node.PRO_CONTROLLER_MAPPING}"' in unit
-    # Positional: the bottom button confirms.
-    assert "a:b0,b:b1,x:b3,y:b2" in install_node.PRO_CONTROLLER_MAPPING
+    # By label, because Sunshine's virtual Pro Controller takes them by label.
+    assert "a:b1,b:b0,x:b2,y:b3" in install_node.PRO_CONTROLLER_MAPPING
