@@ -39,6 +39,7 @@ from workbench.agents import claude as backend_module
 from workbench.agents.claude import (
     ClaudeBackend,
     CredentialWindow,
+    cli_config_file,
     named_login_credential_status,
     read_credential,
     read_credential_window,
@@ -1467,7 +1468,28 @@ def test_remote_control_argv_names_this_machine(monkeypatch):
     monkeypatch.setattr(backend_module, "_cli_path", lambda: "/opt/claude")
     monkeypatch.setattr(backend_module.socket, "gethostname", lambda: "homebox-core")
 
-    assert remote_control_argv() == ["/opt/claude", "--remote-control", "homebox-core"]
+    assert remote_control_argv() == [
+        "/opt/claude",
+        "--remote-control",
+        "homebox-core",
+        "--model",
+        "opus",
+    ]
+
+
+def test_remote_control_argv_takes_a_projects_name(monkeypatch):
+    monkeypatch.setattr(backend_module, "_cli_path", lambda: "/opt/claude")
+
+    argv = remote_control_argv("pivot on homebox-core")
+    assert argv is not None
+    assert argv[2] == "pivot on homebox-core"
+
+
+def test_the_default_logins_settings_sit_beside_its_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert cli_config_file(None) == tmp_path / ".claude.json"
+    assert cli_config_file(tmp_path / "work") == tmp_path / "work" / ".claude.json"
 
 
 def test_the_agent_is_handed_a_scratch_database(monkeypatch, tmp_path):
@@ -1558,7 +1580,7 @@ def test_first_run_setup_is_answered_without_losing_the_login(tmp_path):
     (tmp_path / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "a@b"}}))
     workspace = tmp_path / "ws"
 
-    skip_first_run_setup(tmp_path, workspace)
+    skip_first_run_setup(tmp_path / ".claude.json", workspace)
 
     state = json.loads((tmp_path / ".claude.json").read_text())
     assert state["oauthAccount"] == {"emailAddress": "a@b"}
@@ -1577,13 +1599,13 @@ def test_first_run_setup_keeps_a_chosen_theme_and_leaves_a_done_file_alone(tmp_p
     (tmp_path / ".claude.json").write_text(json.dumps(done))
     before = (tmp_path / ".claude.json").stat().st_mtime_ns
 
-    skip_first_run_setup(tmp_path, workspace)
+    skip_first_run_setup(tmp_path / ".claude.json", workspace)
 
     assert (tmp_path / ".claude.json").stat().st_mtime_ns == before
     assert json.loads((tmp_path / ".claude.json").read_text())["theme"] == "light"
 
 
 def test_first_run_setup_writes_a_config_that_does_not_exist_yet(tmp_path):
-    skip_first_run_setup(tmp_path / "login", tmp_path / "ws")
+    skip_first_run_setup(tmp_path / "login" / ".claude.json", tmp_path / "ws")
 
     assert json.loads((tmp_path / "login" / ".claude.json").read_text())["hasCompletedOnboarding"]

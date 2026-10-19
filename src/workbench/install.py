@@ -66,6 +66,7 @@ from workbench.config import (
     is_node,
     node_control_unit_name,
     port,
+    project_session_prefix,
     remote_control_login_dir,
     remote_control_unit_name,
     remote_control_workspace,
@@ -163,6 +164,12 @@ def units() -> tuple[tuple[str, str], ...]:
         # the gaming switch are, because the whole point is that it is already
         # running before anyone reaches for it.
         (f"{remote_control_unit_name()}.service", "workbench-remote-control.service.template"),
+        # A template like the run unit: one instance per project, which the
+        # deployer starts and stops (`deploy.converge_project_sessions`).
+        (
+            f"{project_session_prefix()}@.service",
+            "workbench-project-session@.service.template",
+        ),
     )
 
 
@@ -1169,6 +1176,7 @@ def render_unit(template_name: str) -> str:
         # production leaves this empty and never restores anything.
         "__RESTORE_FROM__": os.environ.get("WORKBENCH_RESTORE_FROM", "").strip(),
         "__RUN_PREFIX__": run_unit_prefix(),
+        "__PROJECT_SESSION_PREFIX__": project_session_prefix(),
         "__RUN_TIMEOUT__": str(RUN_TIMEOUT_SECONDS),
         "__GAMING_UNIT__": gaming_unit_name(),
         "__CLIENT_UNIT__": CLIENT_UNIT_NAME,

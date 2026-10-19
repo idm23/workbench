@@ -203,6 +203,36 @@ def parse_agent_choice(choice: str) -> tuple[str, str | None]:
     return backend, (login or None)
 
 
+@dataclass(frozen=True)
+class ClaudeLogin:
+    """Which Claude login is a project's own: `None` is the default login."""
+
+    name: str | None
+
+
+def project_claude_login(project: Project) -> ClaudeLogin | None:
+    """The Claude login a project's standing session signs in as, or None if
+    the project may not use Claude at all.
+
+    The project's `agent_backend` when it names a Claude login. Otherwise the
+    default login, unless `allowed_agents` excludes it, in which case the first
+    named Claude login it lists — that is how a project in an organisation
+    (`Pivot-Robots/pivot`) says "the work account" today, and a session under
+    any other login is one `agent_allowed` would refuse a run for.
+    """
+    if project.agent_backend:
+        backend, login = parse_agent_choice(project.agent_backend)
+        if backend == "claude" and agent_allowed(project, backend, login):
+            return ClaudeLogin(login)
+    if agent_allowed(project, "claude", None):
+        return ClaudeLogin(None)
+    for choice in project.allowed_agents or []:
+        backend, login = parse_agent_choice(choice)
+        if backend == "claude":
+            return ClaudeLogin(login)
+    return None
+
+
 def agent_choices(project: Project) -> list[str]:
     """What may be picked to start a fresh run on this project, in order.
 

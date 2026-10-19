@@ -1,0 +1,51 @@
+# Rendered by install.sh — placeholders are replaced with detected values.
+#
+# One standing Claude Code session per project, reachable over Remote Control,
+# working in that project's clone and signed in as that project's own login.
+# Started as `__PROJECT_SESSION_PREFIX__@<project id>.service` by the deployer, which decides
+# which projects get one (`workbench.project_sessions`) and writes each a spec;
+# never enabled by hand, and never on staging, whose database is a copy of
+# production's projects.
+#
+# Not the head's own standing session (`workbench-remote-control.service`),
+# which has its own login and no project. This one bills whichever account the
+# project's runs would: a project restricted to a work login gets that login.
+
+[Unit]
+Description=Workbench: remote-control session for project %i (__SERVICE__)
+Documentation=https://github.com/idm23/workbench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+
+# The wrapper reads the spec, moves into the clone, picks the login, and
+# pre-answers the CLI's first-run setup before starting it under a pty.
+ExecStart=__REPO__/.venv/bin/python -m workbench.remote_control --project %i
+
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+
+# The clones, and the scratch databases `WORKBENCH_DB` points at — never the
+# instance's own database beside them, which nothing in this unit may write.
+ReadWritePaths=__REPO__/data/repos
+ReadWritePaths=-__REPO__/data/agent-databases
+
+# Both halves of the default login, and every named one: written, not only
+# read, because an OAuth token is refreshed in place.
+ReadWritePaths=-__HOME__/.claude
+ReadWritePaths=-__HOME__/.claude.json
+ReadWritePaths=-__HOME__/.claude-logins
+
+ReadWritePaths=-__HOME__/.ssh
+
+[Install]
+WantedBy=multi-user.target

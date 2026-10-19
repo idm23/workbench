@@ -472,6 +472,34 @@ pre-created the same way `.claude` is, for the same `ProtectSystem=strict` reaso
 no stake in any project's checkout or the live database. Giving it one is #66's decision
 to make, not a default this task should have smuggled in.
 
+**And now each project has one too, signed in as the project's own account.**
+`workbench-project-session@<project id>.service` works in that project's clone, as
+`lifecycle.project_claude_login`: a Claude login named by `agent_backend`, else the
+default login, else — for a project whose `allowed_agents` excludes the default, which is
+how `Pivot-Robots/pivot` says "the work account" — the first named Claude login it lists.
+A session under any other login would be one `agent_allowed` refuses a run for. Three
+decisions in it:
+
+- **The deployer decides, and never as root against the database.**
+  `python -m workbench.project_sessions write` runs as the service account, writes one spec
+  per project into `data/project-sessions/`, and prints `{id: fingerprint}`; root then
+  enables a new project's session, `try-restart`s one whose spec changed, revives one
+  systemd gave up on, and disables one whose project is gone. An unchanged spec is never
+  restarted, for the same reason the head's session is not: it may be a live conversation.
+  Root opening the database would leave root-owned `-wal`/`-shm` files the app cannot
+  write, and the session reads a spec rather than the database because it may not write
+  `data/` at all.
+- **It may write the clones, the scratch databases and the logins — never `data/` itself.**
+  `WORKBENCH_DB` points at the clone's scratch database as it does for runs, and the unit's
+  `ReadWritePaths` stop at `data/repos`, so the live database is out of reach by
+  construction rather than by convention, which is stronger than runs have yet.
+- **Production only.** Staging restores production's projects, so a second set of sessions
+  there would be signed in as logins staging does not have.
+
+A named login never created on this machine gets no session rather than one waiting at
+the sign-in screen. Every session asks for `--model opus` — the alias, so it follows the
+SDK pin: 2.1.239 knew no Opus 5.5, and the 0.2.168 SDK's 2.1.301 does.
+
 **Tasks live in local SQLite, not GitHub Issues.** GitHub is used for code hosting,
 remotes, and PRs only. Issues were considered and rejected: every UI interaction
 becomes a network round-trip, and the sub-issue API is an awkward fit for the
