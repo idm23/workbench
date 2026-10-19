@@ -44,6 +44,7 @@ from workbench.agents.claude import (
     read_credential_window,
     read_named_login_window,
     remote_control_argv,
+    skip_first_run_setup,
     translate,
 )
 from workbench.agents.protocol import (
@@ -1549,3 +1550,40 @@ def test_a_review_in_prose_has_no_verdict():
 
 def test_a_review_runs_read_only():
     assert backend_module._permission_mode(backend_module.RunPhase.REVIEW) == "plan"
+
+
+def test_first_run_setup_is_answered_without_losing_the_login(tmp_path):
+    """The first start under a unit sat at the theme picker; the login's own
+    keys must survive the merge."""
+    (tmp_path / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "a@b"}}))
+    workspace = tmp_path / "ws"
+
+    skip_first_run_setup(tmp_path, workspace)
+
+    state = json.loads((tmp_path / ".claude.json").read_text())
+    assert state["oauthAccount"] == {"emailAddress": "a@b"}
+    assert state["hasCompletedOnboarding"] is True
+    assert state["theme"] == "dark"
+    assert state["projects"][str(workspace)]["hasTrustDialogAccepted"] is True
+
+
+def test_first_run_setup_keeps_a_chosen_theme_and_leaves_a_done_file_alone(tmp_path):
+    workspace = tmp_path / "ws"
+    done = {
+        "hasCompletedOnboarding": True,
+        "theme": "light",
+        "projects": {str(workspace): {"hasTrustDialogAccepted": True}},
+    }
+    (tmp_path / ".claude.json").write_text(json.dumps(done))
+    before = (tmp_path / ".claude.json").stat().st_mtime_ns
+
+    skip_first_run_setup(tmp_path, workspace)
+
+    assert (tmp_path / ".claude.json").stat().st_mtime_ns == before
+    assert json.loads((tmp_path / ".claude.json").read_text())["theme"] == "light"
+
+
+def test_first_run_setup_writes_a_config_that_does_not_exist_yet(tmp_path):
+    skip_first_run_setup(tmp_path / "login", tmp_path / "ws")
+
+    assert json.loads((tmp_path / "login" / ".claude.json").read_text())["hasCompletedOnboarding"]

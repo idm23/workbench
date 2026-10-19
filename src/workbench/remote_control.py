@@ -22,8 +22,9 @@ render the CLI's first-run setup screen correctly.
 import logging
 import os
 import pty
+from pathlib import Path
 
-from workbench.agents.claude import remote_control_argv
+from workbench.agents.claude import remote_control_argv, skip_first_run_setup
 from workbench.logs import configure_console_logging
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,14 @@ def main() -> int:
     if argv is None:
         logger.error("No Claude CLI found; the remote-control session cannot start.")
         return 1
+
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        try:
+            skip_first_run_setup(Path(config_dir), Path.cwd())
+        except (OSError, ValueError) as error:
+            # Starting anyway is no worse than before: it waits at setup.
+            logger.warning("Could not pre-answer the CLI's first-run setup: %s", error)
 
     logger.info("Starting remote-control session: %s", " ".join(argv))
     status = pty.spawn(argv)

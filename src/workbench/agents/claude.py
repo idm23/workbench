@@ -832,6 +832,42 @@ def remote_control_argv() -> list[str] | None:
     return None if cli is None else [cli, "--remote-control", socket.gethostname()]
 
 
+def skip_first_run_setup(config_dir: Path, workspace: Path) -> None:
+    """Answer the CLI's first-run questions for a session nobody is sitting at.
+
+    A login made with `auth login` leaves onboarding unfinished, so the first
+    start under a unit sat at the theme picker: `active`, waiting for a key no
+    terminal could send. Measured against 2.1.239: with these three keys in the
+    config directory's `.claude.json` it opens straight to its prompt. Merged
+    into whatever the login already wrote, never replacing it, and the folder
+    trusted is only the session's own empty workspace.
+    """
+    path = config_dir / ".claude.json"
+    try:
+        state = json.loads(path.read_text())
+    except FileNotFoundError:
+        state = {}
+    if not isinstance(state, dict):
+        return
+    projects = state.setdefault("projects", {})
+    project = projects.setdefault(str(workspace), {})
+    wanted = (
+        state.get("hasCompletedOnboarding") is True
+        and "theme" in state
+        and project.get("hasTrustDialogAccepted") is True
+    )
+    if wanted:
+        return
+    state["hasCompletedOnboarding"] = True
+    state.setdefault("theme", "dark")
+    project["hasTrustDialogAccepted"] = True
+    config_dir.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f"{path.name}.workbench-tmp")
+    staged.write_text(json.dumps(state, indent=2))
+    staged.chmod(0o600)
+    staged.replace(path)
+
+
 class ClaudeBackend:
     """Drives Claude through `claude_agent_sdk`.
 
