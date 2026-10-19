@@ -121,6 +121,30 @@ bluetoothctl connect <address>
 Moonlight passes it to the gaming node, where Sunshine creates a matching virtual pad — a
 Switch Pro Controller arrives as `Sunshine (libvirtualhid) Nintendo Pro Controller`.
 
+Moonlight Embedded's controller database has no entry for a Pro Controller reporting
+version `8001` over `hid-nintendo`, and no default to fall back on. Without one, every
+button is a guess: A and B swap, the triggers land in the wrong place, and Home moves
+the mouse. The client unit carries the correct mapping in `SDL_GAMECONTROLLERCONFIG`
+(see `install_node.PRO_CONTROLLER_MAPPING`). Its face buttons follow the labels, so the button marked A confirms, the Nintendo way. The first version followed positions, the Xbox way, and on the television that read as A/B and X/Y swapped. Another controller that maps wrongly needs
+a line added there.
+
+A gaming node also runs a window manager (`workbench-wm`, Matchbox) as its player.
+X with no window manager never moves keyboard focus. So a game that opens over Big
+Picture is drawn on top but receives no input, because Steam sends the controller to
+whichever window has focus.
+
+### Putting the game on the television
+
+The **What's running** page (`/services`) shows *Play on this screen* and *Stop* on
+every client node. Play starts Steam on each gaming node, then starts the stream, so the
+television opens onto Big Picture. Stop ends the stream and leaves Steam running, so a
+game in progress is never killed. The head reaches each node's control listener on port
+8790. By hand:
+
+```sh
+curl -X POST http://<node>:8790/stream/start
+```
+
 ## Installing one
 
 On a fresh Ubuntu Server machine with an NVIDIA card:
@@ -280,3 +304,7 @@ network can spend that GPU. That is a deliberate trade — the head reaches the 
 the LAN, and `OLLAMA_HOST` takes exactly one address — but it is wider than the tailnet
 that the rest of this project assumes. On a network you do not control, put a firewall
 rule in front of 11434.
+
+The same is true of the control listener on 8790: anyone on the LAN can start or stop
+the stream. It accepts two fixed verbs and nothing else, and its account is granted
+exactly the units those verbs name, so that is all anyone can do with it.

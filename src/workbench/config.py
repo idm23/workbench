@@ -855,6 +855,35 @@ def deploy_unit_name() -> str:
     return f"{service_name()}-deploy"
 
 
+#: Where a node's control listener answers. Fixed rather than configured, like
+#: the model server's port, so a node advertises addresses rather than URLs and
+#: the head that presses a button and the node that hears it cannot disagree.
+CONTROL_PORT = 8790
+
+#: The client node's stream, and the gaming account's Steam. Not instance
+#: scoped: each is one screen or one person's session on one machine, and the
+#: control listener, its polkit grant and the installer all have to name the
+#: same unit — which is why the names live here rather than in `install_node`.
+CLIENT_UNIT_NAME = "workbench-client.service"
+STEAM_UNIT_NAME = "workbench-steam.service"
+
+
+def node_control_unit_name() -> str:
+    """The listener a head presses a node's buttons through."""
+    return f"{service_name()}-node"
+
+
+def steam_up_unit_name() -> str:
+    """The system unit that starts the gaming account's Steam.
+
+    A system unit because Steam is a *user* unit of a person's account, and the
+    listener runs as the service account, which cannot reach another user's
+    manager. Root can (`systemctl --user -M <user>@`), so the listener is
+    granted this one unit by polkit and the unit does the reaching.
+    """
+    return f"{service_name()}-steam-up"
+
+
 def gaming_unit_name() -> str:
     """The switch that takes this node's GPU away from Workbench.
 

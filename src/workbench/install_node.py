@@ -38,9 +38,11 @@ from pathlib import Path
 from workbench import render
 from workbench.config import (
     CAPABILITIES,
+    CLIENT_UNIT_NAME,
     DEFAULT_FAN_TEMP_MILLICELSIUS,
     INFERENCE,
     ROLE_NODE,
+    STEAM_UNIT_NAME,
     declared_capabilities,
     deploy_branch,
     fan_gpio,
@@ -66,6 +68,7 @@ from workbench.install import (
     build_environment,
     check_invocation,
     check_prerequisites,
+    converge_node_control,
     enable_deploy_timer,
     ensure_data_directory,
     ensure_service_account,
@@ -73,6 +76,7 @@ from workbench.install import (
     hand_off_to,
     info,
     install_gaming_rule,
+    install_node_rule,
     install_units,
     needs_relocation,
     record_capabilities,
@@ -834,7 +838,6 @@ def install_steam() -> bool:
 #: it. A gaming node installed Steam and then never once ran it, so the first
 #: person to open a stream found no Steam at all - and running it by hand found
 #: the two things below, neither of which any page reported.
-STEAM_UNIT_NAME = "workbench-steam.service"
 
 #: Big Picture, because the only screen a gaming node has is a television and
 #: the only input is a controller. `-cef-disable-gpu` because Big Picture on
@@ -1272,7 +1275,6 @@ CLIENT_PACKAGES = (
 #: it would deserve more thought, which is why it is not granted there.
 CLIENT_GROUPS = ("video", "render", "input", "audio", "systemd-journal")
 
-CLIENT_UNIT_NAME = "workbench-client.service"
 
 #: Moonlight Embedded, built from source. `moonlight-qt` was here first and is
 #: disqualified, for one reason with three faces: **it cannot be driven from a
@@ -1294,6 +1296,34 @@ MOONLIGHT_EMBEDDED_REPO = "https://github.com/moonlight-stream/moonlight-embedde
 #: checkout, because the checkout is what the deploy timer fast-forwards and a
 #: build tree in it would make every deploy refuse as "dirty".
 MOONLIGHT_BUILD_DIR = "moonlight-embedded"
+
+
+#: The Switch Pro Controller as Moonlight Embedded should read it. It ships
+#: `gamecontrollerdb.txt` and that has no line for this controller's version
+#: (`8001`) under `hid-nintendo`, and no default to fall back on either, so
+#: every button went through a guess: face buttons swapped, triggers misplaced,
+#: and Home moving the mouse. Worked out from the button and axis codes the
+#: controller itself reports on the Pi, and confirmed with a controller in hand.
+#:
+#: The face buttons follow the labels, not the positions. The first version was
+#: positional - the Xbox convention, bottom button confirms - and on the
+#: television that read as A and B swapped, X and Y too, for someone holding a
+#: controller that says A on the right. `hid-nintendo` reports the buttons by
+#: position (b0 south, b1 east, b2 north, b3 west), so A is b1.
+#:
+#: It only applies to a controller SDL reads through evdev, which is why the
+#: unit also sets `SDL_JOYSTICK_HIDAPI=0`. After a fresh Bluetooth pairing,
+#: Moonlight opened the controller's `/dev/hidraw` node instead, through SDL's
+#: own Switch driver: the mapping was silently unused, the face buttons came
+#: out in SDL's layout, and it logged that it could not enable vibration or
+#: load stick calibration.
+PRO_CONTROLLER_MAPPING = (
+    "050000007e0500000920000001800000,Nintendo Switch Pro Controller (hid-nintendo),"
+    "a:b1,b:b0,x:b2,y:b3,misc1:b4,leftshoulder:b5,rightshoulder:b6,"
+    "lefttrigger:b7,righttrigger:b8,back:b9,start:b10,guide:b11,"
+    "leftstick:b12,rightstick:b13,leftx:a0,lefty:a1,rightx:a2,righty:a3,"
+    "dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"
+)
 
 
 def _client_unit(host: str, account: pwd.struct_passwd) -> str:
@@ -1327,6 +1357,12 @@ SupplementaryGroups={" ".join(CLIENT_GROUPS)}
 # XDG_RUNTIME_DIR is for audio: PipeWire's socket lives there, and without it
 # the stream plays perfect video in silence.
 Environment=XDG_RUNTIME_DIR=/run/user/{account.pw_uid}
+# Controllers Moonlight's own database does not know - see the installer.
+Environment="SDL_GAMECONTROLLERCONFIG={PRO_CONTROLLER_MAPPING}"
+# Read controllers through the kernel's driver, so the mapping above applies.
+# SDL otherwise opens a Pro Controller's raw HID device itself, ignores the
+# mapping, applies its own layout, and contends with hid-nintendo for it.
+Environment=SDL_JOYSTICK_HIDAPI=0
 ExecStart=/usr/local/bin/moonlight stream {host} -app Desktop -1080 -fps 60 -bitrate 20000
 Restart=on-failure
 RestartSec=5
@@ -1729,7 +1765,9 @@ def main() -> int:
         if not systemd_is_running():
             logger.info("\n%s\n", paint(BOLD, "Node install complete (without any units)."))
         else:
-            install_units()
+            changed = install_units()
+            install_node_rule()
+            converge_node_control(changed)
             enable_deploy_timer()
 
             if serving:

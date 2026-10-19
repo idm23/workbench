@@ -353,3 +353,99 @@ def test_a_node_offering_nothing_keeps_its_remembered_address(db, monkeypatch):
     register(db, a_node(capabilities=[]))
 
     assert db.query(Node).one().last_good_address == "192.168.1.155"
+
+
+# --- The Play button ---------------------------------------------------------
+
+
+class _Answer:
+    def __init__(self, status: int, body: dict):
+        self.status_code = status
+        self._body = body
+
+    def json(self) -> dict:
+        return self._body
+
+
+def _screens(db):
+    pi = register(
+        db, a_node(name="homebox-node-2", addresses=["192.168.1.171"], capabilities=["client"])
+    )
+    laptop = register(db, a_node(capabilities=[INFERENCE, GAMING]))
+    return pi, laptop
+
+
+def test_play_starts_steam_before_the_stream(db, monkeypatch):
+    pressed: list[str] = []
+    monkeypatch.setattr(
+        nodes.httpx, "post", lambda url, timeout: pressed.append(url) or _Answer(200, {"ok": True})
+    )
+    pi, _laptop = _screens(db)
+
+    assert nodes.play_on(db, pi) == []
+    assert pressed == [
+        "http://192.168.1.155:8790/stream/start",
+        "http://192.168.1.171:8790/stream/start",
+    ]
+
+
+def test_an_unreachable_address_falls_through_to_the_next(db, monkeypatch):
+    pressed: list[str] = []
+
+    def post(url, timeout):
+        pressed.append(url)
+        if "192.168" in url:
+            raise nodes.httpx.ConnectError("no route")
+        return _Answer(200, {"ok": True})
+
+    monkeypatch.setattr(nodes.httpx, "post", post)
+    _pi, laptop = _screens(db)
+
+    assert nodes._press(laptop, "start") is None
+    assert pressed[-1] == "http://100.120.132.42:8790/stream/start"
+
+
+def test_a_refusal_is_reported_rather_than_retried(db, monkeypatch):
+    """A node that answered has said something true; asking it again by
+    another route would only say it twice."""
+    pressed: list[str] = []
+    monkeypatch.setattr(
+        nodes.httpx,
+        "post",
+        lambda url, timeout: (
+            pressed.append(url) or _Answer(502, {"ok": False, "failed": ["Access denied"]})
+        ),
+    )
+    _pi, laptop = _screens(db)
+
+    assert nodes._press(laptop, "start") == "homebox-node-1: Access denied"
+    assert len(pressed) == 1
+
+
+def test_the_button_reports_back_on_the_services_page(client, monkeypatch):
+    monkeypatch.setattr(nodes.httpx, "post", lambda url, timeout: _Answer(200, {"ok": True}))
+    client.post(
+        "/api/nodes",
+        json={"name": "homebox-node-2", "addresses": ["192.168.1.171"], "capabilities": ["client"]},
+    )
+
+    page = client.get("/services").text
+    assert "Play on this screen" in page
+
+    answer = client.post("/nodes/1/stream", data={"action": "start"})
+    assert answer.status_code == 200
+    assert "Playing on homebox-node-2." in answer.text
+
+
+def test_a_node_with_no_screen_has_no_button(client):
+    client.post(
+        "/api/nodes",
+        json={
+            "name": "homebox-node-1",
+            "addresses": ["192.168.1.155"],
+            "capabilities": ["inference"],
+        },
+    )
+
+    assert "Play on this screen" not in client.get("/services").text
+    assert client.post("/nodes/1/stream", data={"action": "start"}).status_code == 404

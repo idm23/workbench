@@ -26,6 +26,7 @@ from workbench.config import (
     is_node,
     role,
     role_marker,
+    steam_up_unit_name,
 )
 
 
@@ -80,15 +81,16 @@ def test_a_head_installs_the_app_the_deployer_and_the_run_template(marker):
     assert "workbench-run@.service" in names
 
 
-def test_a_node_installs_the_deployer_and_nothing_else(marker):
+def test_a_node_installs_the_deployer_its_listener_and_nothing_else(marker):
     """No app, because there is no database to serve; no run template, because
-    runs execute on the head. Only the timer, which is not optional: a node
-    that cannot update itself is a manual step for as long as it exists."""
+    runs execute on the head. The timer, which is not optional: a node that
+    cannot update itself is a manual step for as long as it exists. And the
+    listener the head's Play button reaches it through."""
     marker.write_text("node\n")
 
     names = {unit for unit, _template in install.units()}
 
-    assert names == {"workbench-deploy.service", "workbench-deploy.timer"}
+    assert names == {"workbench-deploy.service", "workbench-deploy.timer", "workbench-node.service"}
 
 
 def test_a_node_is_asked_about_its_gpu_and_its_model_server(marker):
@@ -504,3 +506,20 @@ def test_not_being_able_to_ask_converges_rather_than_stalls(monkeypatch, caplog)
         assert deploy.gpu_is_busy_elsewhere() is False
 
     assert "systemctl vanished" in caplog.text
+
+
+def test_a_gaming_node_with_a_player_gets_the_unit_that_starts_their_steam(offering, monkeypatch):
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    monkeypatch.setenv("WORKBENCH_GAMING_USER", "ian")
+    offering.write_text("inference,gaming\n")
+
+    assert f"{steam_up_unit_name()}.service" in [name for name, _ in install.units()]
+
+
+def test_no_steam_unit_without_a_player_to_start_it_for(offering, monkeypatch):
+    """It names the account in its command line; with none it would name `@`."""
+    monkeypatch.setenv("WORKBENCH_ROLE", "node")
+    monkeypatch.delenv("WORKBENCH_GAMING_USER", raising=False)
+    offering.write_text("inference,gaming\n")
+
+    assert f"{steam_up_unit_name()}.service" not in [name for name, _ in install.units()]
