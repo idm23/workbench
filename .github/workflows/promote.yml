@@ -14,9 +14,10 @@ on:
   status
 
 # Nothing here needs the checked-out code — it only calls the pull request
-# API — so this is the only scope granted. Deliberately not contents: read.
+# API, and dispatches the guard (actions: write). Deliberately not contents.
 permissions:
   pull-requests: write
+  actions: write
 
 # A second status landing while this is mid-run should not race it.
 concurrency:
@@ -45,6 +46,17 @@ jobs:
             }
 
             const { owner, repo } = context.repo;
+
+            // A PR this token opens starts no `pull_request` workflow, so the
+            // guard is dispatched instead — on every success, not only when a
+            // PR is opened, because staging moving under an open PR is a new
+            // head commit with no guard result either.
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: 'guard-main.yml',
+              ref: 'staging',
+            });
 
             const open = await github.rest.pulls.list({
               owner,
