@@ -436,8 +436,12 @@ binary — and hands it the pty itself. Named with this machine's hostname rathe
 CLI's own auto-generated name, so a person reading their Remote Control session list from
 a phone recognises which one it is.
 
-**A fresh login hits that setup screen and sits there, which is "active" and not useful —
-the exact split the two doctor checks exist to catch.** `Restart=always` protects against
+**A fresh login hit that setup screen and sat there, which is "active" and not useful —
+the exact split the two doctor checks exist to catch.** `auth login` signs in without
+finishing onboarding, so the wrapper now answers it first:
+`agents.claude.skip_first_run_setup` merges `hasCompletedOnboarding`, a theme, and trust
+for the session's own empty workspace into the login's `.claude.json` — measured against
+2.1.239 to open straight to the prompt. What follows is the history of the problem. `Restart=always` protects against
 a genuine crash — the CLI dying, an unhandled error in the wrapper — but does nothing for
 this failure, because nothing crashed: the process is simply waiting on a keystroke nobody
 can supply over a unit with no terminal. The fix is the same one-time manual step every

@@ -13,7 +13,14 @@ unrelated change elsewhere in the app — see the function's own docstring for
 why that restraint matters for a unit that may be a person's live session.
 """
 
+import pytest
+
 from workbench import install, remote_control
+
+
+@pytest.fixture(autouse=True)
+def no_config_dir(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
 def waitstatus(*, exit_code: int | None = None, signal: int | None = None) -> int:
@@ -71,3 +78,21 @@ def test_converge_remote_control_unit_leaves_an_unchanged_unit_alone(monkeypatch
     install.converge_remote_control_unit({"other.service"})
 
     assert calls == []
+
+
+def test_main_answers_first_run_setup_before_starting(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    order: list[str] = []
+    monkeypatch.setattr(
+        remote_control, "skip_first_run_setup", lambda cfg, ws: order.append(f"setup {cfg}")
+    )
+    monkeypatch.setattr(
+        remote_control, "remote_control_argv", lambda: ["claude", "--remote-control"]
+    )
+    monkeypatch.setattr(
+        remote_control.pty, "spawn", lambda argv: order.append("spawn") or waitstatus(exit_code=0)
+    )
+
+    assert remote_control.main() == 0
+    assert order == [f"setup {tmp_path}", "spawn"]
