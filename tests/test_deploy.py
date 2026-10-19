@@ -11,6 +11,7 @@ until much later. All of it runs against a real git remote here.
 on the server rather than in this file.
 """
 
+import ast
 import importlib.util
 import sqlite3
 import subprocess
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import workbench.deploy as deploy_module
 from workbench.deploy import (
     ACCEPTANCE_EXIT_NOT_REPORTED,
     Advanced,
@@ -823,3 +825,24 @@ def test_a_deploy_survives_push_keys_it_cannot_generate(monkeypatch, caplog):
         assert refresh_units() is None
 
     assert "no /etc/workbench" in caplog.text
+
+
+def test_the_deployer_imports_every_workbench_module_before_it_pulls():
+    # A function-level import loads the *new* module off disk beside an *old*
+    # `workbench.config` already in sys.modules, and dies on a name only the new
+    # config has. Happened twice: once through `install`, once through
+    # `install_node`. See "A process that pulls new code must not lazily import
+    # it" in docs/learning-notes.md.
+    tree = ast.parse(Path(deploy_module.__file__).read_text())
+    late = [
+        f"line {node.lineno}"
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for node in ast.walk(function)
+        if (isinstance(node, ast.ImportFrom) and (node.module or "").startswith("workbench"))
+        or (
+            isinstance(node, ast.Import)
+            and any(alias.name.startswith("workbench") for alias in node.names)
+        )
+    ]
+    assert not late, f"deploy.py imports workbench code inside a function: {late}"

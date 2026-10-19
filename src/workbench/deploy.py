@@ -36,7 +36,7 @@ from pathlib import Path
 # attribute at call time so that a test patching `workbench.install.x` is
 # actually patching what this calls — with names bound at import, it would not
 # be, and the first thing to notice would be a unit test shelling out to sudo.
-from workbench import install, render
+from workbench import install, install_node, render
 from workbench.config import (
     data_dir,
     database_path,
@@ -404,8 +404,6 @@ def _converge_model_server() -> None:
     on the first tick that found no `ollama` - the installer had learned to ask
     which capabilities a node declared, and the deploy had not.
     """
-    from workbench import install_node
-
     if gpu_is_busy_elsewhere():
         # The one thing a deploy must not converge mid-game. Rewriting the
         # drop-in restarts ollama, which takes the VRAM back from underneath
@@ -439,8 +437,6 @@ def converge_node() -> DeployFailed | None:
     doctor reports the missing model instead, which is the same split as the
     GPU driver.
     """
-    from workbench import install_node
-
     if is_inference_node():
         _converge_model_server()
 
