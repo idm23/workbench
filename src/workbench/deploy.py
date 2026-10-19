@@ -487,6 +487,34 @@ def converge_remote_control_enabled() -> bool:
     return True
 
 
+def revive_failed_remote_control() -> bool:
+    """Start the standing session again if systemd has given up on it.
+
+    Returns whether it did. `Restart=always` stops at the start limit, and a
+    unit in `failed` then stays down for good: exactly what happened when the
+    first start a deploy caused crashed on a missing directory, five times in
+    ten seconds, and the fix arriving five minutes later changed nothing.
+    Only `failed`: a session someone stopped is `inactive`, and one someone
+    disabled is left alone, so neither is undone.
+    """
+    unit = f"{remote_control_unit_name()}.service"
+    shown = _run(
+        ["systemctl", "show", unit, "--property=ActiveState,UnitFileState"],
+        as_owner=False,
+        timeout=RESTART_TIMEOUT_SECONDS,
+    )
+    state = dict(line.split("=", 1) for line in (shown.stdout or "").splitlines() if "=" in line)
+    if state.get("ActiveState") != "failed" or state.get("UnitFileState") != "enabled":
+        return False
+    _run(["systemctl", "reset-failed", unit], as_owner=False, timeout=RESTART_TIMEOUT_SECONDS)
+    started = _run(["systemctl", "start", unit], as_owner=False, timeout=RESTART_TIMEOUT_SECONDS)
+    if started.returncode != 0:
+        logger.warning("Could not restart %s: %s", unit, (started.stderr or "").strip())
+        return False
+    logger.info("Restarted %s, which systemd had given up on.", unit)
+    return True
+
+
 def converge_node() -> DeployFailed | None:
     """Bring a node back in line with what the repo says, and say it is alive.
 
@@ -854,6 +882,7 @@ def refresh_units() -> DeployFailed | None:
             # at NAMESPACE, every two seconds, forever.
             install.ensure_remote_control_workspace(install._service_passwd())
             converge_remote_control_enabled()
+            revive_failed_remote_control()
         except Exception as error:
             logger.warning("Could not enable the remote-control session: %s", error)
 
