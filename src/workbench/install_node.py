@@ -72,6 +72,7 @@ from workbench.install import (
     enable_deploy_timer,
     ensure_data_directory,
     ensure_service_account,
+    ensure_tailnet,
     ensure_uv_for_owner,
     hand_off_to,
     info,
@@ -1745,6 +1746,12 @@ def main() -> int:
             check_gpu()
 
         become_root(ENTRY)
+
+        # Before relocating, so the copy that is handed off to finds the machine
+        # already joined and does nothing. Spending the key twice is harmless;
+        # asking a person to approve a browser login twice is not.
+        step("Joining the tailnet")
+        ensure_tailnet()
 
         if needs_relocation():
             step("Preparing the service account")
