@@ -56,8 +56,11 @@ the reproducibility promise for this role really begins one step earlier:
 ```sh
 sudo apt update && sudo apt install -y git curl
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up          # prints a URL; approve the machine
+sudo tailscale up --ssh    # prints a URL; approve the machine
 ```
+
+Or skip the browser entirely: hand `install.sh` an auth key and it installs Tailscale and
+joins on its own — see *Joining the tailnet without a browser* below.
 
 **Tailscale before `install.sh`, not after.** `--head` is a MagicDNS name, so without the
 tailnet up the install completes and then fails to register, and you run it twice.
@@ -311,6 +314,71 @@ journalctl -u ollama -f
 | Runs fail asking for a model the node hasn't got | `WORKBENCH_LOCAL_MODEL` is set on the head and overrides what the node reports — unset it, or pull that model on the node |
 | A plan is fluent and about the wrong thing, a run replies with nothing, or the model asks whether there has been a user query yet | The model lost its task to a too-small context window. The run's log says so ("dropping the oldest messages to fit"). Raise `WORKBENCH_INFERENCE_CONTEXT_TOKENS` in `/etc/workbench/env` on the node; the next deploy tick rewrites the drop-in and restarts Ollama. `ollama ps` on the node shows the window actually in use |
 | A 1 TB machine reports a few dozen GB free | Ubuntu Server's installer gives `/` a 100 GB logical volume and leaves the rest of the disk unallocated. The doctor names the volume and the command: `sudo lvextend -r -l +100%FREE <volume>`, which grows it and its filesystem while running |
+
+## Joining the tailnet without a browser
+
+Every install — head, node or external — takes `--tailscale-auth-key <key>` (or
+`WORKBENCH_TAILSCALE_AUTH_KEY`). Given one, a machine that is not yet on a tailnet installs
+Tailscale if needed and runs `tailscale up --auth-key … --advertise-tags=tag:workbench --ssh`.
+A machine already on one is never re-authenticated, however it got there: doing that over
+an SSH session that rides the tailnet is how an install cuts off its own terminal.
+
+The tag is the point, more than the key. A device logged in *as a person* expires after
+180 days and asks for the browser again. A **tagged** device belongs to the tailnet, and
+its key never expires. `--tailscale-tag` picks a different tag.
+
+**Once, in the admin console:**
+
+1. *Settings → Keys → Generate auth key*: **Reusable**, **Pre-approved**, tag
+   `tag:workbench`. It is a secret that adds machines to your network, so give it a short
+   expiry and mint a new one when you next need it.
+2. *Access controls*: own the tag, and let SSH through without a browser re-check:
+
+   ```json
+   "tagOwners": { "tag:workbench": ["autogroup:admin"] },
+   "ssh": [
+     { "action": "accept", "src": ["autogroup:member", "tag:workbench"],
+       "dst": ["tag:workbench"], "users": ["autogroup:nonroot", "root"] },
+     { "action": "accept", "src": ["autogroup:member"],
+       "dst": ["autogroup:self"], "users": ["autogroup:nonroot", "root"] }
+   ]
+   ```
+
+   `"check"` is the default and the reason for the recurring *"approve it at
+   login.tailscale.com"*: it re-asks every 12 hours, from every device. `"accept"` stops
+   asking and gives up exactly that second factor, which is right only while every device
+   on the tailnet is one you trust.
+3. Machines joined before this are owned by you, not tagged. For each: *Machines → ⋯ →
+   Edit ACL tags → `tag:workbench`* (which also stops its key expiring), or just *Disable
+   key expiry*.
+
+The doctor reports every machine's key expiry (`tailnet`, or `home-tailnet` on an external
+machine) and warns 30 days out, because nothing on a device says it is about to drop off.
+
+## External machines
+
+A machine that lives somewhere else and only needs to *reach* home — a work laptop on its
+employer's tailnet is the first. It is neither head nor node: it runs no Workbench units,
+holds no deployment, and lends nothing, so it registers with nobody.
+
+```sh
+./install.sh --role=external --ssh-hosts 'homebox-*' [--tailscale-auth-key <key>]
+```
+
+Run as yourself, never with sudo — everything it installs is yours:
+
+- **`~/.config/systemd/user/tailscaled-home.service`**: a second `tailscaled`, logged in to
+  the home tailnet, with userspace networking. It creates no interface and touches no
+  routes or DNS, so the system daemon stays on the other tailnet exactly as its owner set
+  it up, and only programs pointed at this daemon's socket reach home.
+- **A managed block at the top of `~/.ssh/config`** routing the `--ssh-hosts` patterns
+  through that daemon with `tailscale nc`. Everything outside the block is left alone.
+  Recorded in `data/ssh-hosts`, so a re-run need not repeat the flag.
+
+It joins *without* `--ssh`: an external machine is a way in, not somewhere to be reached.
+There is no deploy timer, because the checkout is usually someone's working clone; re-run
+the install after a pull. Prerequisite: `tailscale` and `tailscaled` installed, which needs
+root once.
 
 ## The security note worth reading once
 

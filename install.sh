@@ -4,6 +4,10 @@
 #
 #   ./install.sh              # the machine that runs Workbench
 #   ./install.sh --role=node  # a machine that lends it a GPU
+#   ./install.sh --role=external --ssh-hosts 'homebox-*'
+#                             # a laptop elsewhere that only needs to reach home
+#
+# Any of them joins the home tailnet unattended given --tailscale-auth-key.
 #
 # This script exists only to get `uv` onto the machine. Everything else lives
 # in src/workbench/install.py, which is Python: testable, and able to import
@@ -42,11 +46,14 @@ for arg in "$@"; do
     case "$arg" in
         --role=node|node) ROLE="node" ;;
         --role=head|head) ROLE="head" ;;
+        --role=external|external) ROLE="external" ;;
     esac
 done
 
 if [ "$ROLE" = "node" ]; then
     ENTRY="workbench.install_node"
+elif [ "$ROLE" = "external" ]; then
+    ENTRY="workbench.install_external"
 else
     ENTRY="workbench.install_core"
 fi

@@ -68,7 +68,12 @@ prove it repeats. A setup step that creeps outside `install.sh` makes that test 
 Two things are deliberately *not* automated, and are decisions rather than oversights.
 Both need a browser login against an account no script can know about:
 
-- **Joining a Tailscale network.**
+- **Joining a Tailscale network** — *unless handed a key.* Every install takes
+  `--tailscale-auth-key`, joins tagged `tag:workbench` with Tailscale SSH on, and never
+  re-authenticates a machine already joined. Tagged is the part that matters: a device
+  logged in as a person expires every 180 days and asks for a browser again, on every
+  machine, which is a manual step on a clock nobody watches. Without a key, the doctor
+  names the login exactly as before. `docs/nodes.md` has the one-time policy changes.
 - **Signing the agent in.** Under a subscription the credential is an OAuth token minted
   by an interactive login, as the service account.
 
@@ -968,6 +973,16 @@ comment already worried about exactly this shape for a power cut and solved that
 never enabling the unit; this is the same hole through a different door, and closing it
 means deciding how long a disconnected session should hold a GPU. Recorded as an open
 question below rather than guessed at.
+
+**A third kind of machine: external.** `./install.sh --role=external` is for a machine that
+lives elsewhere and only needs to reach home — the first is a work laptop that must stay on
+its employer's tailnet. It runs as the person, never root: a userspace `tailscaled` as a
+*user* unit, logged in to the home tailnet, touching no interface, route or DNS of the other
+one; and a fenced block at the top of `~/.ssh/config` sending the recorded host patterns
+through it. No deployment, no timer (the checkout is someone's working clone), and no
+registration, because it lends nothing and nothing needs to know where it is. Its doctor
+asks only two things: is the home daemon logged in and not about to expire, and does ssh
+reach anything through it.
 
 ## Deployment
 
