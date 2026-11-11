@@ -95,7 +95,12 @@ def worktrees_dir() -> Path:
 #: units, its deploy steps, its checks) a role is what those all key off.
 ROLE_HEAD = "head"
 ROLE_NODE = "node"
-ROLES = (ROLE_HEAD, ROLE_NODE)
+#: A machine that is neither: it lives somewhere other than the home network,
+#: usually on another tailnet, and only needs to *reach* the head and its nodes.
+#: A work laptop is the first. It runs no Workbench units, holds no deployment,
+#: and lends nothing - it is a person's way in, and that is the whole of it.
+ROLE_EXTERNAL = "external"
+ROLES = (ROLE_HEAD, ROLE_NODE, ROLE_EXTERNAL)
 
 
 def role_marker() -> Path:
@@ -133,6 +138,31 @@ def role() -> str:
 
 def is_node() -> bool:
     return role() == ROLE_NODE
+
+
+def is_external() -> bool:
+    return role() == ROLE_EXTERNAL
+
+
+def ssh_hosts_marker() -> Path:
+    """The file recording which SSH host patterns an external machine routes home."""
+    return data_dir() / "ssh-hosts"
+
+
+def ssh_hosts() -> list[str]:
+    """The `Host` patterns this external machine sends through the home tailnet.
+
+    Recorded rather than derived from the tailnet's peer list, because a pattern
+    (`homebox-*`) keeps working when a node is added, where a list of names
+    written at install time would quietly miss the newest machine.
+    """
+    configured = os.environ.get("WORKBENCH_SSH_HOSTS", "").strip()
+    if not configured:
+        try:
+            configured = ssh_hosts_marker().read_text(encoding="utf-8").strip()
+        except OSError:
+            return []
+    return configured.replace(",", " ").split()
 
 
 def head_marker() -> Path:

@@ -44,6 +44,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from workbench import tailnet
 from workbench.config import (
     CLIENT_UNIT_NAME,
     RUN_TIMEOUT_SECONDS,
@@ -1474,6 +1475,66 @@ def wait_for_health() -> None:
     if error is not None:
         raise InstallError(error)
     info("healthy")
+
+
+def ensure_tailnet() -> None:
+    """Put this machine on the home tailnet, with Tailscale SSH, if it can be.
+
+    Three outcomes, and only one of them does anything a person did not ask for:
+
+    - **Already joined**: Tailscale SSH is switched on (idempotent) and nothing
+      else is touched. A joined machine is never re-authenticated by an install,
+      however it was joined, because re-authenticating over a session that rides
+      the tailnet is how an install cuts off its own terminal.
+    - **Handed a key**: Tailscale is installed if missing, and the machine joins
+      tagged, which also means its key never expires.
+    - **Neither**: nothing. The doctor names the login command, as before.
+
+    Never fails the install. A machine off the tailnet still installs perfectly,
+    and is reachable on the LAN in the meantime.
+    """
+    key = tailnet.auth_key()
+    status = tailnet.read_status()
+
+    if isinstance(status, str) and shutil.which("tailscale") is None:
+        if key is None:
+            info("tailscale is not installed; joining the tailnet is left to a person.")
+            return
+        info("installing Tailscale")
+        # Streamed: a package repository being added and a download behind a
+        # captured pipe look exactly like a hang. Runs as root (`become_root`).
+        installed = subprocess.run(
+            ["sh", "-c", f"curl -fsSL {tailnet.TAILSCALE_INSTALLER} | sh"], check=False
+        )
+        if installed.returncode != 0:
+            warn("Tailscale did not install, so this machine was not joined to the tailnet.")
+            return
+        status = tailnet.read_status()
+
+    if not isinstance(status, str) and status.running:
+        where = f" '{status.tailnet}'" if status.tailnet else ""
+        info(f"already on the tailnet{where} as {status.hostname}")
+        ssh = subprocess.run(
+            ["tailscale", "set", "--ssh"], capture_output=True, text=True, check=False
+        )
+        if ssh.returncode != 0:
+            warn(f"could not switch on Tailscale SSH: {(ssh.stderr or ssh.stdout).strip()}")
+        return
+
+    if key is None:
+        info("not on a tailnet. Re-run with --tailscale-auth-key to join unattended;")
+        info("the doctor below names the browser login otherwise.")
+        return
+
+    if not systemd_is_running():
+        warn("no systemd here, so tailscaled is not running and the key was not spent.")
+        return
+
+    outcome = tailnet.join(key)
+    if isinstance(outcome, tailnet.NotJoined):
+        warn(outcome.reason)
+        return
+    info(f"joined '{outcome.status.tailnet}' as {outcome.status.hostname}, tagged {tailnet.tag()}")
 
 
 def report_outstanding() -> bool:

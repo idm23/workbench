@@ -30,6 +30,7 @@ about what they should arrange. That is the difference between this and the
 documentation it replaces.
 """
 
+import fnmatch
 import grp
 import json
 import logging
@@ -50,6 +51,7 @@ from pathlib import Path
 
 import httpx
 
+from workbench import tailnet
 from workbench.config import (
     GITHUB_TOKEN_SETTING,
     default_agent_backend,
@@ -59,6 +61,7 @@ from workbench.config import (
     head_url,
     instance,
     is_client_node,
+    is_external,
     is_gaming_node,
     is_inference_node,
     is_node,
@@ -68,6 +71,7 @@ from workbench.config import (
     repo_root,
     restore_from,
     service_account,
+    ssh_hosts,
     stream_host,
 )
 from workbench.logs import BOLD, GREEN, RED, YELLOW, configure_console_logging, paint
@@ -106,6 +110,11 @@ TOKEN_EXPIRY_WARNING = timedelta(days=14)
 #: A warning rather than a failure on purpose: nothing is broken yet, runs
 #: still work, and the only cost of ignoring it is that it becomes a failure.
 RENEWAL_WARNING = timedelta(days=3)
+
+#: How long before a tailnet device key expires this starts saying so. Long,
+#: because the remedy is a person at an admin console, and the cost of missing
+#: it is a machine that silently drops off the network everything reaches it by.
+TAILNET_KEY_WARNING = timedelta(days=30)
 
 
 class CheckState(StrEnum):
@@ -1111,6 +1120,172 @@ def _serves_port(config: object, wanted: int) -> bool:
     return False
 
 
+def _tailnet_check(
+    key: str, title: str, *, socket: Path | None, login: str, missing_daemon_fix: str | None
+) -> Check:
+    """Whether a daemon is logged in, and whether it will stay that way.
+
+    One check rather than two, because the second question only exists once
+    the first is answered yes, and a key-expiry line under a daemon that is not
+    running is noise.
+
+    Expiry is the part that was missing. A device logged in as a person expires
+    after 180 days and asks for a browser again; a tagged one, or one whose
+    expiry was disabled in the admin console, never does. Nothing on the device
+    says which it is until the day it drops off, so this does.
+    """
+    status = tailnet.read_status(socket)
+    if isinstance(status, str):
+        installed = shutil.which("tailscale") is not None
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL if installed and socket is not None else CheckState.UNKNOWN,
+            detail=status,
+            fix=missing_daemon_fix if installed else None,
+        )
+
+    if not status.running:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL if socket is not None else CheckState.WARN,
+            detail=(
+                f"tailscale says {status.backend_state or 'nothing'}, "
+                "so this machine is off the tailnet."
+            ),
+            fix=login,
+        )
+
+    where = f"as {status.hostname}"
+    if status.tailnet:
+        where = f"on '{status.tailnet}' {where}"
+    if status.key_expiry is None:
+        why = f"tagged {', '.join(status.tags)}" if status.tags else "expiry disabled"
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.OK,
+            detail=f"Logged in {where}; its key never expires ({why}).",
+        )
+
+    left = status.key_expiry - datetime.now(UTC)
+    when = status.key_expiry.astimezone().strftime("%Y-%m-%d")
+    remedy = (
+        f"In the admin console, Machines → {status.hostname} → Disable key expiry "
+        f"(or tag it {tailnet.DEFAULT_TAG}) and this never comes back."
+    )
+    if left <= timedelta(0):
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.FAIL,
+            detail=f"Its key expired on {when}. {remedy}",
+            fix=login,
+        )
+    if left <= TAILNET_KEY_WARNING:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=f"Logged in {where}, but its key expires on {when}. {remedy}",
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=f"Logged in {where}; key expires {when}. {remedy}",
+    )
+
+
+def check_tailnet() -> Check:
+    """This machine's own place on the home tailnet. Asked of heads and nodes."""
+    return _tailnet_check(
+        "tailnet",
+        "This machine is on the tailnet",
+        socket=None,
+        login="./install.sh --tailscale-auth-key <key>   # or: sudo tailscale up --ssh",
+        missing_daemon_fix="sudo systemctl enable --now tailscaled",
+    )
+
+
+def check_home_tailnet() -> Check:
+    """The external machine's second daemon, the one logged in to home."""
+    socket = tailnet.external_socket()
+    return _tailnet_check(
+        "home-tailnet",
+        "This machine can reach the home tailnet",
+        socket=socket,
+        login=tailnet.login_command(socket=socket, hostname=tailnet.external_hostname(), ssh=False),
+        missing_daemon_fix=f"systemctl --user enable --now {tailnet.EXTERNAL_UNIT}",
+    )
+
+
+def check_home_ssh_route() -> Check:
+    """Whether `ssh <home machine>` from here actually goes through that daemon.
+
+    Reads the person's own `~/.ssh/config` for the block the installer owns,
+    and the home tailnet for which machines it would reach. A pattern that
+    matches nothing online is a warning rather than a failure: the machines may
+    simply be off.
+    """
+    key = "home-ssh-route"
+    title = "ssh routes home through that daemon"
+    hosts = ssh_hosts()
+    if not hosts:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail="No ssh host patterns are recorded, so nothing is routed home.",
+            fix="./install.sh --role=external --ssh-hosts 'homebox-*'",
+        )
+
+    from workbench.install_external import SSH_BLOCK_START, ssh_config_path
+
+    try:
+        config = ssh_config_path().read_text(encoding="utf-8")
+    except OSError:
+        config = ""
+    if SSH_BLOCK_START not in config:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=f"{ssh_config_path()} has no managed block for {' '.join(hosts)}.",
+            fix="./install.sh --role=external",
+        )
+
+    status = tailnet.read_status(tailnet.external_socket())
+    if isinstance(status, str) or not status.running:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.UNKNOWN,
+            detail=f"Routing {' '.join(hosts)}; the home daemon is not up to say where to.",
+        )
+    matched = sorted(
+        name for name in status.peers if any(fnmatch.fnmatch(name, pattern) for pattern in hosts)
+    )
+    online = [name for name in matched if status.peers[name]]
+    if not online:
+        return Check(
+            key=key,
+            title=title,
+            state=CheckState.WARN,
+            detail=(
+                f"{' '.join(hosts)} matches no machine online on the home tailnet"
+                + (f" ({', '.join(matched)} are offline)." if matched else ".")
+            ),
+        )
+    return Check(
+        key=key,
+        title=title,
+        state=CheckState.OK,
+        detail=f"Reaches {', '.join(online)}.",
+    )
+
+
 #: The registry name of the backend that knows how to talk to a model served
 #: here. A node's whole job is to answer for it, so the check below asks that
 #: backend rather than reimplementing a probe — the same reason
@@ -2112,6 +2287,7 @@ HEAD_CHECKS = (
     check_github_token_works,
     check_owner_github_tokens,
     check_notification_keys,
+    check_tailnet,
     check_tailscale_serve,
     check_disk_allocated,
 )
@@ -2127,8 +2303,16 @@ HEAD_CHECKS = (
 NODE_CHECKS = (
     check_deployment,
     check_home_directory,
+    check_tailnet,
     check_head,
     check_disk_allocated,
+)
+
+#: What an external machine is asked. No deployment, no account, no head to
+#: report to: only whether it can get home, which is the one thing it is for.
+EXTERNAL_CHECKS = (
+    check_home_tailnet,
+    check_home_ssh_route,
 )
 
 #: Asked only of a node declared for `inference`. These used to be in
@@ -2149,6 +2333,8 @@ def checks_for_this_machine() -> tuple[Callable[[], Check], ...]:
     model: whether a node will answer. Asking it unconditionally would put a
     warning about worker nodes on every machine that has never wanted one.
     """
+    if is_external():
+        return EXTERNAL_CHECKS
     if is_node():
         checks = NODE_CHECKS
         if is_inference_node():

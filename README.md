@@ -54,6 +54,17 @@ the head drives, so a run can spend a GPU rather than a rate-limit window:
 That one installs Ollama, binds it where the head can reach it, pulls a model, and keeps itself
 updated. It runs no web app and holds no database. See `docs/nodes.md`.
 
+**On a laptop that lives somewhere else** (say, on an employer's tailnet), `--role=external`
+installs only what it takes to reach home: a second, userspace `tailscaled` logged in to the
+home tailnet, and an `~/.ssh/config` block routing home machines through it.
+
+```sh
+./install.sh --role=external --ssh-hosts 'homebox-*'
+```
+
+Any of the three joins the tailnet unattended, tagged so its key never expires, when given
+`--tailscale-auth-key`. See `docs/nodes.md` for the one-time admin-console setup.
+
 `install.sh` itself is a short shell bootstrap whose only job is getting `uv` onto the machine and
 picking which installer to hand off to — `install_core.py` or `install_node.py`, sharing everything
 in `install.py`. They import `workbench.config`, so the port and database path cannot drift from
